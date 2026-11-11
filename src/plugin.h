@@ -46,7 +46,7 @@ class ConnectionDialog;
 struct PluginState {
     const LogSquirlHostApi* api = nullptr; ///< Host API function table.
     void* handle = nullptr;                ///< Opaque plugin instance handle.
-    ConnectionDialog* dialog = nullptr;    ///< The NATS Monitor dialog, created on first use.
+    ConnectionDialog* dialog = nullptr;    ///< The NATS Monitor dialog, created by init.
     bool quitting = false; ///< LogSquirl is quitting (aboutToQuit), not just unloading the plugin.
     QString tempRoot;      ///< Where temporary directories go; empty: the system's (for tests).
 };

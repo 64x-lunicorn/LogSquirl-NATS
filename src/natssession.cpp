@@ -467,18 +467,18 @@ struct NatsSession::Worker {
             std::lock_guard<std::mutex> lock( shared->mutex );
             shared->stopping = true;
         }
-        bool released = true;
+        bool confirmed = true;
         if ( subscription ) {
             natsSubscription_Unsubscribe( subscription );
-            released = waitUntil( []( const Shared& s ) { return s.subscriptionDone; } );
+            confirmed = waitUntil( []( const Shared& s ) { return s.subscriptionDone; } );
         }
         if ( connection ) {
             natsConnection_Close( connection );
-            released = waitUntil( []( const Shared& s ) { return s.closed; } ) && released;
+            confirmed = waitUntil( []( const Shared& s ) { return s.closed; } ) && confirmed;
         }
         natsSubscription_Destroy( subscription );
         natsConnection_Destroy( connection );
-        return released;
+        return confirmed;
     }
 
     void run()

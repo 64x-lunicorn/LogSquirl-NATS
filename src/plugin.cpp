@@ -69,11 +69,11 @@ void hostNotify( const QString& message )
         g_state.api->show_notification( g_state.handle, message.toUtf8().constData() );
     }
 }
-} // namespace nats_monitor
 
 /// How long shutdown waits for nats.c's threads to end before the host may
 /// unload the library.
-static constexpr int64_t kLibraryCloseTimeoutMs = 5000;
+constexpr int64_t kLibraryCloseTimeoutMs = 5000;
+} // namespace nats_monitor
 
 // ── Plugin metadata ──────────────────────────────────────────────────────
 
@@ -235,8 +235,8 @@ LOGSQUIRL_PLUGIN_EXPORT void logsquirl_plugin_shutdown( void )
 
     if ( st.dialog ) {
         // Stops the session: its file is flushed and kept for the tab.
-        guarded( "stopping the NATS session", [] { nats_monitor::g_state.dialog->stopAll(); } );
-        guarded( "shutdown", [] { delete nats_monitor::g_state.dialog; } );
+        guarded( "stopping the NATS session", [ &st ] { st.dialog->stopAll(); } );
+        guarded( "shutdown", [ &st ] { delete st.dialog; } );
         st.dialog = nullptr;
     }
 
@@ -251,7 +251,7 @@ LOGSQUIRL_PLUGIN_EXPORT void logsquirl_plugin_shutdown( void )
     // nats.c's threads run code of this library: they must have ended
     // before the host unloads it.  Every connection is destroyed by now.
     guarded( "closing nats.c", [] {
-        if ( nats_CloseAndWait( kLibraryCloseTimeoutMs ) == NATS_TIMEOUT ) {
+        if ( nats_CloseAndWait( nats_monitor::kLibraryCloseTimeoutMs ) == NATS_TIMEOUT ) {
             nats_monitor::hostLog( LOGSQUIRL_LOG_WARNING,
                                    "NATS Monitor plugin: nats.c did not close in time." );
         }
