@@ -221,11 +221,11 @@ void requireFields( const LogFormat& format, const QByteArray& line, const Field
     INFO( "line: " << line.left( 200 ).toStdString() );
     const auto match = matchLine( format, text );
     REQUIRE( match.hasMatch() );
-    REQUIRE( match.captured( format.timestampField ) == expected.timestamp );
+    REQUIRE( match.captured( "timestamp" ) == expected.timestamp );
     REQUIRE( match.captured( "subject" ) == expected.subject );
     REQUIRE( match.captured( "reply" ) == expected.reply );
     REQUIRE( match.captured( "size" ) == expected.size );
-    REQUIRE( match.captured( format.bodyField ) == expected.body );
+    REQUIRE( match.captured( "body" ) == expected.body );
 }
 
 } // namespace
