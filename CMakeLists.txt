@@ -48,6 +48,22 @@ set(LOGSQUIRL_NATS_SOURCES
     src/plugin.cpp
 )
 
+# What the plugin's sources need to compile and link: shared by the plugin
+# library and the test program, which compiles the same sources.
+add_library(logsquirl_nats_common INTERFACE)
+target_include_directories(logsquirl_nats_common
+    INTERFACE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"   # Vendored SDK header
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"       # Internal headers
+)
+target_link_libraries(logsquirl_nats_common
+    INTERFACE
+        Qt6::Core
+        Qt6::Widgets
+        nats_static
+        OpenSSL::Crypto
+)
+
 add_library(logsquirl_nats SHARED ${LOGSQUIRL_NATS_SOURCES})
 
 set_target_properties(logsquirl_nats PROPERTIES
@@ -79,19 +95,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_property(TARGET logsquirl_nats APPEND PROPERTY LINK_DEPENDS "${_exports}")
 endif()
 
-target_include_directories(logsquirl_nats
-    PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"   # Vendored SDK header
-        "${CMAKE_CURRENT_SOURCE_DIR}/src"       # Internal headers
-)
-
-target_link_libraries(logsquirl_nats
-    PRIVATE
-        Qt6::Core
-        Qt6::Widgets
-        nats_static
-        OpenSSL::Crypto
-)
+target_link_libraries(logsquirl_nats PRIVATE logsquirl_nats_common)
 
 # ── macOS rpath ───────────────────────────────────────────────────────────
 # When loaded from Contents/PlugIns/<id>/, the plugin resolves Qt frameworks

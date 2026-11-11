@@ -38,11 +38,6 @@ set_target_properties(logsquirl_nats_tests PROPERTIES
     AUTOMOC ON
 )
 
-target_include_directories(logsquirl_nats_tests
-    PRIVATE
-        "${CMAKE_SOURCE_DIR}/include"   # logsquirl_plugin_api.h
-        "${CMAKE_SOURCE_DIR}/src"       # plugin.h
-)
 
 # testconfig.h: the paths and the reason as C string literals.  (The reason
 # quotes CMake's error messages, which compile definitions would not survive.)
@@ -65,12 +60,9 @@ target_compile_definitions(logsquirl_nats_tests
 
 target_link_libraries(logsquirl_nats_tests
     PRIVATE
+        logsquirl_nats_common   # the plugin's includes and libraries
         Catch2::Catch2
-        Qt6::Core
-        Qt6::Widgets
         Qt6::Network
-        nats_static
-        OpenSSL::Crypto
 )
 
 # The plugin sources go into the test program, so tests reach the plugin's
