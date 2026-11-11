@@ -852,6 +852,7 @@ bool NatsSession::start()
         return fail( QStringLiteral( "Cannot create %1: %2" )
                          .arg( filePath_, worker->file->errorString() ) );
     }
+    worker->fileBytes = worker->file->size(); // what the last start wrote counts
     auto* raw = worker.get();
     worker->thread = std::thread( [ raw ] { raw->run(); } );
     worker_ = std::move( worker );

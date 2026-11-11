@@ -969,6 +969,66 @@ SCENARIO( "a capture's file is rotated at its size limit, between messages",
     }
 }
 
+SCENARIO( "a session started again goes on in its last file, within the size limit",
+          "[server][session][rotation]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session with a size limit of 1000 bytes that rotated once and was stopped" )
+    {
+        NatsServer server;
+        Publisher publisher( server.url() );
+        auto config = configFor( server.url(), "again" );
+        config.maxFileBytes = 1000;
+        NatsSession session( config );
+        int connections = 0;
+        QObject::connect( &session, &NatsSession::connected, [ & ] { ++connections; } );
+        startAndWaitConnected( session, server.url(), "again" );
+        const auto first = session.filePath();
+
+        int published = 0;
+        const auto publish = [ & ]( int count ) {
+            for ( int i = 0; i < count; ++i ) {
+                ++published;
+                publisher.publish( "again", numbered( published, 60 ), {}, {}, i == count - 1 );
+            }
+            REQUIRE( waitFor( [ & ] {
+                return payloadsOn( captureFiles( first ), "again" ).size() == published;
+            } ) );
+        };
+        publish( 15 ); // about 1500 bytes
+        session.stop();
+        REQUIRE( captureFiles( first ).size() == 2 );
+        const auto last = captureFiles( first ).last();
+        REQUIRE( sizeOf( last ) > 0 );
+
+        WHEN( "it is started again and gets another 1500 bytes" )
+        {
+            REQUIRE( session.start() );
+            REQUIRE( waitFor( [ & ] { return connections == 2; }, 10000 ) );
+            REQUIRE( session.filePath() == last );
+            publish( 15 );
+            session.stop();
+            const auto files = captureFiles( first );
+
+            THEN( "no file is over the limit, and every message is there, in order" )
+            {
+                REQUIRE( files.size() >= 3 );
+                for ( const auto& file : files ) {
+                    INFO( file.toStdString() );
+                    REQUIRE( sizeOf( file ) <= 1000 );
+                    REQUIRE( endsWithNewline( file ) );
+                }
+                QStringList expected;
+                for ( int i = 1; i <= 30; ++i ) {
+                    expected << QString::fromLatin1( numbered( i, 60 ) );
+                }
+                REQUIRE( payloadsOn( files, "again" ) == expected );
+            }
+        }
+    }
+}
+
 SCENARIO( "a rotation that fails is retried one limit later", "[server][session][rotation]" )
 {
     SKIP_WITHOUT_NATS_SERVER();
