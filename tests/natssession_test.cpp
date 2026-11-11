@@ -451,21 +451,18 @@ void flood( Publisher& publisher, const char* subject, int count )
     }
 }
 
-/// Wait until the file at @p path has not grown for half a second: the
-/// session has taken all that was sent to it.
-void waitQuiet( const QString& path )
+/// Wait until each of the @p published messages on @p subject is
+/// accounted for: a line in the file, or counted as dropped.  Each message
+/// is counted at most once, so the sum reaches @p published only once the
+/// session has taken them all.  (Drops still to be marked are in
+/// droppedCount() already; slow-consumer drops are counted when nats.c
+/// delivers the next message, which it holds while it drops.)
+void waitAccounted( const NatsSession& session, const char* subject, qint64 published )
 {
-    qint64 size = -1;
-    QElapsedTimer still;
-    still.start();
     REQUIRE( waitFor(
         [ & ] {
-            const auto now = QFileInfo( path ).size();
-            if ( now != size ) {
-                size = now;
-                still.restart();
-            }
-            return still.elapsed() > 500;
+            const auto written = tally( readLines( session.filePath() ), subject ).written;
+            return written + static_cast<qint64>( session.droppedCount() ) >= published;
         },
         30000 ) );
 }
@@ -531,7 +528,7 @@ SCENARIO( "a slow consumer's drops are counted and marked where they happen",
                 published += 5000;
                 settle( 50 );
             }
-            waitQuiet( session.filePath() );
+            waitAccounted( session, "flood", published );
             session.stop();
 
             THEN( "the slow-consumer markers add up to the messages not written" )
@@ -566,7 +563,7 @@ SCENARIO( "under a flood every drop is counted in exactly one marker", "[server]
         WHEN( "it is flooded faster than it can write, and stopped once it has taken it all" )
         {
             flood( publisher, "flood", published );
-            waitQuiet( session.filePath() );
+            waitAccounted( session, "flood", published );
             session.stop();
 
             THEN( "the dropped= counts of both kinds add up to published - written, and to the "
@@ -716,7 +713,7 @@ SCENARIO( "a session sustains 50k msgs/s at 200 B without drops", "[.benchmark]"
             REQUIRE(
                 waitFor( [ & ] { return session.receivedCount() >= quint64( sent ); }, 30000 ) );
             const double takenSeconds = timer.nsecsElapsed() / 1e9;
-            waitQuiet( session.filePath() );
+            waitAccounted( session, "bench", sent );
             session.stop();
 
             THEN( "every message is written, nothing is dropped, and no dropped= marker" )
@@ -757,7 +754,7 @@ SCENARIO( "when the session's own queue is full, its drops are counted and marke
                 published += 5000;
                 settle( 50 );
             }
-            waitQuiet( session.filePath() );
+            waitAccounted( session, "flood", published );
             session.stop();
 
             THEN( "the queue-full markers add up to the messages not written, each before the "
