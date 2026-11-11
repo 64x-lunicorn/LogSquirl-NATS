@@ -158,6 +158,24 @@ It publishes at that rate for 10 seconds with the default limits, requires
 every message written and no `dropped=` marker, and prints the rate
 reached (a Catch2 warning, also when it passes).
 
+### Rotation at the size limit
+
+`SessionConfig::maxFileBytes` (the dialog's *New file at*, in MiB; default
+256, 0 for no limit) bounds each file of a capture. The writer thread
+rotates by itself, between two lines: before a line that would take the
+file over the limit it opens the next one (`NewOnly`, so it never
+truncates an earlier file), closes the full one and reports the path with
+`NatsSession::fileRotated()`, on which the dialog opens a new followed tab.
+`filePath()` follows the rotation. The rotation tests (`[rotation]`, part
+of the server tests) use limits of a few hundred bytes, and make a rotation
+fail by putting a directory where the next file goes, which works on every
+platform and also for root.
+
+The size limit is the one setting the dialog saves: on Start, to
+`nats.ini` (`capture/maxFileMiB`) in the directory the host's
+`get_config_dir` gives; the dialog reads it when it is created. The tests'
+`FakeHost` gives each host a configuration directory of its own.
+
 ### The Log Format
 
 `formats/nats_log.json` gives LogSquirl's Table View the columns

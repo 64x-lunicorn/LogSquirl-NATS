@@ -55,8 +55,15 @@ temp file  logsquirl-nats-<pid>-XXXXXX/nats_<name>.log  → open_file(follow=1)
   gap, since the messages nats.c still held when it dropped are written
   after the marker. On stop the subscription is drained, so nothing nats.c
   holds is discarded uncounted.
-- **Limits.** Size limit with rotation, as Serial does (#33 there): default
-  e.g. 256 MiB, 0 = unlimited. Rotation opens the next file in a new tab.
+- **Limits.** Size limit with rotation, as Serial does (#33 there): set in
+  the dialog in MiB, default 256 MiB, 0 = no limit, remembered between
+  sessions (`nats.ini` in the plugin's configuration directory). Before a
+  line that would take the file over the limit, the writer goes on in the
+  next file, so a message line is never split: `nats_<name>.log`,
+  `nats_<name>.2.log`, … Each opens in a new followed tab. A line longer
+  than the limit is written whole, alone in its file. A rotation that fails
+  (the next file cannot be created) is reported once, and the capture goes
+  on in the same file until it has grown by the limit again.
 - **Temp dirs.** Same lifecycle as Serial: kept until LogSquirl quits, removed
   by PID on quit and stale ones at `init()`.
 
