@@ -4,9 +4,7 @@ A LogSquirl plugin that subscribes to NATS subjects and writes every message as
 one line to a growing file that LogSquirl follows, so live traffic can be
 searched, filtered and highlighted like any log — also at high message rates.
 
-Status: plan only, no code yet. Each section under [Tickets](#tickets) is meant
-to become one GitHub issue (see `docs/agents/issue-tracker.md` once the repo is
-synced from LogSquirl-Plugin-CI).
+Status: plan only, no code yet. Tickets: see [Tickets](#tickets).
 
 ## Decisions
 
@@ -76,39 +74,22 @@ subjects contain no spaces, so the fixed fields parse with a simple regex:
 
 ## Tickets
 
-### Milestone 0.1.0 — live capture
+The tickets live as GitHub issues, planned by milestone; they are the source of
+truth, this plan only gives the overview:
+[milestone 0.1.0](https://github.com/64x-lunicorn/LogSquirl-NATS/milestone/1)
+(live capture: #1 scaffold, #2 subscribe and line format, #3 Log Format,
+#4 drops, #5 rotation, #6 auth and TLS, #7 several subjects and sessions,
+#8 docs) and
+[milestone 0.2.0](https://github.com/64x-lunicorn/LogSquirl-NATS/milestone/2)
+(JetStream: #9 replay, #10 consumer cleanup and permissions).
 
-1. **Scaffold the repository.** `sync-plugin.sh` from LogSquirl-Plugin-CI,
-   `plugin.json` (`io.github.logsquirl.nats`, type `ui`, library
-   `logsquirl_nats`), CMake, nats.c via FetchContent with TLS, an empty plugin
-   that links nats.c and passes CI on Linux, macOS arm64 and Windows.
-   *Do this first: TLS/OpenSSL on three platforms is the biggest risk (see
-   open questions).*
-2. **Connect and subscribe to one subject into a followed file.** Dialog with
-   server URL and subject (wildcards `*`, `>`), Start/Stop, writer thread,
-   temp file + `open_file(follow=1)`, tab keeps the capture after Stop.
-3. **Line format and Log Format definition.** Format above, escaping, binary
-   as hex, headers; `formats/nats_log.json` with tests against sample lines.
-4. **Slow consumers and dropped messages are visible.** Pending limits, async
-   error handler, marker lines, counter in the dialog.
-5. **Size limit and rotation.** As in Serial, default and 0 = unlimited.
-6. **Authentication and TLS.** User/password, token, `.creds` file, NKey seed
-   file, TLS with CA / client cert / key, "skip verify" off by default.
-   Profiles saved under `get_config_dir()`: paths and settings only, never
-   passwords or tokens in plain text.
-7. **Several subjects and sessions.** Multiple subjects per session (one file),
-   optional queue group, several sessions side by side, status widget with
-   msgs/s and dropped count per session.
-8. **README, DEVELOPER_GUIDE, CHANGELOG, icon.**
+## Test seams
 
-### Milestone 0.2.0 — JetStream
-
-9. **Replay a stream.** Pick a stream (`$JS.API.STREAM.NAMES`), subject
-   filter, start at: all / last N / sequence / time; ordered ephemeral
-   consumer; stream timestamp and sequence in the line; then optionally keep
-   following live.
-10. **Inspect without consuming.** Ensure replay never acks into or creates a
-    durable consumer on the server (ephemeral, `AckNone`).
+- **Main seam: a capture session against a real `nats-server`**, which the test
+  build downloads at a pinned, checksum-verified version (#1): publish, then
+  assert on the lines in the output file. Prior art: LogSquirl-Serial's
+  `serialprocess_test`.
+- **Second seam: the formatter**, a pure function from message to line.
 
 ### Backlog
 
@@ -124,13 +105,11 @@ subjects contain no spaces, so the fixed fields parse with a simple regex:
   (Qt uses SecureTransport / Schannel on macOS / Windows), and
   `bundle_qt_frameworks` only covers Qt libraries. Options: link OpenSSL
   statically into `logsquirl_nats` (vcpkg / Homebrew static libs in CI), or
-  extend LogSquirl-Plugin-CI with a way to bundle non-Qt libraries. Decide in
-  ticket 1.
+  extend LogSquirl-Plugin-CI with a way to bundle non-Qt libraries. To decide in #1.
 - **NKey signing.** Check whether the pinned nats.c needs libsodium or uses its
   built-in ed25519 (prefer built-in: one dependency less).
 - **Throughput target.** Which message rate must v1 sustain without drops on a
-  typical laptop (e.g. 50k msgs/s at 200 B)? Becomes a test/benchmark in
-  ticket 4.
+  typical laptop (e.g. 50k msgs/s at 200 B)? Asked in #4.
 - **Repository.** `64x-lunicorn/LogSquirl-NATS` on GitHub, add to the plugin
   table and `plugin-drift.yml` in LogSquirl-Plugin-CI, and to LogSquirl's
   `plugins.json` at the first release.
