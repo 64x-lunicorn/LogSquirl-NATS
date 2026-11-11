@@ -4,9 +4,10 @@ A LogSquirl plugin that subscribes to NATS subjects and writes every message as
 one line to a growing file that LogSquirl follows, so live traffic can be
 searched, filtered and highlighted like any log — also at high message rates.
 
-Status: scaffold in place (#1: the plugin builds with nats.c and a static
-OpenSSL, and its tests run against a real `nats-server`); no capture yet.
-Tickets: see [Tickets](#tickets).
+Status: 0.1.0, live capture (#1–#8), is implemented and not yet released;
+JetStream replay (0.2.0) is next. How the code works:
+[DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md#architecture). Tickets: see
+[Tickets](#tickets).
 
 ## Decisions
 
@@ -37,7 +38,7 @@ ConnectionDialog (QDialog)            server URL(s), auth, subjects (each with a
         ▼  one per Start, side by side
 NatsSession                           one natsConnection, N natsSubscriptions
   ├─ nats.c delivery thread(s)        message callback: format line, enqueue — never block
-  ├─ LineQueue (bounded, lock-free    or mutex + condvar)
+  ├─ queue (bounded, mutex + condvar)
   └─ Writer thread                    drains queue in batches → QFile, flush per batch,
                                       rotation at size limit, drop counter
         │
