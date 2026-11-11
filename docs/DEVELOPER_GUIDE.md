@@ -112,6 +112,21 @@ SCENARIO( "…", "[server]" )
 }
 ```
 
+`NatsServerOptions::port` starts it on a given port instead, e.g. to bring
+a stopped server back for a reconnect test.
+
+### The test seams
+
+- **A capture session against a real `nats-server`** (`natssession_test.cpp`,
+  and through the dialog in `plugin_test.cpp`): start a `NatsSession`,
+  publish with `nats_test::Publisher`, and assert on the lines of
+  `session.filePath()` (`nats_test::readLines`, `nats_test::waitFor` from
+  [`tests/sessiontest.h`](../tests/sessiontest.h)). A session is subscribed
+  once its first line, the `connected to …` marker, is in the file; from
+  then on every message published is captured.
+- **The formatter** (`lineformat_test.cpp`): `formatLine()` is a pure
+  function from a message to one line.
+
 ### TLS test certificates
 
 `tests/certs/` holds a test CA and a server certificate for `localhost` /
