@@ -1,0 +1,3 @@
+- Plan and architecture: [docs/PLAN.md](docs/PLAN.md); the reference plugin to follow is LogSquirl-Serial.
+- The workflows, `.clang-format`, `docs/agents/issue-tracker.md` and `include/logsquirl_plugin_api.h` are LogSquirl-Plugin-CI's (`scripts/sync-plugin.sh`): change them there.
+- Issues and specs: [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md)
