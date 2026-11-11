@@ -406,7 +406,9 @@ SCENARIO( "the Log Format reads every line the formatter writes", "[logformat]" 
     {
         const auto m = message( "big", QByteArray( "0123456789abcdef" ).repeated( 262144 ) );
 
-        THEN( "it is read whole" )
+        // LogSquirl gives a line over MaxUiThreadLineLength (1,000,000
+        // characters) no columns; this checks only that the regex covers it.
+        THEN( "the regex matches it, the whole payload the body" )
         {
             requireFields( format, formatLine( m ),
                            { ts, "big", "-", "4194304", QString::fromUtf8( m.payload ) } );

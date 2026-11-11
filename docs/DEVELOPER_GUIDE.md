@@ -141,6 +141,11 @@ the payload). CI packages it beside the library (`package_files` in
 `plugin.json`'s `formats` names it, so LogSquirl 26.12 and later read it
 while the plugin is enabled; older versions need it imported.
 
+LogSquirl does not match or extract fields from a line longer than
+1,000,000 characters (`MaxUiThreadLineLength`), so a line over about 1 MB,
+a message with a large payload, gets no columns in the Table View. The
+regex covers such lines; the test checks that with a 4 MiB payload.
+
 ### TLS test certificates
 
 `tests/certs/` holds a test CA and a server certificate for `localhost` /
