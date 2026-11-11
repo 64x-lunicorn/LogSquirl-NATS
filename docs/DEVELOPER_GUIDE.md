@@ -73,10 +73,10 @@ Catch2 v2, one test program run as two ctest entries, plus a dependency check:
 |---|---|
 | `logsquirl_nats_tests` | everything that needs no server |
 | `logsquirl_nats_server_tests` | the tests tagged `[server]`, against a real `nats-server` |
+| `no_shared_openssl` | the plugin library links no OpenSSL shared library |
 
 Hidden tests (`[.benchmark]`) run in neither; see
 [the benchmark](#dropped-messages-and-the-benchmark).
-| `no_shared_openssl` | the plugin library links no OpenSSL shared library |
 
 ### The nats-server of the tests
 

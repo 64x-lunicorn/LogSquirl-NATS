@@ -50,6 +50,11 @@ temp file  logsquirl-nats-<pid>-XXXXXX/nats_<name>.log  → open_file(follow=1)
   since the last marker) so gaps are visible in the log itself, plus a
   counter in the status widget (#7).
   If the plugin's own queue overflows, it drops too and counts the same way.
+  nats.c reports how many it dropped, not where: a slow-consumer marker may
+  land up to the pending-message limit earlier in the file than the actual
+  gap, since the messages nats.c still held when it dropped are written
+  after the marker. On stop the subscription is drained, so nothing nats.c
+  holds is discarded uncounted.
 - **Limits.** Size limit with rotation, as Serial does (#33 there): default
   e.g. 256 MiB, 0 = unlimited. Rotation opens the next file in a new tab.
 - **Temp dirs.** Same lifecycle as Serial: kept until LogSquirl quits, removed
