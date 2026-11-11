@@ -26,6 +26,10 @@
  * starts a usable server.
  */
 
+// First: on Windows nats.h includes winsock2.h, which must come before any
+// windows.h.
+#include <nats.h>
+
 #include <catch2/catch.hpp>
 
 #include "natsserver.h"
@@ -33,8 +37,6 @@
 
 #include <QFile>
 #include <QTemporaryDir>
-
-#include <nats.h>
 
 #include <string>
 

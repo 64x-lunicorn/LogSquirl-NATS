@@ -31,14 +31,16 @@
  * ctest reports as skipped (SKIP_RETURN_CODE) rather than passed.
  */
 
+// First: on Windows nats.h includes winsock2.h, which must come before any
+// windows.h (Catch2's runner includes one).
+#include <nats.h>
+
 #define CATCH_CONFIG_RUNNER
 #include <catch2/catch.hpp>
 
 #include "natsserver.h"
 
 #include <QApplication>
-
-#include <nats.h>
 
 #include <iostream>
 
