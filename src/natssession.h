@@ -19,13 +19,25 @@
 
 /**
  * @file natssession.h
- * @brief A capture session: one NATS connection, one subscription, one file.
+ * @brief A capture session: one NATS connection, its subscriptions, one file.
  *
  * The session writes every message it receives as one line (lineformat.h)
  * to a file in a temporary directory "logsquirl-nats-<pid>-XXXXXX"
  * (tempdirs.h), which LogSquirl opens with follow.  Connection events
  * (connected, disconnected, reconnected, errors, stopped) are written into
  * the file as marker lines too, and reported through the signals.
+ *
+ * SUBSCRIPTIONS
+ * ─────────────
+ * A session subscribes to one or more subjects (SessionConfig::subscriptions),
+ * each optionally in a queue group, and writes the messages of all of them
+ * into its one file, in the order they arrive.  When subjects overlap
+ * (orders.> and orders.eu.*), the server delivers a message that matches
+ * several once for each subscription, and the session writes each: one line
+ * per subscription, no deduplication, so that the file shows what the server
+ * sent.  (The dialog warns of overlapping subjects: subjects.h.)  Pending
+ * limits, drops and draining are per subscription; the counts are the
+ * session's.
  *
  * THREAD MODEL
  * ────────────
@@ -39,7 +51,7 @@
  * DROPPED MESSAGES
  * ────────────────
  * No message is lost silently.  nats.c drops messages for a slow consumer
- * once the subscription's pending limits are reached; the session's own
+ * once a subscription's pending limits are reached; the session's own
  * queue drops new messages once it holds SessionConfig::queueLimit.  Each
  * drop is counted in exactly one marker line,
  *
@@ -57,7 +69,7 @@
  * where, so the messages it still held when it dropped, received before
  * the gap, are written after the marker.
  *
- * stop() drains the subscription: nats.c delivers what it holds and what
+ * stop() drains each subscription: nats.c delivers what it holds and what
  * the server sent before the unsubscribe, so nothing that reached the
  * session before stop() is lost uncounted.
  *
@@ -74,7 +86,9 @@
  *
  * USAGE
  * ─────
- *   NatsSession session( { "nats://localhost:4222", "orders.>" } );
+ *   SessionConfig config;
+ *   config.subscriptions = { { "orders.>", {} }, { "jobs.*", "workers" } };
+ *   NatsSession session( config );
  *   if ( session.start() )               // creates the file, connects in the background
  *       open( session.filePath() );      // LogSquirl follows this file
  *   session.stop();                      // closes the connection, keeps writing nothing more
@@ -85,6 +99,7 @@
 
 #include "lineformat.h"
 
+#include <QList>
 #include <QObject>
 #include <QString>
 #include <QTemporaryDir>
@@ -143,10 +158,24 @@ struct TlsConfig {
     bool skipVerify = false; ///< Accept any server certificate: insecure.
 };
 
+/// A subject the session subscribes to.
+struct Subscription {
+    QString subject; ///< May contain the wildcards * and >.
+    /// The queue group to subscribe in; empty for none, the default.  The
+    /// server gives each message of a queue group to one member only, so a
+    /// session in a group takes messages away from the other members.
+    QString queueGroup;
+};
+
+/// @p subscriptions as the marker lines and the dialog name them:
+/// "orders.>, jobs.* (queue workers)".
+QString describeSubscriptions( const QList<Subscription>& subscriptions );
+
 struct SessionConfig {
     /// One or more URLs, comma-separated: the seeds of a cluster.
     QString url = QString::fromLatin1( kDefaultUrl );
-    QString subject; ///< May contain the wildcards * and >.
+    /// What the session subscribes to: at least one subject.
+    QList<Subscription> subscriptions;
     AuthConfig auth;
     TlsConfig tls;
     FormatOptions format;
@@ -181,7 +210,7 @@ public:
      * errorOccurred() and finished().
      *
      * @return false, after errorOccurred(), if the session could not start
-     *         (no subject, the file cannot be created).
+     *         (no subject or a blank one, the file cannot be created).
      */
     bool start();
 
@@ -226,8 +255,8 @@ public:
     /// or about to be.  After stop() it equals the sum of all of them.
     quint64 droppedCount() const;
 
-    /// The pending limits nats.c has for the subscription, read back from
-    /// it once subscribed; zero before, and after a failed subscribe.
+    /// The pending limits nats.c has for each subscription, read back from
+    /// the first once subscribed; zero before, and after a failed subscribe.
     PendingLimits pendingLimits() const;
 
     /// What the accessors above return, taken together.

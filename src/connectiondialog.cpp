@@ -117,7 +117,7 @@ void openRotatedFile( const SessionConfig& config, const QString& path )
     hostLog( LOGSQUIRL_LOG_INFO,
              QStringLiteral( "NATS Monitor: the capture of %1 reached its size limit of %2 MiB; "
                              "it goes on in %3." )
-                 .arg( config.subject )
+                 .arg( describeSubscriptions( config.subscriptions ) )
                  .arg( config.maxFileBytes / kBytesPerMiB )
                  .arg( path ) );
 }
@@ -539,7 +539,7 @@ void ConnectionDialog::startCapture()
     if ( usesTls( profile.url, profile.tls.enabled ) ) {
         config.tls = profile.tls; // also for a tls:// URL with Use TLS unchecked
     }
-    config.subject = subjectEdit_->text().trimmed();
+    config.subscriptions = { { subjectEdit_->text().trimmed(), {} } };
     config.format.maxBinaryBytes = maxBinarySpin_->value();
     config.pendingLimits = { pendingMessagesSpin_->value(),
                              static_cast<int>( pendingMegabytesSpin_->value() * kBytesPerMiB ) };
@@ -555,7 +555,7 @@ void ConnectionDialog::startCapture()
     auto* session = new NatsSession( config, this );
     connect( session, &NatsSession::statusChanged, statusLabel_, &QLabel::setText );
     connect( session, &NatsSession::errorOccurred, this,
-             [ subject = config.subject ]( const QString& message ) {
+             [ subject = describeSubscriptions( config.subscriptions ) ]( const QString& message ) {
                  const auto text
                      = QStringLiteral( "NATS Monitor (%1): %2" ).arg( subject, message );
                  hostLog( LOGSQUIRL_LOG_WARNING, text );
@@ -580,8 +580,9 @@ void ConnectionDialog::startCapture()
     if ( g_state.api && g_state.handle ) {
         g_state.api->open_file( g_state.handle, session->filePath().toUtf8().constData(), 1 );
     }
-    hostNotify( QStringLiteral( "NATS capture of %1 started on %2." )
-                    .arg( config.subject, redactUrls( config.url ) ) );
+    hostNotify(
+        QStringLiteral( "NATS capture of %1 started on %2." )
+            .arg( describeSubscriptions( config.subscriptions ), redactUrls( config.url ) ) );
 }
 
 void ConnectionDialog::stopCapture()
@@ -589,7 +590,7 @@ void ConnectionDialog::stopCapture()
     if ( !session_ ) {
         return;
     }
-    const auto subject = session_->config().subject;
+    const auto subject = describeSubscriptions( session_->config().subscriptions );
     stopAll();
     hostNotify( QStringLiteral( "NATS capture of %1 stopped." ).arg( subject ) );
 }
