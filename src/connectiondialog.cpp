@@ -125,6 +125,13 @@ void openRotatedFile( const SessionConfig& config, const QString& path )
                  .arg( path ) );
 }
 
+/// The height of @p area for @p lines lines of its font, with @p margin
+/// around them.
+int heightForLines( const QAbstractScrollArea* area, int lines, int margin = 0 )
+{
+    return area->fontMetrics().lineSpacing() * lines + 2 * ( area->frameWidth() + margin );
+}
+
 /// The method chosen in @p combo.
 const AuthMethodInfo& chosenMethod( const QComboBox* combo )
 {
@@ -217,9 +224,8 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
                         "token, > the rest of the subject. A queue group after a subject "
                         "subscribes in it: the group's members then share the messages, so "
                         "the capture takes them away from the others" ) );
-    subjectsEdit_->setFixedHeight(
-        subjectsEdit_->fontMetrics().lineSpacing() * 4 + 2 * subjectsEdit_->frameWidth()
-        + static_cast<int>( subjectsEdit_->document()->documentMargin() * 2 ) );
+    subjectsEdit_->setFixedHeight( heightForLines(
+        subjectsEdit_, 4, static_cast<int>( subjectsEdit_->document()->documentMargin() ) ) );
     subjectsWarning_->setObjectName( "subjectsWarning" );
     subjectsWarning_->setWordWrap( true );
     subjectsWarning_->hide();
@@ -259,8 +265,7 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
     sessionList_->setObjectName( "sessions" );
     sessionList_->setToolTip(
         QStringLiteral( "The running captures; Stop stops the one selected" ) );
-    sessionList_->setFixedHeight( sessionList_->fontMetrics().lineSpacing() * 4
-                                  + 2 * sessionList_->frameWidth() );
+    sessionList_->setFixedHeight( heightForLines( sessionList_, 4 ) );
     stopButton_->setObjectName( "stop" );
     stopButton_->setAutoDefault( false );
     stopAllButton_->setObjectName( "stopAll" );
@@ -549,9 +554,7 @@ void ConnectionDialog::stopAll()
     }
     // Stopped one after the other: each waits for its writer.
     while ( !sessions_.isEmpty() ) {
-        auto* session = sessions_.first();
-        session->stop();
-        releaseSession( session );
+        stopCapture( sessions_.first(), false );
     }
     statusLabel_->setText( QStringLiteral( "Stopped." ) );
 }
@@ -646,24 +649,26 @@ void ConnectionDialog::stopSelected()
 {
     const int row = sessionList_->currentRow();
     if ( row >= 0 && row < sessions_.size() ) {
-        stopCapture( sessions_.at( row ) );
+        stopCapture( sessions_.at( row ), true );
     }
 }
 
 void ConnectionDialog::stopAllCaptures()
 {
     while ( !sessions_.isEmpty() ) {
-        stopCapture( sessions_.first() );
+        stopCapture( sessions_.first(), true );
     }
 }
 
-void ConnectionDialog::stopCapture( NatsSession* session )
+void ConnectionDialog::stopCapture( NatsSession* session, bool notify )
 {
     const auto subjects = describeSubscriptions( session->config().subscriptions );
     session->stop();
     releaseSession( session );
     statusLabel_->setText( QStringLiteral( "%1: stopped." ).arg( subjects ) );
-    hostNotify( QStringLiteral( "NATS capture of %1 stopped." ).arg( subjects ) );
+    if ( notify ) {
+        hostNotify( QStringLiteral( "NATS capture of %1 stopped." ).arg( subjects ) );
+    }
 }
 
 void ConnectionDialog::releaseSession( NatsSession* session )

@@ -51,7 +51,10 @@ struct ParsedSubscriptions {
 };
 
 /// The subscriptions of @p text, one a line, "<subject> [<queue group>]";
-/// blank lines are skipped.
+/// blank lines are skipped.  A subject NATS would refuse (an empty token,
+/// a wildcard inside a token, '>' before the last token) is an error, so
+/// the overlap check only ever sees subjects it can reason about.  At an
+/// error, subscriptions holds the lines before it.
 ParsedSubscriptions parseSubscriptions( const QString& text );
 
 /// Whether some subject matches both @p a and @p b.

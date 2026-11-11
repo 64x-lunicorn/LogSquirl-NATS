@@ -212,7 +212,7 @@ LOGSQUIRL_PLUGIN_EXPORT int logsquirl_plugin_init( const LogSquirlHostApi* api, 
         auto& st = nats_monitor::g_state;
         st.statusWidget = new nats_monitor::StatusWidget( st.dialog );
         if ( api->register_status_widget ) {
-            api->register_status_widget( handle, static_cast<void*>( st.statusWidget ) );
+            api->register_status_widget( handle, static_cast<void*>( st.statusWidget.data() ) );
             st.statusWidgetRegistered = true;
         }
 
@@ -244,20 +244,21 @@ LOGSQUIRL_PLUGIN_EXPORT void logsquirl_plugin_shutdown( void )
     } );
 
     // The host must let go of the widget before it is deleted; it goes
-    // before the dialog, whose totals it shows.
-    if ( st.statusWidgetRegistered ) {
-        st.statusWidgetRegistered = false;
+    // before the dialog, whose totals it shows.  Gone already (a host
+    // window deleted it), there is nothing to unregister or delete.
+    if ( st.statusWidgetRegistered && st.statusWidget ) {
         guarded( "unregistering the status widget", [ &st ] {
             if ( st.api && st.handle && st.api->unregister_status_widget ) {
                 st.api->unregister_status_widget( st.handle,
-                                                  static_cast<void*>( st.statusWidget ) );
+                                                  static_cast<void*>( st.statusWidget.data() ) );
             }
         } );
     }
+    st.statusWidgetRegistered = false;
     if ( st.statusWidget ) {
-        guarded( "shutdown", [ &st ] { delete st.statusWidget; } );
-        st.statusWidget = nullptr;
+        guarded( "shutdown", [ &st ] { delete st.statusWidget.data(); } );
     }
+    st.statusWidget = nullptr;
 
     if ( st.dialog ) {
         // Stops the sessions: their files are flushed and kept for the tabs.

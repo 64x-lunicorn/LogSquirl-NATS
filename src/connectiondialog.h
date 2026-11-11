@@ -140,8 +140,9 @@ private:
     /// Stop every session and say so (Stop all button).
     void stopAllCaptures();
 
-    /// Stop @p session and say so.
-    void stopCapture( NatsSession* session );
+    /// Stop @p session and say so in the status line, and with @p notify
+    /// in a host notification.
+    void stopCapture( NatsSession* session, bool notify );
 
     /// Let go of @p session, which has stopped or ended on its own: keep
     /// its file, take it from the list, delete it later.

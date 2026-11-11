@@ -761,7 +761,7 @@ SCENARIO( "a slow consumer's drops are counted and marked where they happen",
     }
 }
 
-SCENARIO( "the drops of each subscription of a session are counted and marked",
+SCENARIO( "the drops of all subscriptions of a session add up in its markers",
           "[server][session][drops][subjects]" )
 {
     SKIP_WITHOUT_NATS_SERVER();
@@ -794,7 +794,8 @@ SCENARIO( "the drops of each subscription of a session are counted and marked",
                 30000 ) );
             session.stop();
 
-            THEN( "the slow-consumer markers add up to the messages of both not written" )
+            THEN( "the session's slow-consumer markers add up to the messages of both not "
+                  "written" )
             {
                 const auto lines = readLines( session.filePath() );
                 const auto a = tally( lines, "a.flood" );

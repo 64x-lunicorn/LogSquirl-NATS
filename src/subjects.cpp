@@ -31,12 +31,32 @@ namespace nats_monitor {
 
 namespace {
 
-const QString kOne = QStringLiteral( "*" );
-const QString kRest = QStringLiteral( ">" );
+const QString kAnyToken = QStringLiteral( "*" ); ///< Matches one token.
+const QString kAnyTail = QStringLiteral( ">" );  ///< As the last token: one or more.
 
 QStringList tokens( const QString& subject )
 {
     return subject.split( QLatin1Char( '.' ) );
+}
+
+/// Why NATS would refuse @p subject; empty if it takes it.
+QString subjectProblem( const QString& subject )
+{
+    const auto parts = tokens( subject );
+    for ( qsizetype i = 0; i < parts.size(); ++i ) {
+        const auto& token = parts.at( i );
+        if ( token.isEmpty() ) {
+            return QStringLiteral( "a token is empty (\"..\", or a '.' at either end)" );
+        }
+        if ( token != kAnyToken && token != kAnyTail
+             && ( token.contains( kAnyToken ) || token.contains( kAnyTail ) ) ) {
+            return QStringLiteral( "* and > must each be a token of their own" );
+        }
+        if ( token == kAnyTail && i != parts.size() - 1 ) {
+            return QStringLiteral( "> must be the last token" );
+        }
+    }
+    return {};
 }
 
 } // namespace
@@ -56,6 +76,11 @@ ParsedSubscriptions parseSubscriptions( const QString& text )
                                .arg( line.trimmed() );
             return parsed;
         }
+        if ( const auto problem = subjectProblem( fields.at( 0 ) ); !problem.isEmpty() ) {
+            parsed.error
+                = QStringLiteral( "%1 is not a valid subject: %2." ).arg( fields.at( 0 ), problem );
+            return parsed;
+        }
         parsed.subscriptions.append( { fields.at( 0 ), fields.value( 1 ) } );
     }
     return parsed;
@@ -63,19 +88,21 @@ ParsedSubscriptions parseSubscriptions( const QString& text )
 
 bool subjectsOverlap( const QString& a, const QString& b )
 {
-    const auto x = tokens( a );
-    const auto y = tokens( b );
+    const auto aTokens = tokens( a );
+    const auto bTokens = tokens( b );
     for ( qsizetype i = 0;; ++i ) {
-        const bool xEnds = i == x.size();
-        const bool yEnds = i == y.size();
-        if ( xEnds || yEnds ) {
-            return xEnds && yEnds;
+        const bool aEnds = i == aTokens.size();
+        const bool bEnds = i == bTokens.size();
+        if ( aEnds || bEnds ) {
+            return aEnds && bEnds;
         }
-        // '>' matches one token or more: the other needs one left here.
-        if ( x.at( i ) == kRest || y.at( i ) == kRest ) {
+        const auto& x = aTokens.at( i );
+        const auto& y = bTokens.at( i );
+        // '>' matches one token or more: the other has one left here.
+        if ( x == kAnyTail || y == kAnyTail ) {
             return true;
         }
-        if ( x.at( i ) != kOne && y.at( i ) != kOne && x.at( i ) != y.at( i ) ) {
+        if ( x != kAnyToken && y != kAnyToken && x != y ) {
             return false;
         }
     }
@@ -83,20 +110,22 @@ bool subjectsOverlap( const QString& a, const QString& b )
 
 bool subjectCovers( const QString& wider, const QString& narrower )
 {
-    const auto w = tokens( wider );
-    const auto n = tokens( narrower );
+    const auto widerTokens = tokens( wider );
+    const auto narrowerTokens = tokens( narrower );
     for ( qsizetype i = 0;; ++i ) {
-        if ( i == w.size() || i == n.size() ) {
-            return i == w.size() && i == n.size();
+        if ( i == widerTokens.size() || i == narrowerTokens.size() ) {
+            return i == widerTokens.size() && i == narrowerTokens.size();
         }
-        if ( w.at( i ) == kRest ) {
-            return true; // n has a token here, and '>' takes it and any after
+        const auto& w = widerTokens.at( i );
+        const auto& n = narrowerTokens.at( i );
+        if ( w == kAnyTail ) {
+            return true; // narrower has a token here, and '>' takes it and any after
         }
-        if ( n.at( i ) == kRest ) {
-            return false; // matches more tokens than w's one here
+        if ( n == kAnyTail ) {
+            return false; // matches more tokens than wider's one here
         }
-        if ( w.at( i ) != kOne && w.at( i ) != n.at( i ) ) {
-            return false; // a literal, or a '*' in n against a literal
+        if ( w != kAnyToken && w != n ) {
+            return false; // a literal, or a '*' in narrower against a literal
         }
     }
 }
@@ -109,13 +138,14 @@ QString overlapWarning( const QList<Subscription>& subscriptions )
         for ( qsizetype j = i + 1; j < subscriptions.size(); ++j ) {
             const auto& a = subscriptions.at( i ).subject;
             const auto& b = subscriptions.at( j ).subject;
+            const bool aCoversB = subjectCovers( a, b );
             if ( a == b ) {
                 warnings << QStringLiteral( "%1 twice: a message on it is written once for each." )
                                 .arg( a );
             }
-            else if ( subjectCovers( a, b ) || subjectCovers( b, a ) ) {
-                const auto& wider = subjectCovers( a, b ) ? a : b;
-                const auto& narrower = subjectCovers( a, b ) ? b : a;
+            else if ( aCoversB || subjectCovers( b, a ) ) {
+                const auto& wider = aCoversB ? a : b;
+                const auto& narrower = aCoversB ? b : a;
                 warnings << QStringLiteral( "%1 and %2 overlap: %3; drop %2, which %1 covers." )
                                 .arg( wider, narrower, copies );
             }

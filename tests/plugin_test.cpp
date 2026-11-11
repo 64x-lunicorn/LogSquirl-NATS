@@ -1061,6 +1061,23 @@ SCENARIO( "the dialog warns when the subjects of a session overlap", "[plugin][s
             }
         }
 
+        WHEN( "a subject is not one NATS takes, and Start is clicked" )
+        {
+            const auto* subject = GENERATE( "a.>.b", "a..b", ".a", "a.", "a.b*", "a.>x" );
+            subjectsField( dialog )->setPlainText( QStringLiteral( "a.>\n%1" ).arg( subject ) );
+            button( dialog, "start" )->click();
+
+            THEN( "nothing starts, the dialog says which subject is wrong, and gives no "
+                  "overlap warning for it" )
+            {
+                INFO( subject );
+                REQUIRE( host.openedFiles.isEmpty() );
+                REQUIRE( statusText( dialog ).contains(
+                    QStringLiteral( "%1 is not a valid subject" ).arg( subject ) ) );
+                REQUIRE( subjectsWarning( dialog ).isEmpty() );
+            }
+        }
+
         logsquirl_plugin_shutdown();
     }
 }
@@ -1223,6 +1240,20 @@ SCENARIO( "the plugin has a status bar widget, from init to shutdown", "[plugin]
             THEN( "it registers one status widget, which says that nothing is captured" )
             {
                 REQUIRE( statusBarText( host ) == "NATS: no capture" );
+            }
+
+            AND_WHEN( "the host's window, which parents the widget, goes before shutdown" )
+            {
+                {
+                    QWidget window;
+                    host.statusWidgets.value( 0 )->setParent( &window );
+                } // deletes its children, the widget too
+
+                THEN( "shutdown neither hands the host the deleted widget nor deletes it again" )
+                {
+                    logsquirl_plugin_shutdown();
+                    REQUIRE( host.unregisteredStatusWidgets.isEmpty() );
+                }
             }
 
             AND_WHEN( "the plugin is shut down" )

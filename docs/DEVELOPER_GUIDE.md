@@ -197,7 +197,9 @@ delivers a message that matches several subscriptions once for each, so
 `orders.>` and `orders.eu.*` give two lines for `orders.eu.created`. No
 deduplication, which would hide what the server sent. The dialog takes the
 subjects one a line, `<subject> [<queue group>]`
-([`src/subjects.h`](../src/subjects.h)), and warns below them when two
+([`src/subjects.h`](../src/subjects.h)), refuses at Start a subject NATS
+would refuse (an empty token, `*` or `>` inside a token, `>` before the
+last token), and warns below them when two
 overlap (some subject matches both); when one covers the other (every
 subject the narrower matches, the wider matches too) it suggests dropping
 the narrower one.
@@ -210,7 +212,9 @@ next. The status line prefixes each event with its session's subjects.
 
 **The status widget** ([`src/statuswidget.h`](../src/statuswidget.h)) is
 registered with `register_status_widget` at init and unregistered (then
-deleted, before the dialog) at shutdown. It reads
+deleted, before the dialog) at shutdown; `PluginState` holds it in a
+`QPointer`, since the host parents it and a host window deleted first
+takes it along. It reads
 `NATS: 2 sessions · 1,234 msgs/s · 5 dropped`, or `NATS: no capture`: it
 samples `ConnectionDialog::totals()` once a second for the rate, and
 updates the session count at once when a session starts or ends. The
