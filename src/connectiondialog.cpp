@@ -42,10 +42,9 @@ namespace nats_monitor {
 
 namespace {
 
-constexpr int kMegabyte = 1024 * 1024;
-
 /// nats.c takes the byte limit as an int.
-constexpr int kMaxPendingMegabytes = std::numeric_limits<int>::max() / kMegabyte;
+constexpr int kMaxPendingMegabytes
+    = static_cast<int>( std::numeric_limits<int>::max() / kBytesPerMiB );
 
 /// The largest size limit the dialog takes: 1 TiB.
 constexpr int kMaxFileMiB = 1024 * 1024;
@@ -98,19 +97,20 @@ void saveMaxFileMiB( int mib )
     }
 }
 
-/// The capture of @p subject reached its size limit of @p mib and goes on
-/// in @p path: open it in a new followed tab, and say why.
-void openRotatedFile( const QString& subject, int mib, const QString& path )
+/// The capture of @p config reached its size limit and goes on in @p path:
+/// open it in a new followed tab, and log why.  Not notified, as in
+/// LogSquirl-Serial: a busy capture rotates often.
+void openRotatedFile( const SessionConfig& config, const QString& path )
 {
     if ( g_state.api && g_state.handle ) {
         g_state.api->open_file( g_state.handle, path.toUtf8().constData(), 1 );
     }
-    const auto text = QStringLiteral( "The NATS capture of %1 reached its size limit of %2 MiB; "
-                                      "it goes on in a new tab." )
-                          .arg( subject )
-                          .arg( mib );
-    hostLog( LOGSQUIRL_LOG_INFO, text + QStringLiteral( " (%1)" ).arg( path ) );
-    hostNotify( text );
+    hostLog( LOGSQUIRL_LOG_INFO,
+             QStringLiteral( "NATS Monitor: the capture of %1 reached its size limit of %2 MiB; "
+                             "it goes on in %3." )
+                 .arg( config.subject )
+                 .arg( config.maxFileBytes / kBytesPerMiB )
+                 .arg( path ) );
 }
 
 } // namespace
@@ -151,7 +151,8 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
     pendingMegabytesSpin_->setObjectName( "pendingMegabytes" );
     pendingMegabytesSpin_->setRange( 1, kMaxPendingMegabytes );
     pendingMegabytesSpin_->setSuffix( QStringLiteral( " MiB" ) );
-    pendingMegabytesSpin_->setValue( kDefaultPendingLimits.bytes / kMegabyte );
+    pendingMegabytesSpin_->setValue(
+        static_cast<int>( kDefaultPendingLimits.bytes / kBytesPerMiB ) );
     for ( auto* spin : { pendingMessagesSpin_, pendingMegabytesSpin_ } ) {
         spin->setToolTip( QStringLiteral(
             "How much the NATS client holds for the capture while it writes: beyond it, "
@@ -235,8 +236,8 @@ void ConnectionDialog::startCapture()
     config.url = urlEdit_->text().trimmed();
     config.subject = subjectEdit_->text().trimmed();
     config.format.maxBinaryBytes = maxBinarySpin_->value();
-    config.pendingLimits
-        = { pendingMessagesSpin_->value(), pendingMegabytesSpin_->value() * kMegabyte };
+    config.pendingLimits = { pendingMessagesSpin_->value(),
+                             static_cast<int>( pendingMegabytesSpin_->value() * kBytesPerMiB ) };
     config.maxFileBytes = maxFileSpin_->value() * kBytesPerMiB;
     if ( config.url.isEmpty() ) {
         statusLabel_->setText( QStringLiteral( "Enter the server URL." ) );
@@ -263,9 +264,7 @@ void ConnectionDialog::startCapture()
     // it, so a file the session goes on in while it stops still gets its
     // tab (the queued signal comes before the session's deleteLater()).
     connect( session, &NatsSession::fileRotated, session,
-             [ subject = config.subject, mib = maxFileSpin_->value() ]( const QString& path ) {
-                 openRotatedFile( subject, mib, path );
-             } );
+             [ session ]( const QString& path ) { openRotatedFile( session->config(), path ); } );
 
     statusLabel_->setText( QStringLiteral( "Connecting to %1…" ).arg( config.url ) );
     if ( !session->start() ) {

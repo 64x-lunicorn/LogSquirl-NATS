@@ -29,7 +29,8 @@
  *   - the subscription's pending limits, messages and MiB (default
  *     1,000,000 and 512 MiB): beyond them nats.c drops as a slow consumer
  *   - the size limit of a file in MiB (default 256, 0 for no limit): each
- *     next file of the capture opens in a new followed tab
+ *     next file of the capture opens in a new followed tab, with a line in
+ *     the host log (no notification: a busy capture rotates often)
  *   - Start, which starts a NatsSession and opens its file in a followed tab
  *   - Stop, which stops it; the tab keeps the file until LogSquirl quits
  *   - a status line with the session's connection events and errors

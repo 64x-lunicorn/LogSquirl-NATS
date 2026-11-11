@@ -60,7 +60,8 @@ temp file  logsquirl-nats-<pid>-XXXXXX/nats_<name>.log  → open_file(follow=1)
   sessions (`nats.ini` in the plugin's configuration directory). Before a
   line that would take the file over the limit, the writer goes on in the
   next file, so a message line is never split: `nats_<name>.log`,
-  `nats_<name>.2.log`, … Each opens in a new followed tab. A line longer
+  `nats_<name>.2.log`, … Each opens in a new followed tab and is logged to
+  the host log (not notified, as in Serial). A line longer
   than the limit is written whole, alone in its file. A rotation that fails
   (the next file cannot be created) is reported once, and the capture goes
   on in the same file until it has grown by the limit again.

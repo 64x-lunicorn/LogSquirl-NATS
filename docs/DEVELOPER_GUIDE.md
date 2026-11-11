@@ -165,8 +165,11 @@ reached (a Catch2 warning, also when it passes).
 rotates by itself, between two lines: before a line that would take the
 file over the limit it opens the next one (`NewOnly`, so it never
 truncates an earlier file), closes the full one and reports the path with
-`NatsSession::fileRotated()`, on which the dialog opens a new followed tab.
-`filePath()` follows the rotation. The rotation tests (`[rotation]`, part
+`NatsSession::fileRotated()`, on which the dialog opens a new followed tab
+and writes a line to the host log (not a notification, as in
+LogSquirl-Serial: a busy capture rotates often). `filePath()` follows the
+rotation. A session started again goes on in its last file, with what that
+file holds counted against the limit. The rotation tests (`[rotation]`, part
 of the server tests) use limits of a few hundred bytes, and make a rotation
 fail by putting a directory where the next file goes, which works on every
 platform and also for root.

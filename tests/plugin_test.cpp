@@ -389,6 +389,7 @@ SCENARIO( "the size limit is set in the dialog, and each new file opens in a new
             startFromDialog( host, server.url(), "big" );
             REQUIRE( host.openedFiles.size() == 1 );
             REQUIRE( waitSubscribed( host.openedFiles.first() ) );
+            const auto notificationsBefore = host.notifications.size();
             {
                 Publisher publisher( server.url() );
                 const QByteArray payload( 1000, 'x' );
@@ -397,14 +398,16 @@ SCENARIO( "the size limit is set in the dialog, and each new file opens in a new
                 }
             }
 
-            THEN( "the next file opens in a new followed tab, and the user is told why" )
+            THEN( "the next file opens in a new followed tab, and the host log says why, "
+                  "without a notification" )
             {
                 REQUIRE( waitFor( [ & ] { return host.openedFiles.size() == 2; } ) );
                 REQUIRE( host.openedFollow.at( 1 ) );
                 REQUIRE( QFileInfo( host.openedFiles.at( 1 ) ).fileName() == "nats_big.2.log" );
                 REQUIRE( QFileInfo( host.openedFiles.first() ).size() <= 1024 * 1024 );
-                REQUIRE( host.notifications.last().contains( "size limit of 1 MiB" ) );
-                REQUIRE( host.notifications.last().contains( "new tab" ) );
+                REQUIRE( host.logs.last().contains( "size limit of 1 MiB" ) );
+                REQUIRE( host.logs.last().contains( host.openedFiles.at( 1 ) ) );
+                REQUIRE( host.notifications.size() == notificationsBefore );
             }
         }
 
