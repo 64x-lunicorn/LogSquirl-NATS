@@ -9,6 +9,8 @@
 #                                ([server]); reported as skipped, with the
 #                                reason in its output, when no server could
 #                                be provided (see cmake/NatsServer.cmake)
+#
+# Neither runs the hidden tests ([.benchmark]): they are started by hand.
 # ============================================================================
 
 include(FetchContent)
@@ -74,7 +76,9 @@ target_link_libraries(logsquirl_nats_tests
 list(TRANSFORM LOGSQUIRL_NATS_SOURCES PREPEND "${CMAKE_SOURCE_DIR}/" OUTPUT_VARIABLE _plugin_sources)
 target_sources(logsquirl_nats_tests PRIVATE ${_plugin_sources})
 
-add_test(NAME logsquirl_nats_tests COMMAND logsquirl_nats_tests "~[server]")
+# "~[.]": a filter of exclusions alone would also select the hidden tests,
+# the opt-in benchmark ([.benchmark]) among them.
+add_test(NAME logsquirl_nats_tests COMMAND logsquirl_nats_tests "~[server]~[.]")
 
 # Exit code 77: every server test was skipped (tests_main.cpp).
 add_test(NAME logsquirl_nats_server_tests COMMAND logsquirl_nats_tests "[server]")
