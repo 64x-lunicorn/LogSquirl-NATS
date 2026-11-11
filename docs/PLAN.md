@@ -101,13 +101,10 @@ truth, this plan only gives the overview:
 
 ## Open questions
 
-- **TLS backend.** nats.c needs OpenSSL for TLS. LogSquirl ships no OpenSSL
-  (Qt uses SecureTransport / Schannel on macOS / Windows), and
-  `bundle_qt_frameworks` only covers Qt libraries. Options: link OpenSSL
-  statically into `logsquirl_nats` (vcpkg / Homebrew static libs in CI), or
-  extend LogSquirl-Plugin-CI with a way to bundle non-Qt libraries. To decide in #1.
-- **NKey signing.** Check whether the pinned nats.c needs libsodium or uses its
-  built-in ed25519 (prefer built-in: one dependency less).
+- ~~**TLS backend.**~~ Decided in #1: OpenSSL 3.x LTS built statically by the
+  plugin's own CMake and linked into `logsquirl_nats`; see
+  [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md).
+- ~~**NKey signing.**~~ nats.c's built-in ed25519, no libsodium (#1).
 - **Throughput target.** Which message rate must v1 sustain without drops on a
   typical laptop (e.g. 50k msgs/s at 200 B)? Asked in #4.
 - **Repository.** `64x-lunicorn/LogSquirl-NATS` on GitHub, add to the plugin
