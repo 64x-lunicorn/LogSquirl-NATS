@@ -25,9 +25,13 @@
  *
  *   - the server URL (default nats://localhost:4222; several comma-separated)
  *   - the subject, with the wildcards * and >
+ *   - how many bytes of a binary payload are written (default 256)
  *   - Start, which starts a NatsSession and opens its file in a followed tab
  *   - Stop, which stops it; the tab keeps the file until LogSquirl quits
  *   - a status line with the session's connection events and errors
+ *
+ * Starting, stopping with Stop and errors are also host notifications, as
+ * in the Serial plugin; stopAll() (shutdown) is not.
  *
  * One session at a time (several sessions are #7's).
  *
@@ -44,6 +48,7 @@
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QSpinBox;
 
 namespace nats_monitor {
 
@@ -66,7 +71,7 @@ private:
     /// Start a session with the URL and subject entered, and open its file.
     void startCapture();
 
-    /// Stop the running session (Stop button).
+    /// Stop the running session and say so (Stop button).
     void stopCapture();
 
     /// The session ended on its own: it could not connect, or the
@@ -80,6 +85,7 @@ private:
 
     QLineEdit* urlEdit_;
     QLineEdit* subjectEdit_;
+    QSpinBox* maxBinarySpin_;
     QPushButton* startButton_;
     QPushButton* stopButton_;
     QLabel* statusLabel_;

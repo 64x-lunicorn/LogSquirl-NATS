@@ -43,6 +43,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSpinBox>
 
 using nats_test::FakeHost;
 using nats_test::NatsServer;
@@ -73,6 +74,13 @@ QLineEdit* field( QDialog* dialog, const char* name )
     auto* edit = dialog ? dialog->findChild<QLineEdit*>( name ) : nullptr;
     REQUIRE( edit );
     return edit;
+}
+
+QSpinBox* spinBox( QDialog* dialog, const char* name )
+{
+    auto* spin = dialog ? dialog->findChild<QSpinBox*>( name ) : nullptr;
+    REQUIRE( spin );
+    return spin;
 }
 
 QPushButton* button( QDialog* dialog, const char* name )
@@ -143,6 +151,7 @@ SCENARIO( "the plugin adds NATS Monitor to the Plugins menu", "[plugin]" )
                     REQUIRE( dialog->isVisible() );
                     REQUIRE( field( dialog, "url" )->text() == "nats://localhost:4222" );
                     REQUIRE( field( dialog, "subject" )->text().isEmpty() );
+                    REQUIRE( spinBox( dialog, "maxBinaryBytes" )->value() == 256 );
                     REQUIRE( host.openedFiles.isEmpty() );
                     REQUIRE_FALSE( host.logs.join( '\n' ).contains( "failed" ) );
                 }
@@ -230,6 +239,7 @@ SCENARIO( "capturing from the dialog: Start, Stop, Start", "[plugin][server]" )
             {
                 REQUIRE( host.openedFiles.size() == 1 );
                 REQUIRE( host.openedFollow.first() );
+                REQUIRE( host.notifications.join( '\n' ).contains( "orders.> started" ) );
                 const auto path = host.openedFiles.first();
                 REQUIRE( waitSubscribed( path ) );
                 {
@@ -251,6 +261,8 @@ SCENARIO( "capturing from the dialog: Start, Stop, Start", "[plugin][server]" )
                       "capture opens a new tab" )
                 {
                     REQUIRE( waitFor( [ & ] { return endsStopped( first ); } ) );
+                    REQUIRE( host.notifications.last()
+                             == QStringLiteral( "NATS capture of orders.> stopped." ) );
                     button( openDialog(), "start" )->click();
                     REQUIRE( host.openedFiles.size() == 2 );
                     const auto second = host.openedFiles.last();
@@ -265,6 +277,77 @@ SCENARIO( "capturing from the dialog: Start, Stop, Start", "[plugin][server]" )
                     REQUIRE( QFileInfo::exists( first ) );
                     REQUIRE_FALSE( readLines( first ).join( '\n' ).contains( "second" ) );
                 }
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+}
+
+SCENARIO( "the cut length of binary payloads is set in the dialog", "[plugin][server]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "an initialised plugin and a server" )
+    {
+        NatsServer server;
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+
+        WHEN( "the user sets it to 3 bytes and starts a capture" )
+        {
+            host.menuActions.first().trigger();
+            spinBox( openDialog(), "maxBinaryBytes" )->setValue( 3 );
+            startFromDialog( host, server.url(), "bin" );
+
+            THEN( "a binary payload is cut after 3 bytes" )
+            {
+                REQUIRE( host.openedFiles.size() == 1 );
+                const auto path = host.openedFiles.first();
+                REQUIRE( waitSubscribed( path ) );
+                {
+                    Publisher publisher( server.url() );
+                    publisher.publish( "bin", QByteArray( "\x00\x01\x02\x03\xff", 5 ) );
+                }
+                REQUIRE( waitFor( [ & ] {
+                    return readLines( path ).last().endsWith( " bin - 5 hex:000102" );
+                } ) );
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+}
+
+SCENARIO( "a capture that fails is notified", "[plugin][server]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "an initialised plugin and a URL where no server listens" )
+    {
+        int port = 0;
+        {
+            NatsServer server; // a port that was free a moment ago
+            port = server.port();
+        }
+        const QString url = QStringLiteral( "nats://127.0.0.1:%1" ).arg( port );
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+
+        WHEN( "the user starts a capture" )
+        {
+            startFromDialog( host, url, "x" );
+
+            THEN( "the host shows a notification saying why" )
+            {
+                REQUIRE( waitFor(
+                    [ & ] {
+                        return !host.notifications.isEmpty()
+                               && host.notifications.last().contains( " failed: " );
+                    },
+                    10000 ) );
+                REQUIRE( host.notifications.last().contains( url ) );
+                REQUIRE_FALSE( button( openDialog(), "stop" )->isEnabled() );
             }
         }
 
