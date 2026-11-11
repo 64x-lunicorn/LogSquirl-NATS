@@ -52,6 +52,9 @@ namespace {
 
 std::atomic<int> g_skipped{ 0 };
 
+/// Where the server listens: loopback only.
+constexpr const char* kHost = "127.0.0.1";
+
 constexpr int kStartTimeoutMs = 15000;
 
 /// The port of the client listener in a ports file, or 0.
@@ -71,7 +74,7 @@ int portFromPortsFile( const QString& path )
 bool accepts( int port )
 {
     QTcpSocket socket;
-    socket.connectToHost( QStringLiteral( "127.0.0.1" ), static_cast<quint16>( port ) );
+    socket.connectToHost( QLatin1String( kHost ), static_cast<quint16>( port ) );
     return socket.waitForConnected( 500 );
 }
 
@@ -152,7 +155,7 @@ NatsServer::NatsServer( const NatsServerOptions& options )
     if ( !options.configFile.isEmpty() ) {
         arguments << "-c" << options.configFile;
     }
-    arguments << "-a" << "127.0.0.1" << "-p" << "-1" << "--ports_file_dir" << d->dir.path();
+    arguments << "-a" << kHost << "-p" << "-1" << "--ports_file_dir" << d->dir.path();
     if ( options.jetStream ) {
         arguments << "-js" << "-sd" << d->dir.filePath( "jetstream" );
     }
@@ -198,7 +201,7 @@ int NatsServer::port() const
 
 QString NatsServer::url() const
 {
-    return QStringLiteral( "nats://127.0.0.1:%1" ).arg( d->port );
+    return QStringLiteral( "nats://%1:%2" ).arg( QLatin1String( kHost ) ).arg( d->port );
 }
 
 } // namespace nats_test
