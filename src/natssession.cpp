@@ -138,6 +138,118 @@ QString numberedPath( const QString& stem, int number )
                        : QStringLiteral( "%1.%2.log" ).arg( stem ).arg( number );
 }
 
+/// The numbered files of a capture, written one after the other: the file
+/// being written, and when to go on in the next (natssession.h, ROTATION).
+class RotatingFile {
+public:
+    /// What rotateBefore() did.
+    struct Rotation {
+        QString path;  ///< The next file, if the capture goes on there.
+        QString error; ///< What failed, if anything.
+    };
+
+    /// The files <@p stem>.log, <@p stem>.2.log, … of at most @p maxBytes
+    /// each; 0 for no limit.
+    RotatingFile( const QString& stem, qint64 maxBytes )
+        : stem_( stem )
+        , maxBytes_( maxBytes )
+        , rotateAt_( maxBytes )
+    {
+    }
+
+    /// Open the last file there is, or the first: a session started again
+    /// goes on in it, with what it holds counted against the limit.
+    bool open()
+    {
+        while ( QFileInfo( numberedPath( stem_, number_ + 1 ) ).isFile() ) {
+            ++number_;
+        }
+        file_->setFileName( numberedPath( stem_, number_ ) );
+        if ( !file_->open( QIODevice::WriteOnly | QIODevice::Append ) ) {
+            return false;
+        }
+        bytes_ = file_->size();
+        return true;
+    }
+
+    /// Go on in the next file if a line of @p lineBytes would take this one
+    /// over the size limit.  A line longer than the limit is written whole,
+    /// into a file of its own: an empty file is never rotated.  Should the
+    /// next file not open, the next try is one limit later: asking on every
+    /// line would report the failure on every line.
+    Rotation rotateBefore( qint64 lineBytes )
+    {
+        if ( maxBytes_ <= 0 || bytes_ == 0 || bytes_ + lineBytes <= rotateAt_ ) {
+            return {};
+        }
+        const auto path = numberedPath( stem_, number_ + 1 );
+        auto next = std::make_unique<QFile>( path );
+        // NewOnly: an earlier file is never truncated.
+        if ( !next->open( QIODevice::WriteOnly | QIODevice::NewOnly ) ) {
+            rotateAt_ = bytes_ + maxBytes_;
+            return { {},
+                     QStringLiteral(
+                         "Cannot start the next file %1: %2; the capture goes on in %3." )
+                         .arg( path, next->errorString(), fileName() ) };
+        }
+        Rotation rotation{ path, {} };
+        if ( !file_->flush() ) {
+            rotation.error = writeError(); // lost in the old file; the new one is fine
+        }
+        file_->close();
+        file_ = std::move( next );
+        ++number_;
+        bytes_ = 0;
+        rotateAt_ = maxBytes_;
+        return rotation;
+    }
+
+    /// Write @p line whole; false if it could not be.
+    bool write( const QByteArray& line )
+    {
+        if ( file_->write( line ) != line.size() ) {
+            return false;
+        }
+        bytes_ += line.size();
+        return true;
+    }
+
+    bool flush()
+    {
+        return file_->flush();
+    }
+
+    void close()
+    {
+        file_->close();
+    }
+
+    /// The file being written.
+    QString fileName() const
+    {
+        return file_->fileName();
+    }
+
+    QString errorString() const
+    {
+        return file_->errorString();
+    }
+
+    /// That the file being written cannot be written, and why.
+    QString writeError() const
+    {
+        return QStringLiteral( "Cannot write to %1: %2" ).arg( fileName(), errorString() );
+    }
+
+private:
+    const QString stem_;    ///< The first file's path without ".log".
+    const qint64 maxBytes_; ///< 0: no limit.
+    qint64 rotateAt_;       ///< The limit, or one limit beyond where a rotation failed.
+    int number_ = 1;        ///< Of the file being written: 1, 2, 3, …
+    qint64 bytes_ = 0;      ///< In the file being written.
+    std::unique_ptr<QFile> file_ = std::make_unique<QFile>();
+};
+
 /// The message as the formatter takes it.  Subject, reply and payload are
 /// views into @p msg, valid while it is.
 Message toMessage( natsMsg* msg )
@@ -396,31 +508,22 @@ struct NatsSession::Worker {
     /// Whether shared may be freed: nats.c confirmed its last callback (or
     /// never got it).  Written by the thread, read after it is joined.
     bool released = true;
-    /// The file being written; replaced at each rotation.
-    std::unique_ptr<QFile> file = std::make_unique<QFile>();
+    /// Opened by start(), before the thread runs; written by the thread.
+    RotatingFile file;
     bool writeFailed = false;
-    /// The first file's path without ".log" (numberedPath()).
-    QString stem;
-    int fileNumber = 1;   ///< Of the file being written: 1, 2, 3, …
-    qint64 fileBytes = 0; ///< Written to the file being written.
-    /// The size the file may reach before the next is opened: the limit, or
-    /// one limit beyond where a rotation failed.
-    qint64 rotateAt = 0;
     std::thread thread;
 
-    /// Writes file number @p number of the files with the stem @p fileStem.
-    Worker( NatsSession* owner, const SessionConfig& sessionConfig, int startNumber,
-            const QString& fileStem, int number )
+    /// The writer of start number @p startGeneration, writing the files
+    /// <@p fileStem>.log, <@p fileStem>.2.log, …
+    Worker( NatsSession* owner, const SessionConfig& sessionConfig, int startGeneration,
+            const QString& fileStem )
         : session( owner )
         , config( sessionConfig )
-        , generation( startNumber )
-        , stem( fileStem )
-        , fileNumber( number )
-        , rotateAt( sessionConfig.maxFileBytes )
+        , generation( startGeneration )
+        , file( fileStem, sessionConfig.maxFileBytes )
     {
         shared->format = config.format;
         shared->queueLimit = config.queueLimit;
-        file->setFileName( numberedPath( stem, fileNumber ) );
     }
 
     /// Stops the thread and waits for it.
@@ -456,6 +559,15 @@ struct NatsSession::Worker {
         auto* target = session;
         QMetaObject::invokeMethod(
             target, [ target, emitter ] { emitter( target ); }, Qt::QueuedConnection );
+    }
+
+    /// Report @p message as an error, on the GUI thread.
+    void postError( const QString& message )
+    {
+        post( [ message ]( NatsSession* s ) {
+            Q_EMIT s->statusChanged( message );
+            Q_EMIT s->errorOccurred( message );
+        } );
     }
 
     void report( const Item& item )
@@ -494,68 +606,36 @@ struct NatsSession::Worker {
             if ( !writeFailed ) {
                 rotateBefore( item.line.size() );
             }
-            if ( !writeFailed ) {
-                if ( file->write( item.line ) == item.line.size() ) {
-                    fileBytes += item.line.size();
-                }
-                else {
-                    fail();
-                }
+            if ( !writeFailed && !file.write( item.line ) ) {
+                fail();
             }
             report( item );
         }
-        if ( !writeFailed && !batch.empty() && !file->flush() ) {
+        if ( !writeFailed && !batch.empty() && !file.flush() ) {
             fail();
         }
     }
 
-    /// Go on in the next file if a line of @p lineBytes would take this one
-    /// over the size limit.  A line longer than the limit is written whole,
-    /// into a file of its own: an empty file is never rotated.
+    /// Go on in the next file if a line of @p lineBytes would not fit, and
+    /// report what happened.
     void rotateBefore( qint64 lineBytes )
     {
-        if ( config.maxFileBytes <= 0 || fileBytes == 0 || fileBytes + lineBytes <= rotateAt ) {
-            return;
+        const auto rotation = file.rotateBefore( lineBytes );
+        if ( !rotation.error.isEmpty() ) {
+            postError( rotation.error );
         }
-        const auto path = numberedPath( stem, fileNumber + 1 );
-        auto next = std::make_unique<QFile>( path );
-        if ( !next->open( QIODevice::WriteOnly | QIODevice::NewOnly ) ) {
-            // Retried one limit later: asking on every line would report
-            // the failure on every line.
-            rotateAt = fileBytes + config.maxFileBytes;
-            const auto message
-                = QStringLiteral( "Cannot start the next file %1: %2; the capture goes on in %3." )
-                      .arg( path, next->errorString(), file->fileName() );
-            post( [ message ]( NatsSession* s ) {
-                Q_EMIT s->statusChanged( message );
-                Q_EMIT s->errorOccurred( message );
+        if ( !rotation.path.isEmpty() ) {
+            post( [ generation = generation, path = rotation.path ]( NatsSession* s ) {
+                s->onWorkerRotated( generation, path );
             } );
-            return;
         }
-        if ( !file->flush() ) {
-            fail(); // says what was lost in the old file; the new one is fine
-            writeFailed = false;
-        }
-        file->close();
-        file = std::move( next );
-        ++fileNumber;
-        fileBytes = 0;
-        rotateAt = config.maxFileBytes;
-        post( [ generation = generation, path ]( NatsSession* s ) {
-            s->onWorkerRotated( generation, path );
-        } );
     }
 
     /// The file cannot be written (disk full, volume gone): say so once.
     void fail()
     {
         writeFailed = true;
-        const auto message = QStringLiteral( "Cannot write to %1: %2" )
-                                 .arg( file->fileName(), file->errorString() );
-        post( [ message ]( NatsSession* s ) {
-            Q_EMIT s->statusChanged( message );
-            Q_EMIT s->errorOccurred( message );
-        } );
+        postError( file.writeError() );
     }
 
     /// Write what is queued.
@@ -795,7 +875,7 @@ struct NatsSession::Worker {
             shared->pushMarker( QStringLiteral( "connection closed" ), Event::Error );
         }
         drain();
-        file->close();
+        file.close();
 
         if ( !stopped ) {
             post( [ generation = generation ]( NatsSession* s ) {
@@ -841,18 +921,15 @@ bool NatsSession::start()
     }
 
     // Started again, the session goes on in its last file.
-    const auto stem = tempDir_.filePath( "nats_" + safeFileName( config_.subject ) );
-    int number = 1;
-    while ( QFileInfo( numberedPath( stem, number + 1 ) ).isFile() ) {
-        ++number;
+    auto worker = std::make_unique<Worker>(
+        this, config_, ++generation_,
+        tempDir_.filePath( "nats_" + safeFileName( config_.subject ) ) );
+    const bool opened = worker->file.open();
+    filePath_ = worker->file.fileName();
+    if ( !opened ) {
+        return fail(
+            QStringLiteral( "Cannot create %1: %2" ).arg( filePath_, worker->file.errorString() ) );
     }
-    filePath_ = numberedPath( stem, number );
-    auto worker = std::make_unique<Worker>( this, config_, ++generation_, stem, number );
-    if ( !worker->file->open( QIODevice::WriteOnly | QIODevice::Append ) ) {
-        return fail( QStringLiteral( "Cannot create %1: %2" )
-                         .arg( filePath_, worker->file->errorString() ) );
-    }
-    worker->fileBytes = worker->file->size(); // what the last start wrote counts
     auto* raw = worker.get();
     worker->thread = std::thread( [ raw ] { raw->run(); } );
     worker_ = std::move( worker );
