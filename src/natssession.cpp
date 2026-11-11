@@ -71,7 +71,11 @@ namespace nats_monitor {
 namespace {
 
 /// How long stopping waits for nats.c to confirm its last callback.
-constexpr auto kCallbackTimeout = std::chrono::seconds( 5 );
+constexpr auto kCallbackTimeout = std::chrono::milliseconds( 5000 );
+
+/// How long stopping lets nats.c drain the subscription: its flush may take
+/// its own timeout of 10 s, if the connection breaks meanwhile.
+constexpr auto kDrainTimeout = std::chrono::milliseconds( 15000 );
 
 /// What the writer reports to the session along with a line.
 enum class Event {
@@ -574,26 +578,81 @@ struct NatsSession::Worker {
         }
     }
 
-    /// Unsubscribe, close and destroy; whether nats.c confirmed that it
-    /// makes no callback any more.
+    /// Write what the callbacks queue until @p done (called without the
+    /// mutex) holds, or @p timeout passed; whether it holds.
+    template <typename Done>
+    bool writeUntil( Done done, std::chrono::milliseconds timeout )
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        for ( ;; ) {
+            const bool finished = done(); // before drain(): what came before is written
+            drain();
+            if ( finished ) {
+                return true;
+            }
+            if ( std::chrono::steady_clock::now() >= deadline ) {
+                return false;
+            }
+            std::unique_lock<std::mutex> lock( shared->mutex );
+            shared->wake.wait_for( lock, std::chrono::milliseconds( 10 ),
+                                   [ this ] { return !shared->queue.empty(); } );
+        }
+    }
+
+    /// End the subscription without losing what nats.c still holds for it:
+    /// nats.c discards the messages pending in a subscription once it is
+    /// closed (dispatch.c), uncounted.
+    void endSubscription( natsConnection* connection, natsSubscription* subscription )
+    {
+        // Lifted, nats.c drops nothing more (it decides under the lock that
+        // SetPendingLimits takes), so the count read now is the last.
+        natsSubscription_SetPendingLimits( subscription, -1, -1 );
+        shared->markSlowConsumer( subscription );
+        // Connected: drain.  nats.c sends UNSUB, waits for the server's
+        // answer (so all that was sent before has arrived), delivers what
+        // is pending and then makes the completion callback.  With no
+        // timeout of its own (-1) it never closes the subscription early.
+        if ( natsConnection_Status( connection ) == NATS_CONN_STATUS_CONNECTED
+             && natsSubscription_DrainTimeout( subscription, -1 ) == NATS_OK ) {
+            writeUntil(
+                [ this ] {
+                    std::lock_guard<std::mutex> lock( shared->mutex );
+                    return shared->subscriptionDone;
+                },
+                kDrainTimeout );
+            return;
+        }
+        // Not connected, nothing more arrives (and a drain would wait for
+        // its flush to time out): wait until nats.c has delivered what it
+        // holds.  A message it has taken from the queue it delivers even if
+        // the subscription is closed meanwhile.
+        writeUntil(
+            [ subscription ] {
+                int pending = 0;
+                return natsSubscription_GetPending( subscription, &pending, nullptr ) != NATS_OK
+                       || pending == 0;
+            },
+            kCallbackTimeout );
+        natsSubscription_Unsubscribe( subscription );
+    }
+
+    /// End the subscription, close and destroy; whether nats.c confirmed
+    /// that it makes no callback any more.
     bool close( natsConnection* connection, natsSubscription* subscription )
     {
         {
             std::lock_guard<std::mutex> lock( shared->mutex );
             shared->stopping = true;
         }
-        bool confirmed = true;
         if ( subscription ) {
-            // nats.c no longer counts drops once unsubscribed: lift the
-            // limits, so that it drops nothing more, and mark the last.
-            natsSubscription_SetPendingLimits( subscription, -1, -1 );
-            shared->markSlowConsumer( subscription );
-            natsSubscription_Unsubscribe( subscription );
-            confirmed = waitUntil( []( const Shared& s ) { return s.subscriptionDone; } );
+            endSubscription( connection, subscription );
         }
+        bool confirmed = true;
         if ( connection ) {
             natsConnection_Close( connection );
-            confirmed = waitUntil( []( const Shared& s ) { return s.closed; } ) && confirmed;
+            confirmed = waitUntil( [ subscription ]( const Shared& s ) {
+                return s.closed && ( !subscription || s.subscriptionDone );
+            } );
         }
         natsSubscription_Destroy( subscription );
         natsConnection_Destroy( connection );

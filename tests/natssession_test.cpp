@@ -585,12 +585,14 @@ SCENARIO( "under a flood every drop is counted in exactly one marker", "[server]
             flood( publisher, "flood", published );
             session.stop();
 
-            THEN( "the drops counted until then are all in markers before the stopped marker" )
+            THEN( "every message published is written or counted in a marker before the stopped "
+                  "marker, none lost" )
             {
                 const auto lines = readLines( session.filePath() );
                 const auto t = tally( lines, "flood" );
                 REQUIRE( t.unknown == 0 );
                 REQUIRE( t.dropped() > 0 );
+                REQUIRE( t.dropped() == published - t.written );
                 REQUIRE( session.droppedCount() == static_cast<quint64>( t.dropped() ) );
                 // What reached the session was written or dropped from its queue.
                 REQUIRE( session.receivedCount()
