@@ -23,7 +23,8 @@ version, hash, options and compiler stay the same.
 ## Third-party code: OpenSSL and nats.c
 
 Both are linked **statically** into `logsquirl_nats`, so the package carries
-no other library and runs on every Linux distribution (no system OpenSSL):
+no other library and runs on every Linux distribution (no system OpenSSL).
+Why: [ADR 1](adr/0001-static-openssl-built-by-the-plugin.md).
 
 - **OpenSSL** (3.x LTS) is built by [`cmake/OpenSSL.cmake`](../cmake/OpenSSL.cmake)
   from the release tarball, at configure time: static only, no modules,
@@ -44,7 +45,9 @@ one).
 
 ### A security fix in OpenSSL or nats.c
 
-Versions and SHA-256s are in one place, [`cmake/Dependencies.cmake`](../cmake/Dependencies.cmake).
+Versions and SHA-256s of every downloaded dependency (OpenSSL, nats.c, and
+for the tests nats-server and Catch2) are in one place,
+[`cmake/Dependencies.cmake`](../cmake/Dependencies.cmake).
 Because both are linked in, **users get a fix only with a new plugin
 release**:
 
@@ -53,17 +56,24 @@ release**:
 2. Build and test on all three platforms (CI).
 3. Release the plugin (bump `plugin.json` and `project(VERSION)`).
 
-Check the dependencies of the library with `otool -L` (macOS), `ldd`
-(Linux) or `dumpbin /dependents` (Windows): no OpenSSL library may appear.
+The ctest `no_shared_openssl` checks the library's dependencies (`otool -L`,
+`objdump -p` or `dumpbin -dependents`): no OpenSSL shared library may appear.
+
+### Licences in the package
+
+Because the library contains Apache-2.0 code, the package carries `LICENSE`,
+`NOTICE` and `Apache-2.0.txt` (from `LICENSES/`) beside the library:
+`package_files` in `.github/plugin-ci.json`, and the install rule.
 
 ## Testing
 
-Catch2 v2, one test program, two ctest entries:
+Catch2 v2, one test program run as two ctest entries, plus a dependency check:
 
 | ctest entry | Runs |
 |---|---|
 | `logsquirl_nats_tests` | everything that needs no server |
 | `logsquirl_nats_server_tests` | the tests tagged `[server]`, against a real `nats-server` |
+| `no_shared_openssl` | the plugin library links no OpenSSL shared library |
 
 ### The nats-server of the tests
 
@@ -82,6 +92,11 @@ build succeeds and `logsquirl_nats_server_tests` is reported by ctest as
 **skipped** (exit code 77). The reason is a configure warning and in the
 test's output (`ctest -V`: `SKIPPED: … need a nats-server: <reason>`).
 A download with the wrong hash fails the configure.
+
+**In CI** (the environment variable `CI` is set, as on GitHub Actions) there
+is no skip: a missing server fails the configure, and a server test that
+finds none fails. Otherwise the job would pass with the round trip and TLS
+never tested.
 
 In a test, `nats_test::NatsServer` ([`tests/natsserver.h`](../tests/natsserver.h))
 starts a server on a free port of 127.0.0.1 — optionally with JetStream
