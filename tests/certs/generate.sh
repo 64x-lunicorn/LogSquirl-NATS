@@ -20,34 +20,26 @@ days=36500
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-openssl ecparam -name prime256v1 -genkey -noout -out "$work/ca-key.pem"
-openssl req -x509 -new -key "$work/ca-key.pem" -sha256 -days "$days" \
-  -subj "/CN=logsquirl-nats test CA" \
-  -addext "basicConstraints=critical,CA:TRUE" \
-  -addext "keyUsage=critical,keyCertSign,cRLSign" \
-  -out ca-cert.pem
+# ca <name> <common name>: <name>-cert.pem, a self-signed CA; its key,
+# <name>-key.pem, only in the work directory.
+ca() {
+  local name=$1 cn=$2
+  openssl ecparam -name prime256v1 -genkey -noout -out "$work/$name-key.pem"
+  openssl req -x509 -new -key "$work/$name-key.pem" -sha256 -days "$days" \
+    -subj "/CN=$cn" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -out "$name-cert.pem"
+}
 
-openssl ecparam -name prime256v1 -genkey -noout -out "$work/server-key-ec.pem"
-openssl pkcs8 -topk8 -nocrypt -in "$work/server-key-ec.pem" -out server-key.pem
-openssl req -new -key server-key.pem -subj "/CN=localhost" -out "$work/server.csr"
-cat > "$work/server.ext" <<'EOF'
-basicConstraints=critical,CA:FALSE
-keyUsage=critical,digitalSignature
-extendedKeyUsage=serverAuth
-subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1
-EOF
-openssl x509 -req -in "$work/server.csr" -CA ca-cert.pem -CAkey "$work/ca-key.pem" \
-  -CAcreateserial -CAserial "$work/ca.srl" -sha256 -days "$days" \
-  -extfile "$work/server.ext" -out server-cert.pem
-
-# sign <name> <ca-name> <extendedKeyUsage> [subjectAltName]: <name>-key.pem and
-# <name>-cert.pem, signed by <ca-name>-cert.pem.
+# sign <name> <ca-name> <extendedKeyUsage> [subjectAltName] [common name]:
+# <name>-key.pem and <name>-cert.pem, signed by <ca-name>-cert.pem; the
+# common name is "logsquirl-nats test <name>" unless given.
 sign() {
-  local name=$1 ca=$2 usage=$3 san=${4:-}
+  local name=$1 ca=$2 usage=$3 san=${4:-} cn=${5:-"logsquirl-nats test $1"}
   openssl ecparam -name prime256v1 -genkey -noout -out "$work/$name-key-ec.pem"
   openssl pkcs8 -topk8 -nocrypt -in "$work/$name-key-ec.pem" -out "$name-key.pem"
-  openssl req -new -key "$name-key.pem" -subj "/CN=logsquirl-nats test $name" \
-    -out "$work/$name.csr"
+  openssl req -new -key "$name-key.pem" -subj "/CN=$cn" -out "$work/$name.csr"
   {
     echo "basicConstraints=critical,CA:FALSE"
     echo "keyUsage=critical,digitalSignature"
@@ -59,14 +51,11 @@ sign() {
     -extfile "$work/$name.ext" -out "$name-cert.pem"
 }
 
+ca ca "logsquirl-nats test CA"
+sign server ca serverAuth "DNS:localhost,IP:127.0.0.1,IP:::1" localhost
 sign client ca clientAuth
 
-openssl ecparam -name prime256v1 -genkey -noout -out "$work/other-ca-key.pem"
-openssl req -x509 -new -key "$work/other-ca-key.pem" -sha256 -days "$days" \
-  -subj "/CN=logsquirl-nats other test CA" \
-  -addext "basicConstraints=critical,CA:TRUE" \
-  -addext "keyUsage=critical,keyCertSign,cRLSign" \
-  -out other-ca-cert.pem
+ca other-ca "logsquirl-nats other test CA"
 sign other-client other-ca clientAuth
 
 # The CA keys are thrown away: nothing else can ever be signed with them.
