@@ -32,6 +32,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSettings>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
@@ -46,6 +47,72 @@ constexpr int kMegabyte = 1024 * 1024;
 /// nats.c takes the byte limit as an int.
 constexpr int kMaxPendingMegabytes = std::numeric_limits<int>::max() / kMegabyte;
 
+/// The largest size limit the dialog takes: 1 TiB.
+constexpr int kMaxFileMiB = 1024 * 1024;
+
+/// Where the size limit is saved.
+constexpr const char* kMaxFileMiBKey = "capture/maxFileMiB";
+
+/// The plugin's settings file, nats.ini in its configuration directory;
+/// empty without a host to say where that is.
+QString settingsFile()
+{
+    if ( !g_state.api || !g_state.handle || !g_state.api->get_config_dir ) {
+        return {};
+    }
+    const char* dir = g_state.api->get_config_dir( g_state.handle );
+    if ( !dir || !*dir ) {
+        return {};
+    }
+    return QString::fromUtf8( dir ) + QStringLiteral( "/nats.ini" );
+}
+
+/// The size limit saved last time, or the default.
+int savedMaxFileMiB()
+{
+    const auto file = settingsFile();
+    if ( file.isEmpty() ) {
+        return kDefaultMaxFileMiB;
+    }
+    bool ok = false;
+    const auto value = QSettings( file, QSettings::IniFormat )
+                           .value( kMaxFileMiBKey, kDefaultMaxFileMiB )
+                           .toInt( &ok );
+    return ok && value >= 0 && value <= kMaxFileMiB ? value : kDefaultMaxFileMiB;
+}
+
+/// Save the size limit @p mib for the next session.
+void saveMaxFileMiB( int mib )
+{
+    const auto file = settingsFile();
+    if ( file.isEmpty() ) {
+        return;
+    }
+    QSettings settings( file, QSettings::IniFormat );
+    settings.setValue( kMaxFileMiBKey, mib );
+    settings.sync();
+    if ( settings.status() != QSettings::NoError ) {
+        hostLog( LOGSQUIRL_LOG_WARNING,
+                 QStringLiteral( "NATS Monitor: the size limit could not be saved to %1." )
+                     .arg( file ) );
+    }
+}
+
+/// The capture of @p subject reached its size limit of @p mib and goes on
+/// in @p path: open it in a new followed tab, and say why.
+void openRotatedFile( const QString& subject, int mib, const QString& path )
+{
+    if ( g_state.api && g_state.handle ) {
+        g_state.api->open_file( g_state.handle, path.toUtf8().constData(), 1 );
+    }
+    const auto text = QStringLiteral( "The NATS capture of %1 reached its size limit of %2 MiB; "
+                                      "it goes on in a new tab." )
+                          .arg( subject )
+                          .arg( mib );
+    hostLog( LOGSQUIRL_LOG_INFO, text + QStringLiteral( " (%1)" ).arg( path ) );
+    hostNotify( text );
+}
+
 } // namespace
 
 ConnectionDialog::ConnectionDialog( QWidget* parent )
@@ -55,6 +122,7 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
     , maxBinarySpin_( new QSpinBox( this ) )
     , pendingMessagesSpin_( new QSpinBox( this ) )
     , pendingMegabytesSpin_( new QSpinBox( this ) )
+    , maxFileSpin_( new QSpinBox( this ) )
     , startButton_( new QPushButton( QStringLiteral( "▶ Start" ), this ) )
     , stopButton_( new QPushButton( QStringLiteral( "■ Stop" ), this ) )
     , statusLabel_( new QLabel( QStringLiteral( "Not capturing." ), this ) )
@@ -89,6 +157,15 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
             "How much the NATS client holds for the capture while it writes: beyond it, "
             "messages are dropped as a slow consumer, and the file says how many" ) );
     }
+    maxFileSpin_->setObjectName( "maxFileMiB" );
+    maxFileSpin_->setRange( 0, kMaxFileMiB );
+    maxFileSpin_->setGroupSeparatorShown( true );
+    maxFileSpin_->setSuffix( QStringLiteral( " MiB" ) );
+    maxFileSpin_->setSpecialValueText( QStringLiteral( "No limit" ) );
+    maxFileSpin_->setValue( savedMaxFileMiB() );
+    maxFileSpin_->setToolTip(
+        QStringLiteral( "When a file reaches this size, the capture goes on in a new file, "
+                        "opened in a new tab; remembered for the next session" ) );
     startButton_->setObjectName( "start" );
     startButton_->setDefault( true );
     stopButton_->setObjectName( "stop" );
@@ -104,6 +181,7 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
     pending->addWidget( pendingMessagesSpin_ );
     pending->addWidget( pendingMegabytesSpin_ );
     form->addRow( QStringLiteral( "Pending at most:" ), pending );
+    form->addRow( QStringLiteral( "New file at:" ), maxFileSpin_ );
 
     auto* buttons = new QHBoxLayout;
     buttons->addStretch();
@@ -159,6 +237,7 @@ void ConnectionDialog::startCapture()
     config.format.maxBinaryBytes = maxBinarySpin_->value();
     config.pendingLimits
         = { pendingMessagesSpin_->value(), pendingMegabytesSpin_->value() * kMegabyte };
+    config.maxFileBytes = maxFileSpin_->value() * kBytesPerMiB;
     if ( config.url.isEmpty() ) {
         statusLabel_->setText( QStringLiteral( "Enter the server URL." ) );
         return;
@@ -167,6 +246,8 @@ void ConnectionDialog::startCapture()
         statusLabel_->setText( QStringLiteral( "Enter the subject to capture." ) );
         return;
     }
+
+    saveMaxFileMiB( maxFileSpin_->value() );
 
     auto* session = new NatsSession( config, this );
     connect( session, &NatsSession::statusChanged, statusLabel_, &QLabel::setText );
@@ -178,6 +259,13 @@ void ConnectionDialog::startCapture()
                  hostNotify( text );
              } );
     connect( session, &NatsSession::finished, this, &ConnectionDialog::onSessionFinished );
+    // In the session's context, not the dialog's: releaseSession() keeps
+    // it, so a file the session goes on in while it stops still gets its
+    // tab (the queued signal comes before the session's deleteLater()).
+    connect( session, &NatsSession::fileRotated, session,
+             [ subject = config.subject, mib = maxFileSpin_->value() ]( const QString& path ) {
+                 openRotatedFile( subject, mib, path );
+             } );
 
     statusLabel_->setText( QStringLiteral( "Connecting to %1…" ).arg( config.url ) );
     if ( !session->start() ) {
@@ -231,6 +319,7 @@ void ConnectionDialog::updateButtons()
     maxBinarySpin_->setEnabled( !capturing );
     pendingMessagesSpin_->setEnabled( !capturing );
     pendingMegabytesSpin_->setEnabled( !capturing );
+    maxFileSpin_->setEnabled( !capturing );
 }
 
 } // namespace nats_monitor

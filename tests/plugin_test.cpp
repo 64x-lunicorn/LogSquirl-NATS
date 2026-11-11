@@ -362,6 +362,87 @@ SCENARIO( "the pending limits are set in the dialog", "[plugin][server]" )
     }
 }
 
+SCENARIO( "the size limit is set in the dialog, and each new file opens in a new tab",
+          "[plugin][server][rotation]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "an initialised plugin and a server" )
+    {
+        NatsServer server;
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+
+        THEN( "the dialog proposes 256 MiB, and 0 reads as no limit" )
+        {
+            auto* spin = spinBox( openDialog(), "maxFileMiB" );
+            REQUIRE( spin->value() == 256 );
+            REQUIRE( spin->suffix() == " MiB" );
+            spin->setValue( 0 );
+            REQUIRE( spin->text() == "No limit" );
+        }
+
+        WHEN( "the user sets 1 MiB and starts a capture that writes more than that" )
+        {
+            spinBox( openDialog(), "maxFileMiB" )->setValue( 1 );
+            startFromDialog( host, server.url(), "big" );
+            REQUIRE( host.openedFiles.size() == 1 );
+            REQUIRE( waitSubscribed( host.openedFiles.first() ) );
+            {
+                Publisher publisher( server.url() );
+                const QByteArray payload( 1000, 'x' );
+                for ( int i = 0; i < 1100; ++i ) {
+                    publisher.publish( "big", payload, {}, {}, i % 100 == 99 );
+                }
+            }
+
+            THEN( "the next file opens in a new followed tab, and the user is told why" )
+            {
+                REQUIRE( waitFor( [ & ] { return host.openedFiles.size() == 2; } ) );
+                REQUIRE( host.openedFollow.at( 1 ) );
+                REQUIRE( QFileInfo( host.openedFiles.at( 1 ) ).fileName() == "nats_big.2.log" );
+                REQUIRE( QFileInfo( host.openedFiles.first() ).size() <= 1024 * 1024 );
+                REQUIRE( host.notifications.last().contains( "size limit of 1 MiB" ) );
+                REQUIRE( host.notifications.last().contains( "new tab" ) );
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+}
+
+SCENARIO( "the size limit is remembered between sessions", "[plugin][server][rotation]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a capture started with a size limit of 7 MiB, then the plugin shut down" )
+    {
+        NatsServer server;
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+        spinBox( openDialog(), "maxFileMiB" )->setValue( 7 );
+        startFromDialog( host, server.url(), "x" );
+        button( openDialog(), "stop" )->click();
+        logsquirl_plugin_shutdown();
+
+        WHEN( "the plugin is initialised again and its dialog opened" )
+        {
+            host.menuActions.clear();
+            REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+            host.menuActions.first().trigger();
+
+            THEN( "it proposes 7 MiB" )
+            {
+                REQUIRE( spinBox( openDialog(), "maxFileMiB" )->value() == 7 );
+            }
+
+            logsquirl_plugin_shutdown();
+        }
+    }
+}
+
 SCENARIO( "a capture that fails is notified", "[plugin][server]" )
 {
     SKIP_WITHOUT_NATS_SERVER();

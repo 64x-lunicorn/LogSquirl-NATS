@@ -23,7 +23,9 @@
  *
  * A FakeHost hands the plugin a host API table that records every log
  * message, notification, opened file and menu entry for the test to
- * inspect.  The test passes api() and handle() to logsquirl_plugin_init().
+ * inspect, and gives it a configuration directory of its own, which lasts
+ * as long as the host: a plugin initialised again on the same host finds
+ * the settings it saved.  The test passes api() and handle() to logsquirl_plugin_init().
  */
 
 #pragma once
@@ -63,6 +65,11 @@ public:
         api_.api_version = LOGSQUIRL_PLUGIN_API_VERSION;
         api_.log_message = []( void* handle, int, const char* message ) {
             self( handle )->logs << QString::fromUtf8( message );
+        };
+        api_.get_config_dir = []( void* handle ) {
+            auto* host = self( handle );
+            host->configDirUtf8_ = host->configDir_.path().toUtf8();
+            return host->configDirUtf8_.constData();
         };
         api_.show_notification = []( void* handle, const char* message ) {
             self( handle )->notifications << QString::fromUtf8( message );
@@ -106,6 +113,12 @@ public:
         return this;
     }
 
+    /** The plugin's configuration directory, private to this host. */
+    QString configDir() const
+    {
+        return configDir_.path();
+    }
+
     /** The plugin's temporary root, private to this host. */
     QString tempRoot() const
     {
@@ -128,6 +141,8 @@ private:
 
     LogSquirlHostApi api_{};
     QTemporaryDir tempRoot_;
+    QTemporaryDir configDir_;
+    QByteArray configDirUtf8_; ///< What get_config_dir() last returned.
 };
 
 } // namespace nats_test
