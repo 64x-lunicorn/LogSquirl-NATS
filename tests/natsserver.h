@@ -62,6 +62,7 @@ bool runningInCi();
 struct NatsServerOptions {
     bool jetStream = false; ///< Start with JetStream (-js), its store in a temporary directory.
     QString configFile;     ///< A configuration file (-c); empty: none.
+    int port = 0;           ///< The port to listen on; 0: a free one.
 };
 
 class NatsServer {

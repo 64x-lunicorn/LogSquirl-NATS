@@ -33,6 +33,7 @@ add_executable(logsquirl_nats_tests
     library_test.cpp
     natsserver_test.cpp
     lineformat_test.cpp
+    natssession_test.cpp
 )
 
 set_target_properties(logsquirl_nats_tests PROPERTIES
