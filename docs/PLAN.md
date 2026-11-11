@@ -17,6 +17,8 @@ Tickets: see [Tickets](#tickets).
 | Scope of v1 | Core NATS subscribe; JetStream replay in the release after | Live capture first; replay builds on the same writer and line format. |
 | TLS backend | **OpenSSL 3.x LTS, built by the plugin's CMake, linked in statically** | No change to the shared CI, no extra library in the package, same on every platform; [ADR 1](adr/0001-static-openssl-built-by-the-plugin.md). |
 | Saved connections | **Profiles in `nats.ini`** (URLs, auth method, user name, file paths, TLS settings); **passwords and tokens never saved**, entered at Start (#6) | Nothing secret in a plain-text file; a `.creds` file is the way to keep credentials without typing them. A keychain is not needed for v1. |
+| Overlapping subjects in a session | **One line per subscription**, no deduplication; the dialog warns and, when one subject covers the other, suggests dropping the narrower one (#7) | nats.c delivers a matching message once per subscription (checked by a test against the pinned nats.c); deduplicating would hide what the server actually delivers. |
+| Queue groups | **Off by default**, per subject (#7) | A session in a queue group takes messages away from the group's other members. |
 
 ## Architecture
 
@@ -27,9 +29,12 @@ Modelled on LogSquirl-Serial (`src/serialprocess.*`, `src/portwidget.*`,
 Tools ▸ Plugins ▸ NATS Monitor…        (register_menu_action)
         │
         ▼
-ConnectionDialog (QDialog)            server URL(s), auth, subjects, queue group,
-        │                             size limit; Start / Stop per session
-        ▼
+ConnectionDialog (QDialog)            server URL(s), auth, subjects (each with an
+        │                             optional queue group), size limit; Start adds
+        │                             a session, Stop / Stop all; running sessions listed
+        │ ──▶ StatusWidget            status bar (register_status_widget): sessions,
+        │                             msgs/s, dropped
+        ▼  one per Start, side by side
 NatsSession                           one natsConnection, N natsSubscriptions
   ├─ nats.c delivery thread(s)        message callback: format line, enqueue — never block
   ├─ LineQueue (bounded, lock-free    or mutex + condvar)
@@ -54,8 +59,16 @@ temp file  logsquirl-nats-<pid>-XXXXXX/nats_<name>.log  → open_file(follow=1)
   nats.c reports how many it dropped, not where: a slow-consumer marker may
   land up to the pending-message limit earlier in the file than the actual
   gap, since the messages nats.c still held when it dropped are written
-  after the marker. On stop the subscription is drained, so nothing nats.c
+  after the marker. On stop each subscription is drained, so nothing nats.c
   holds is discarded uncounted.
+- **Several subjects, several sessions** (#7). A session subscribes to one
+  or more subjects, each optionally in a queue group, and writes all of them
+  into its one file. Overlapping subjects (`orders.>` and `orders.eu.*`)
+  give one line per subscription, as the server delivers them; the dialog
+  warns. Each Start adds a session beside those running, with its own
+  connection, file and tab, as Serial's sessions per port; shutdown stops
+  them all. The status widget shows how many run, the msgs/s they receive
+  and how many the running sessions dropped.
 - **Limits.** Size limit with rotation, as Serial does (#33 there): set in
   the dialog in MiB, default 256 MiB, 0 = no limit, remembered between
   sessions (`nats.ini` in the plugin's configuration directory). Before a

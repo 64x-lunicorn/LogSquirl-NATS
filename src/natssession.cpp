@@ -24,22 +24,23 @@
  * HOW IT WORKS
  * ────────────
  *   1. start() creates the file and starts the writer thread.
- *   2. The writer thread connects and subscribes; its "connected" marker
- *      is the capture's first line.
+ *   2. The writer thread connects and subscribes to each subject; its
+ *      "connected" marker is the capture's first line.
  *   3. nats.c's callbacks format a line and push it onto the queue under a
  *      mutex, and wake the writer.  The writer swaps the whole queue out,
  *      writes the batch and flushes, so it never holds the mutex while
  *      writing.  A full queue drops the message and counts it; the next
  *      message queued is preceded by the dropped= marker.  Each message
  *      callback (and the slow-consumer error, and the disconnected
- *      callback) also reads nats.c's dropped count and marks what is new.
+ *      callback) also reads nats.c's dropped count of its subscription
+ *      (each, for the disconnected callback) and marks what is new.
  *   4. Before a line that would take the file over the size limit, the
  *      writer opens the next file (NewOnly, so no earlier file is ever
  *      truncated), closes the full one and reports the new path.
  *   5. stop() asks the writer to end.  It lifts the pending limits, so
- *      nats.c drops nothing more, and marks its last dropped count.  It
- *      drains the subscription (or, not connected, waits until nats.c
- *      holds nothing for it), writing all the while, closes the
+ *      nats.c drops nothing more, and marks the last dropped counts.  It
+ *      drains each subscription (or, not connected, waits until nats.c
+ *      holds nothing for them), writing all the while, closes the
  *      connection, waits until nats.c has made its last callback, writes
  *      what is left and a "stopped" marker, and closes the file.
  *

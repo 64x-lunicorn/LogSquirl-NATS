@@ -179,6 +179,49 @@ The dialog saves the size limit on Start, to
 `get_config_dir` gives (next to the connection profiles); the dialog reads it when it is created. The tests'
 `FakeHost` gives each host a configuration directory of its own.
 
+### Several subjects, several sessions, the status widget
+
+`SessionConfig::subscriptions` lists what a session subscribes to: one or
+more `Subscription`s, a subject and an optional queue group (empty, the
+default: a session in a queue group takes messages away from the group's
+other members). All of them write into the session's one file,
+`nats_<subjects>.log` (the subjects made safe for a file name, joined by
+`_`, cut to 100 characters), and its first marker names them:
+`connected to …, subscribed to orders.>, jobs.* (queue workers)`
+(`describeSubscriptions()`). Pending limits, slow-consumer markers and
+draining on stop are per subscription; `receivedCount()` and
+`droppedCount()` are the session's.
+
+**Overlapping subjects** are written as the server delivers them: nats.c
+delivers a message that matches several subscriptions once for each, so
+`orders.>` and `orders.eu.*` give two lines for `orders.eu.created`. No
+deduplication, which would hide what the server sent. The dialog takes the
+subjects one a line, `<subject> [<queue group>]`
+([`src/subjects.h`](../src/subjects.h)), and warns below them when two
+overlap (some subject matches both); when one covers the other (every
+subject the narrower matches, the wider matches too) it suggests dropping
+the narrower one.
+
+**Each Start adds a session** beside those running, with its own
+connection, file and tab, as LogSquirl-Serial does per port. The dialog
+lists them; Stop stops the one selected, Stop all every one, and shutdown
+stops them all. Its settings stay editable while sessions run, for the
+next. The status line prefixes each event with its session's subjects.
+
+**The status widget** ([`src/statuswidget.h`](../src/statuswidget.h)) is
+registered with `register_status_widget` at init and unregistered (then
+deleted, before the dialog) at shutdown. It reads
+`NATS: 2 sessions · 1,234 msgs/s · 5 dropped`, or `NATS: no capture`: it
+samples `ConnectionDialog::totals()` once a second for the rate, and
+updates the session count at once when a session starts or ends. The
+dropped count is that of the running sessions; their files mark where.
+
+The tests (`[subjects]` and `[status]`) are at the main seam: two subjects
+and the overlap in `natssession_test.cpp` (and a queue group shared with
+another member), several sessions, the overlap warning and the widget
+through the dialog in `plugin_test.cpp`; `FakeHost` records the status
+widgets registered.
+
 ### The Log Format
 
 `formats/nats_log.json` gives LogSquirl's Table View the columns
