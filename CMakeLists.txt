@@ -68,13 +68,11 @@ endif()
 # does), and symbols kept local can neither bind to that OpenSSL nor have
 # others bind to the plugin's copy.  (Windows exports only dllexport.)
 if(APPLE)
-    target_link_options(logsquirl_nats PRIVATE
-        "LINKER:-exported_symbol,_logsquirl_plugin_*"
-        "LINKER:-exported_symbol,_logsquirl_converter_*")
+    target_link_options(logsquirl_nats PRIVATE "LINKER:-exported_symbol,_logsquirl_plugin_*")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(_exports "${CMAKE_CURRENT_BINARY_DIR}/exports.map")
     file(WRITE "${_exports}"
-        "{ global: logsquirl_plugin_*; logsquirl_converter_*; local: *; };\n")
+        "{ global: logsquirl_plugin_*; local: *; };\n")
     target_link_options(logsquirl_nats PRIVATE
         "LINKER:--exclude-libs,ALL"
         "LINKER:--version-script=${_exports}")
