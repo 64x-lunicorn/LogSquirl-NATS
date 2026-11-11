@@ -33,6 +33,7 @@ add_executable(logsquirl_nats_tests
     library_test.cpp
     natsserver_test.cpp
     lineformat_test.cpp
+    logformat_test.cpp
     natssession_test.cpp
 )
 
@@ -58,7 +59,9 @@ target_include_directories(logsquirl_nats_tests PRIVATE "${CMAKE_CURRENT_BINARY_
 # The built plugin library, which library_test.cpp loads as the host would.
 add_dependencies(logsquirl_nats_tests logsquirl_nats)
 target_compile_definitions(logsquirl_nats_tests
-    PRIVATE LOGSQUIRL_NATS_LIBRARY="$<TARGET_FILE:logsquirl_nats>")
+    PRIVATE LOGSQUIRL_NATS_LIBRARY="$<TARGET_FILE:logsquirl_nats>"
+            # The Log Format, which logformat_test.cpp reads formatter lines with
+            NATS_FORMAT_FILE="${CMAKE_SOURCE_DIR}/formats/nats_log.json")
 
 target_link_libraries(logsquirl_nats_tests
     PRIVATE
