@@ -89,7 +89,8 @@ notification, and later lines are not written.
 **Stopping.** `stop()` asks the writer to end and waits for it. The writer
 lifts the pending limits, so nats.c drops nothing more, and marks the last
 dropped counts. It drains each subscription (`natsSubscription_DrainTimeout`,
-at most 15 s; not connected, it waits until nats.c holds nothing for them),
+at most 15 s; not connected, it waits up to 5 s until nats.c holds nothing
+for them),
 writing all the while, closes the connection, waits for nats.c's last
 callback, writes what is left and the `stopped` marker, and closes the
 file. Nothing that reached the session before `stop()` is lost uncounted.
@@ -286,8 +287,9 @@ time:
    runs OpenSSL's `Configure` with Perl, then `make build_libs` and
    `make install_dev` (`nmake` on Windows) into `build/openssl/`. A stamp
    there, keyed on the version, hash, options and C compiler, skips all of
-   it the next time. `--openssldir` is `/etc/ssl`, the system's certificate
-   directory, never a path of the build machine.
+   it the next time. `--openssldir` is `/etc/ssl` on Linux and macOS, the
+   system's certificate directory rather than a path of the build machine;
+   on Windows, which has no such directory, it is `build/openssl/ssl`.
 3. It defines the imported targets and sets `OPENSSL_ROOT_DIR`,
    `OPENSSL_SSL_LIBRARY` and the rest in the cache, then checks with
    `find_package(OpenSSL <version> EXACT)` that this build is what is found.

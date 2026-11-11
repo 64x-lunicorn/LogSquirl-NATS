@@ -177,6 +177,18 @@ one elsewhere to keep it.
 *Plugins → Manage Plugins… → Configure* has no settings yet: everything is in
 the dialog.
 
+### Screenshots still to take
+
+The screenshots are taken when the plugin is first tried in LogSquirl 26.12;
+until then each has a marked placeholder above or below:
+
+| File | Shows |
+|------|-------|
+| `docs/images/dialog.png` | The dialog: a profile loaded, two subjects (one with a queue group), TLS on, two sessions running |
+| `docs/images/capture-tab.png` | A followed capture tab with live messages, headers and a highlighter |
+| `docs/images/status-widget.png` | The status bar widget during a capture |
+| `docs/images/table-view.png` | The Table View with the plugin's columns |
+
 ## Line Format
 
 One message per line, fields separated by one space:

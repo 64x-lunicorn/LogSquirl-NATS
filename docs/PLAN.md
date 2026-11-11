@@ -27,7 +27,7 @@ Modelled on LogSquirl-Serial (`src/serialprocess.*`, `src/portwidget.*`,
 `src/tempdirs.*`, `guarded()` in `src/plugin.cpp`):
 
 ```
-Tools ▸ Plugins ▸ NATS Monitor…        (register_menu_action)
+Plugins ▸ NATS Monitor…               (register_menu_action)
         │
         ▼
 ConnectionDialog (QDialog)            server URL(s), auth, subjects (each with an
@@ -43,7 +43,7 @@ NatsSession                           one natsConnection, N natsSubscriptions
                                       rotation at size limit, drop counter
         │
         ▼
-temp file  logsquirl-nats-<pid>-XXXXXX/nats_<name>.log  → open_file(follow=1)
+temp file  logsquirl-nats-<pid>-XXXXXX/nats_<subjects>.log  → open_file(follow=1)
 ```
 
 - **Threading.** nats.c delivers messages on its own threads. The callback only
@@ -74,8 +74,8 @@ temp file  logsquirl-nats-<pid>-XXXXXX/nats_<name>.log  → open_file(follow=1)
   the dialog in MiB, default 256 MiB, 0 = no limit, remembered between
   sessions (`nats.ini` in the plugin's configuration directory). Before a
   line that would take the file over the limit, the writer goes on in the
-  next file, so a message line is never split: `nats_<name>.log`,
-  `nats_<name>.2.log`, … Each opens in a new followed tab and is logged to
+  next file, so a message line is never split: `nats_<subjects>.log`,
+  `nats_<subjects>.2.log`, … Each opens in a new followed tab and is logged to
   the host log (not notified, as in Serial). A line longer
   than the limit is written whole, alone in its file. A rotation that fails
   (the next file cannot be created) is reported once, and the capture goes

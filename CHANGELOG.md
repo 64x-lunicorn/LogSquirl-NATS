@@ -10,7 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0]
 
 ### Added
-
 - Initial release of the LogSquirl NATS Monitor plugin: live capture of
   core NATS subjects into a followed LogSquirl tab.
 - **Subscribe and follow.** *Plugins → NATS Monitor…* opens a dialog; Start
