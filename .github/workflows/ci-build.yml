@@ -1,0 +1,24 @@
+name: "CI Build"
+
+# Identical in every LogSquirl plugin and managed by LogSquirl-Plugin-CI
+# (scripts/sync-plugin.sh): change the shared workflow there, not here. What is
+# plugin-specific lives in plugin.json and .github/plugin-ci.json.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  ci:
+    name: CI
+    uses: 64x-lunicorn/LogSquirl-Plugin-CI/.github/workflows/plugin-build.yml@eb3ad618ff0cc9e6ff5af9fe9a6009e7776823c8 # v1.3.0
+    permissions:
+      contents: read
