@@ -273,6 +273,8 @@ private:
     /// The running worker's counts, or those the last one left.
     Counts counts() const;
 
+    /// With its secret, which start() needs again; the worker clears its
+    /// copy once nats.c's options hold it.
     SessionConfig config_;
     QTemporaryDir tempDir_; ///< Declared before worker_: removed after the file is closed.
     QString filePath_;

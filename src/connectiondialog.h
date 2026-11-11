@@ -31,7 +31,8 @@
  *     file or an NKey seed file
  *   - TLS: the CA file, a client certificate and its key, the server name
  *     the certificate must be for, and skipping the verification (off, and
- *     marked as insecure)
+ *     marked as insecure); they apply, and can be entered, when the
+ *     connection uses TLS: Use TLS checked, or a tls:// URL
  *   - the subject, with the wildcards * and >
  *   - how many bytes of a binary payload are written (default 256)
  *   - the subscription's pending limits, messages and MiB (default
@@ -70,7 +71,12 @@
 
 #pragma once
 
+#include "natssession.h"
+
 #include <QDialog>
+#include <QList>
+
+#include <utility>
 
 class QCheckBox;
 class QComboBox;
@@ -150,7 +156,9 @@ private:
     QLineEdit* keyFileEdit_;
     QLineEdit* serverNameEdit_;
     QCheckBox* skipVerifyCheck_;
-    QList<QWidget*> tlsWidgets_; ///< Enabled with TLS.
+    QList<QWidget*> tlsWidgets_; ///< Enabled when the connection uses TLS.
+    /// The TLS settings entered in a line edit, by their field.
+    QList<std::pair<QLineEdit*, QString TlsConfig::*>> tlsTexts_;
     QLineEdit* subjectEdit_;
     QSpinBox* maxBinarySpin_;
     QSpinBox* pendingMessagesSpin_;

@@ -24,6 +24,8 @@
 
 #include "connectiondialog.h"
 
+#include "authmethods.h"
+#include "natsoptions.h"
 #include "natssession.h"
 #include "plugin.h"
 #include "profiles.h"
@@ -120,36 +122,10 @@ void openRotatedFile( const SessionConfig& config, const QString& path )
                  .arg( path ) );
 }
 
-/// The authentication methods, as the dialog lists them.
-const QList<std::pair<AuthMethod, QString>>& authMethods()
+/// The method chosen in @p combo.
+const AuthMethodInfo& chosenMethod( const QComboBox* combo )
 {
-    static const QList<std::pair<AuthMethod, QString>> methods{
-        { AuthMethod::None, QStringLiteral( "No credentials" ) },
-        { AuthMethod::UserPassword, QStringLiteral( "User and password" ) },
-        { AuthMethod::Token, QStringLiteral( "Token" ) },
-        { AuthMethod::Credentials, QStringLiteral( "Credentials file (.creds)" ) },
-        { AuthMethod::NKey, QStringLiteral( "NKey seed file" ) },
-    };
-    return methods;
-}
-
-/// What a method needs as its secret, for the dialog's words; empty if none.
-QString secretName( AuthMethod method )
-{
-    switch ( method ) {
-    case AuthMethod::UserPassword:
-        return QStringLiteral( "password" );
-    case AuthMethod::Token:
-        return QStringLiteral( "token" );
-    default:
-        return {};
-    }
-}
-
-/// Whether @p method reads a file.
-bool usesFile( AuthMethod method )
-{
-    return method == AuthMethod::Credentials || method == AuthMethod::NKey;
+    return authMethodInfo( static_cast<AuthMethod>( combo->currentData().toInt() ) );
 }
 
 } // namespace
@@ -200,18 +176,19 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
                                           "servers of one cluster comma-separated" ) );
 
     authCombo_->setObjectName( "authMethod" );
-    for ( const auto& [ method, text ] : authMethods() ) {
-        authCombo_->addItem( text, static_cast<int>( method ) );
+    for ( const auto& info : kAuthMethods ) {
+        authCombo_->addItem( QString::fromLatin1( info.label ), static_cast<int>( info.method ) );
     }
     userEdit_->setObjectName( "user" );
-    secretEdit_->setObjectName( "password" );
+    secretEdit_->setObjectName( "secret" );
     secretEdit_->setEchoMode( QLineEdit::Password );
     secretEdit_->setToolTip( QStringLiteral( "Never saved: asked for at Start" ) );
     authFileEdit_->setObjectName( "authFile" );
     authFileButton_->setAutoDefault( false );
 
     tlsCheck_->setObjectName( "tls" );
-    tlsCheck_->setToolTip( QStringLiteral( "Connect with TLS; a tls:// URL does so too" ) );
+    tlsCheck_->setToolTip( QStringLiteral(
+        "Connect with TLS; a tls:// URL does so too. The settings below apply either way" ) );
     caFileEdit_->setObjectName( "caFile" );
     caFileEdit_->setPlaceholderText( QStringLiteral( "PEM file of the CA that signed the "
                                                      "server's certificate" ) );
@@ -309,6 +286,10 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
     tls->addRow( serverNameLabel, serverNameEdit_ );
     tls->addRow( skipVerifyCheck_ );
     tlsWidgets_ << serverNameLabel << serverNameEdit_ << skipVerifyCheck_;
+    tlsTexts_ = { { caFileEdit_, &TlsConfig::caFile },
+                  { certFileEdit_, &TlsConfig::certFile },
+                  { keyFileEdit_, &TlsConfig::keyFile },
+                  { serverNameEdit_, &TlsConfig::serverName } };
     auto* tlsBox = new QGroupBox( QStringLiteral( "TLS" ), this );
     tlsBox->setLayout( tls );
 
@@ -350,6 +331,7 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
     connect( deleteProfileButton_, &QPushButton::clicked, this, &ConnectionDialog::deleteProfile );
     connect( authCombo_, &QComboBox::currentIndexChanged, this, &ConnectionDialog::updateButtons );
     connect( tlsCheck_, &QCheckBox::toggled, this, &ConnectionDialog::updateButtons );
+    connect( urlEdit_, &QLineEdit::textChanged, this, &ConnectionDialog::updateButtons );
 
     fillProfileList( {} );
     updateButtons();
@@ -361,21 +343,21 @@ ConnectionProfile ConnectionDialog::currentProfile() const
     ConnectionProfile profile;
     profile.name = profileCombo_->currentText().trimmed();
     profile.url = urlEdit_->text().trimmed();
-    profile.auth.method = static_cast<AuthMethod>( authCombo_->currentData().toInt() );
-    if ( profile.auth.method == AuthMethod::UserPassword ) {
+    const auto& method = chosenMethod( authCombo_ );
+    profile.auth.method = method.method;
+    if ( method.takesUser ) {
         profile.auth.user = userEdit_->text().trimmed();
     }
-    if ( !secretName( profile.auth.method ).isEmpty() ) {
+    if ( method.secret ) {
         profile.auth.secret = secretEdit_->text();
     }
-    if ( usesFile( profile.auth.method ) ) {
+    if ( method.file ) {
         profile.auth.file = authFileEdit_->text().trimmed();
     }
     profile.tls.enabled = tlsCheck_->isChecked();
-    profile.tls.caFile = caFileEdit_->text().trimmed();
-    profile.tls.certFile = certFileEdit_->text().trimmed();
-    profile.tls.keyFile = keyFileEdit_->text().trimmed();
-    profile.tls.serverName = serverNameEdit_->text().trimmed();
+    for ( const auto& [ edit, member ] : tlsTexts_ ) {
+        profile.tls.*member = edit->text().trimmed();
+    }
     profile.tls.skipVerify = skipVerifyCheck_->isChecked();
     return profile;
 }
@@ -409,21 +391,20 @@ void ConnectionDialog::loadProfile( int index )
         secretEdit_->clear();
         authFileEdit_->setText( profile.auth.file );
         tlsCheck_->setChecked( profile.tls.enabled );
-        caFileEdit_->setText( profile.tls.caFile );
-        certFileEdit_->setText( profile.tls.certFile );
-        keyFileEdit_->setText( profile.tls.keyFile );
-        serverNameEdit_->setText( profile.tls.serverName );
+        for ( const auto& [ edit, member ] : tlsTexts_ ) {
+            edit->setText( profile.tls.*member );
+        }
         skipVerifyCheck_->setChecked( profile.tls.skipVerify );
         updateButtons();
 
-        const auto secret = secretName( profile.auth.method );
-        if ( secret.isEmpty() ) {
+        const char* secret = authMethodInfo( profile.auth.method ).secret;
+        if ( !secret ) {
             statusLabel_->setText( QStringLiteral( "Profile %1 loaded." ).arg( name ) );
         }
         else {
             statusLabel_->setText(
                 QStringLiteral( "Profile %1 loaded. Enter the %2 (it is never saved), then Start." )
-                    .arg( name, secret ) );
+                    .arg( name, QLatin1String( secret ) ) );
             secretEdit_->setFocus();
         }
         return;
@@ -461,11 +442,10 @@ void ConnectionDialog::saveProfile()
         return;
     }
     fillProfileList( profile.name );
-    const auto secret = secretName( profile.auth.method );
-    statusLabel_->setText(
-        secret.isEmpty()
-            ? QStringLiteral( "Profile %1 saved." ).arg( profile.name )
-            : QStringLiteral( "Profile %1 saved, without the %2." ).arg( profile.name, secret ) );
+    const char* secret = authMethodInfo( profile.auth.method ).secret;
+    statusLabel_->setText( secret ? QStringLiteral( "Profile %1 saved, without the %2." )
+                                        .arg( profile.name, QLatin1String( secret ) )
+                                  : QStringLiteral( "Profile %1 saved." ).arg( profile.name ) );
 }
 
 void ConnectionDialog::deleteProfile()
@@ -495,32 +475,19 @@ QString ConnectionDialog::missingSetting() const
     if ( subjectEdit_->text().trimmed().isEmpty() ) {
         return QStringLiteral( "Enter the subject to capture." );
     }
-    switch ( profile.auth.method ) {
-    case AuthMethod::None:
-        break;
-    case AuthMethod::UserPassword:
-        if ( profile.auth.user.isEmpty() ) {
-            return QStringLiteral( "Enter the user name." );
-        }
-        [[fallthrough]];
-    case AuthMethod::Token:
-        if ( profile.auth.secret.isEmpty() ) {
-            return QStringLiteral( "Enter the %1 (it is never saved)." )
-                .arg( secretName( profile.auth.method ) );
-        }
-        break;
-    case AuthMethod::Credentials:
-        if ( profile.auth.file.isEmpty() ) {
-            return QStringLiteral( "Choose the credentials file (.creds)." );
-        }
-        break;
-    case AuthMethod::NKey:
-        if ( profile.auth.file.isEmpty() ) {
-            return QStringLiteral( "Choose the NKey seed file." );
-        }
-        break;
+    const auto& method = authMethodInfo( profile.auth.method );
+    if ( method.takesUser && profile.auth.user.isEmpty() ) {
+        return QStringLiteral( "Enter the user name." );
     }
-    if ( profile.tls.enabled && profile.tls.certFile.isEmpty() != profile.tls.keyFile.isEmpty() ) {
+    if ( method.secret && profile.auth.secret.isEmpty() ) {
+        return QStringLiteral( "Enter the %1 (it is never saved)." )
+            .arg( QLatin1String( method.secret ) );
+    }
+    if ( method.file && profile.auth.file.isEmpty() ) {
+        return QStringLiteral( "Choose the %1." ).arg( QLatin1String( method.file ) );
+    }
+    if ( usesTls( profile.url, profile.tls.enabled )
+         && profile.tls.certFile.isEmpty() != profile.tls.keyFile.isEmpty() ) {
         return QStringLiteral( "Choose both the client certificate and its key, or neither." );
     }
     return {};
@@ -569,8 +536,8 @@ void ConnectionDialog::startCapture()
     SessionConfig config;
     config.url = profile.url;
     config.auth = profile.auth;
-    if ( profile.tls.enabled ) {
-        config.tls = profile.tls;
+    if ( usesTls( profile.url, profile.tls.enabled ) ) {
+        config.tls = profile.tls; // also for a tls:// URL with Use TLS unchecked
     }
     config.subject = subjectEdit_->text().trimmed();
     config.format.maxBinaryBytes = maxBinarySpin_->value();
@@ -582,7 +549,7 @@ void ConnectionDialog::startCapture()
     if ( config.tls.skipVerify ) {
         hostLog( LOGSQUIRL_LOG_WARNING,
                  QStringLiteral( "NATS Monitor: the certificate of %1 is not verified (insecure)." )
-                     .arg( config.url ) );
+                     .arg( redactUrls( config.url ) ) );
     }
 
     auto* session = new NatsSession( config, this );
@@ -601,7 +568,7 @@ void ConnectionDialog::startCapture()
     connect( session, &NatsSession::fileRotated, session,
              [ session ]( const QString& path ) { openRotatedFile( session->config(), path ); } );
 
-    statusLabel_->setText( QStringLiteral( "Connecting to %1…" ).arg( config.url ) );
+    statusLabel_->setText( QStringLiteral( "Connecting to %1…" ).arg( redactUrls( config.url ) ) );
     if ( !session->start() ) {
         // start() has said why, in the status line and the log
         delete session;
@@ -613,8 +580,8 @@ void ConnectionDialog::startCapture()
     if ( g_state.api && g_state.handle ) {
         g_state.api->open_file( g_state.handle, session->filePath().toUtf8().constData(), 1 );
     }
-    hostNotify(
-        QStringLiteral( "NATS capture of %1 started on %2." ).arg( config.subject, config.url ) );
+    hostNotify( QStringLiteral( "NATS capture of %1 started on %2." )
+                    .arg( config.subject, redactUrls( config.url ) ) );
 }
 
 void ConnectionDialog::stopCapture()
@@ -648,22 +615,24 @@ void ConnectionDialog::updateButtons()
     const bool capturing = session_ != nullptr;
     startButton_->setEnabled( !capturing );
     stopButton_->setEnabled( capturing );
-    const auto method = static_cast<AuthMethod>( authCombo_->currentData().toInt() );
-    const auto secret = secretName( method );
+    const auto& method = chosenMethod( authCombo_ );
     profileCombo_->setEnabled( !capturing );
     saveProfileButton_->setEnabled( !capturing );
     deleteProfileButton_->setEnabled( !capturing );
     urlEdit_->setEnabled( !capturing );
     authCombo_->setEnabled( !capturing );
-    userEdit_->setEnabled( !capturing && method == AuthMethod::UserPassword );
-    secretEdit_->setEnabled( !capturing && !secret.isEmpty() );
+    userEdit_->setEnabled( !capturing && method.takesUser );
+    secretEdit_->setEnabled( !capturing && method.secret );
     secretEdit_->setPlaceholderText(
-        secret.isEmpty() ? QString() : QStringLiteral( "The %1, never saved" ).arg( secret ) );
-    authFileEdit_->setEnabled( !capturing && usesFile( method ) );
-    authFileButton_->setEnabled( !capturing && usesFile( method ) );
+        method.secret
+            ? QStringLiteral( "The %1, never saved" ).arg( QLatin1String( method.secret ) )
+            : QString() );
+    authFileEdit_->setEnabled( !capturing && method.file );
+    authFileButton_->setEnabled( !capturing && method.file );
     tlsCheck_->setEnabled( !capturing );
+    const bool tls = usesTls( urlEdit_->text(), tlsCheck_->isChecked() );
     for ( auto* widget : tlsWidgets_ ) {
-        widget->setEnabled( !capturing && tlsCheck_->isChecked() );
+        widget->setEnabled( !capturing && tls );
     }
     subjectEdit_->setEnabled( !capturing );
     maxBinarySpin_->setEnabled( !capturing );

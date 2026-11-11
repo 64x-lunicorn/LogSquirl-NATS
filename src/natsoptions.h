@@ -44,6 +44,18 @@ namespace nats_monitor {
 QStringList serverUrls( const QString& url );
 
 /**
+ * @p url (one or more, comma-separated) as it may be shown or written: the
+ * password of each URL's user information replaced by "***", and a user
+ * information without a password (which may be a token) as a whole.
+ * nats://bob:s3cret@host:4222 becomes nats://bob:***@host:4222.
+ */
+QString redactUrls( const QString& url );
+
+/// Whether a connection to @p url uses TLS: @p tlsEnabled, or a tls:// URL.
+/// The TLS settings apply then, and only then.
+bool usesTls( const QString& url, bool tlsEnabled );
+
+/**
  * Set the servers, the authentication and TLS of @p config on @p options.
  *
  * Files named in the configuration are checked here, so a missing or

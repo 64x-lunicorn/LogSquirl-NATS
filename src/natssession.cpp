@@ -114,13 +114,15 @@ QString lastError( natsStatus status )
     return describe( status, nats_GetLastError( nullptr ) );
 }
 
+/// The URL @p connection is connected to, without its password
+/// (nats.c's has the URL's user information).
 QString connectedUrl( natsConnection* connection )
 {
     char buffer[ 512 ] = {};
     if ( natsConnection_GetConnectedUrl( connection, buffer, sizeof buffer ) != NATS_OK ) {
         return {};
     }
-    return QString::fromUtf8( buffer );
+    return redactUrls( QString::fromUtf8( buffer ) );
 }
 
 /// Make a subject usable as part of a file name on every platform.
@@ -503,7 +505,8 @@ struct Shared {
 
 struct NatsSession::Worker {
     NatsSession* const session; ///< Only posted to; it joins the thread before it goes.
-    const SessionConfig config;
+    /// Its secret is cleared once the connection options hold it.
+    SessionConfig config;
     const int generation;
     Shared* shared = new Shared; ///< Leaked if nats.c does not let go of it.
     /// Whether shared may be freed: nats.c confirmed its last callback (or
@@ -686,16 +689,19 @@ struct NatsSession::Worker {
     bool open( natsOptions** options, natsConnection** connection, natsSubscription** subscription )
     {
         const auto fail = [ this ]( const QString& why ) {
-            shared->pushMarker(
-                QStringLiteral( "connection to %1 failed: %2" ).arg( config.url, why ),
-                Event::Error );
+            shared->pushMarker( QStringLiteral( "connection to %1 failed: %2" )
+                                    .arg( redactUrls( config.url ), why ),
+                                Event::Error );
             return false;
         };
         natsStatus status = createOptions( options );
         if ( status != NATS_OK ) {
             return fail( lastError( status ) );
         }
-        if ( const auto problem = configureConnection( *options, config ); !problem.isEmpty() ) {
+        const auto problem = configureConnection( *options, config );
+        // nats.c has its own copy, for reconnecting: no other is kept here.
+        config.auth.secret.clear();
+        if ( !problem.isEmpty() ) {
             return fail( problem );
         }
         status = natsConnection_Connect( connection, *options );

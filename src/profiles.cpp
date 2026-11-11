@@ -24,6 +24,8 @@
 
 #include "profiles.h"
 
+#include "authmethods.h"
+
 #include <QSettings>
 
 #include <array>
@@ -35,33 +37,70 @@ namespace {
 
 constexpr const char* kProfiles = "profiles";
 
-/// How each method is saved: words, so the file stays readable.
-constexpr std::array<std::pair<AuthMethod, const char*>, 5> kMethods{ {
-    { AuthMethod::None, "none" },
-    { AuthMethod::UserPassword, "user" },
-    { AuthMethod::Token, "token" },
-    { AuthMethod::Credentials, "creds" },
-    { AuthMethod::NKey, "nkey" },
+/// The text settings of TLS, by their keys in the group "tls".
+const std::array<std::pair<const char*, QString TlsConfig::*>, 4> kTlsTexts{ {
+    { "caFile", &TlsConfig::caFile },
+    { "certFile", &TlsConfig::certFile },
+    { "keyFile", &TlsConfig::keyFile },
+    { "serverName", &TlsConfig::serverName },
 } };
 
-QString methodName( AuthMethod method )
+/// The switches of TLS, by their keys in the group "tls"; off by default.
+const std::array<std::pair<const char*, bool TlsConfig::*>, 2> kTlsSwitches{ {
+    { "enabled", &TlsConfig::enabled },
+    { "skipVerify", &TlsConfig::skipVerify },
+} };
+
+AuthConfig readAuth( QSettings& settings )
 {
-    for ( const auto& [ value, name ] : kMethods ) {
-        if ( value == method ) {
-            return QString::fromLatin1( name );
+    AuthConfig auth;
+    settings.beginGroup( "auth" );
+    const auto name = settings.value( "method" ).toString();
+    for ( const auto& info : kAuthMethods ) {
+        if ( name == QLatin1String( info.savedName ) ) {
+            auth.method = info.method;
         }
     }
-    return QStringLiteral( "none" );
+    auth.user = settings.value( "user" ).toString();
+    auth.file = settings.value( "file" ).toString();
+    settings.endGroup();
+    return auth;
 }
 
-AuthMethod methodFromName( const QString& text )
+void writeAuth( QSettings& settings, const AuthConfig& auth )
 {
-    for ( const auto& [ value, name ] : kMethods ) {
-        if ( text == QLatin1String( name ) ) {
-            return value;
-        }
+    settings.beginGroup( "auth" );
+    settings.setValue( "method", QString::fromLatin1( authMethodInfo( auth.method ).savedName ) );
+    settings.setValue( "user", auth.user );
+    settings.setValue( "file", auth.file );
+    // Never auth.secret: the password or token is asked for at Start.
+    settings.endGroup();
+}
+
+TlsConfig readTls( QSettings& settings )
+{
+    TlsConfig tls;
+    settings.beginGroup( "tls" );
+    for ( const auto& [ key, member ] : kTlsTexts ) {
+        tls.*member = settings.value( key ).toString();
     }
-    return AuthMethod::None;
+    for ( const auto& [ key, member ] : kTlsSwitches ) {
+        tls.*member = settings.value( key, false ).toBool();
+    }
+    settings.endGroup();
+    return tls;
+}
+
+void writeTls( QSettings& settings, const TlsConfig& tls )
+{
+    settings.beginGroup( "tls" );
+    for ( const auto& [ key, member ] : kTlsTexts ) {
+        settings.setValue( key, tls.*member );
+    }
+    for ( const auto& [ key, member ] : kTlsSwitches ) {
+        settings.setValue( key, tls.*member );
+    }
+    settings.endGroup();
 }
 
 } // namespace
@@ -82,15 +121,8 @@ QList<ConnectionProfile> loadProfiles( const QString& settingsFile )
             continue;
         }
         profile.url = settings.value( "url" ).toString();
-        profile.auth.method = methodFromName( settings.value( "auth/method" ).toString() );
-        profile.auth.user = settings.value( "auth/user" ).toString();
-        profile.auth.file = settings.value( "auth/file" ).toString();
-        profile.tls.enabled = settings.value( "tls/enabled", false ).toBool();
-        profile.tls.caFile = settings.value( "tls/caFile" ).toString();
-        profile.tls.certFile = settings.value( "tls/certFile" ).toString();
-        profile.tls.keyFile = settings.value( "tls/keyFile" ).toString();
-        profile.tls.serverName = settings.value( "tls/serverName" ).toString();
-        profile.tls.skipVerify = settings.value( "tls/skipVerify", false ).toBool();
+        profile.auth = readAuth( settings );
+        profile.tls = readTls( settings );
         profiles << profile;
     }
     settings.endArray();
@@ -110,16 +142,8 @@ bool saveProfiles( const QString& settingsFile, const QList<ConnectionProfile>& 
         settings.setArrayIndex( i );
         settings.setValue( "name", profile.name );
         settings.setValue( "url", profile.url );
-        settings.setValue( "auth/method", methodName( profile.auth.method ) );
-        settings.setValue( "auth/user", profile.auth.user );
-        settings.setValue( "auth/file", profile.auth.file );
-        // Never auth.secret: the password or token is asked for at Start.
-        settings.setValue( "tls/enabled", profile.tls.enabled );
-        settings.setValue( "tls/caFile", profile.tls.caFile );
-        settings.setValue( "tls/certFile", profile.tls.certFile );
-        settings.setValue( "tls/keyFile", profile.tls.keyFile );
-        settings.setValue( "tls/serverName", profile.tls.serverName );
-        settings.setValue( "tls/skipVerify", profile.tls.skipVerify );
+        writeAuth( settings, profile.auth );
+        writeTls( settings, profile.tls );
     }
     settings.endArray();
     settings.sync();

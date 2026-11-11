@@ -24,14 +24,13 @@
 
 #include "natsoptions.h"
 
+#include "authmethods.h"
+#include "nkey.h"
+
 #include <QFile>
-#include <QRegularExpression>
 #include <QUrl>
 
-#include <openssl/evp.h>
-
-#include <cstring>
-#include <memory>
+#include <initializer_list>
 #include <utility>
 #include <vector>
 
@@ -39,113 +38,20 @@ namespace nats_monitor {
 
 namespace {
 
-// ── NKeys ────────────────────────────────────────────────────────────────
-// An NKey is base32 (RFC 4648, no padding) of: a prefix, the 32 bytes of
-// an ed25519 key, and a CRC-16/XMODEM of both, little-endian.  A user's
-// seed starts with "SU" (two prefix bytes), its public key with "U".
-
-constexpr char kBase32[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-constexpr unsigned char kPrefixSeed = 18 << 3;
-constexpr unsigned char kPrefixUser = 20 << 3;
-
-quint16 crc16( const QByteArray& data )
-{
-    quint16 crc = 0;
-    for ( const char c : data ) {
-        crc ^= static_cast<quint16>( static_cast<unsigned char>( c ) << 8 );
-        for ( int i = 0; i < 8; ++i ) {
-            crc = ( crc & 0x8000 ) ? static_cast<quint16>( ( crc << 1 ) ^ 0x1021 )
-                                   : static_cast<quint16>( crc << 1 );
-        }
-    }
-    return crc;
-}
-
-QByteArray base32Decode( const QByteArray& text )
-{
-    QByteArray out;
-    quint32 buffer = 0;
-    int bits = 0;
-    for ( const char c : text ) {
-        const char* at = std::strchr( kBase32, c );
-        if ( !at || !c ) {
-            return {};
-        }
-        buffer = ( buffer << 5 ) | static_cast<quint32>( at - kBase32 );
-        bits += 5;
-        if ( bits >= 8 ) {
-            bits -= 8;
-            out.append( static_cast<char>( ( buffer >> bits ) & 0xff ) );
-        }
-    }
-    return out;
-}
-
-QByteArray base32Encode( const QByteArray& data )
-{
-    QByteArray out;
-    quint32 buffer = 0;
-    int bits = 0;
-    for ( const char c : data ) {
-        buffer = ( buffer << 8 ) | static_cast<unsigned char>( c );
-        bits += 8;
-        while ( bits >= 5 ) {
-            bits -= 5;
-            out.append( kBase32[ ( buffer >> bits ) & 31 ] );
-        }
-    }
-    if ( bits > 0 ) {
-        out.append( kBase32[ ( buffer << ( 5 - bits ) ) & 31 ] );
-    }
-    return out;
-}
-
-/// The public key ("U…") of the user seed @p seed ("SU…"); empty if it is none.
-QByteArray userPublicKey( const QByteArray& seed )
-{
-    const auto raw = base32Decode( seed );
-    if ( raw.size() != 2 + 32 + 2 ) {
-        return {};
-    }
-    const auto body = raw.left( 34 );
-    const auto crc = static_cast<quint16>( static_cast<unsigned char>( raw.at( 34 ) )
-                                           | static_cast<unsigned char>( raw.at( 35 ) ) << 8 );
-    const auto b1 = static_cast<unsigned char>( raw.at( 0 ) );
-    const auto b2 = static_cast<unsigned char>( raw.at( 1 ) );
-    const auto type = static_cast<unsigned char>( ( b1 & 7 ) << 5 | ( b2 & 0xf8 ) >> 3 );
-    if ( crc16( body ) != crc || ( b1 & 0xf8 ) != kPrefixSeed || type != kPrefixUser ) {
-        return {};
-    }
-
-    const std::unique_ptr<EVP_PKEY, decltype( &EVP_PKEY_free )> key(
-        EVP_PKEY_new_raw_private_key(
-            EVP_PKEY_ED25519, nullptr,
-            reinterpret_cast<const unsigned char*>( body.constData() + 2 ), 32 ),
-        &EVP_PKEY_free );
-    unsigned char publicKey[ 32 ] = {};
-    size_t length = sizeof publicKey;
-    if ( !key || EVP_PKEY_get_raw_public_key( key.get(), publicKey, &length ) != 1
-         || length != sizeof publicKey ) {
-        return {};
-    }
-    QByteArray encoded( 1, static_cast<char>( kPrefixUser ) );
-    encoded.append( reinterpret_cast<const char*>( publicKey ), sizeof publicKey );
-    const auto sum = crc16( encoded );
-    encoded.append( static_cast<char>( sum & 0xff ) );
-    encoded.append( static_cast<char>( sum >> 8 ) );
-    return base32Encode( encoded );
-}
-
 // ── Files ────────────────────────────────────────────────────────────────
 
-/// Empty if @p path can be read, else why not, naming it as @p what.
-QString checkReadable( const QString& path, const QString& what )
+/// Empty if @p path can be read, else why not, naming it as @p what.  With
+/// @p contents, what the file holds is read into it.
+QString readFile( const QString& path, const QString& what, QByteArray* contents = nullptr )
 {
-    QFile file( path );
     if ( path.isEmpty() ) {
         return QStringLiteral( "no %1 given" ).arg( what );
     }
-    if ( !file.open( QIODevice::ReadOnly ) ) {
+    QFile file( path );
+    if ( file.open( QIODevice::ReadOnly ) && contents ) {
+        *contents = file.readAll();
+    }
+    if ( file.error() != QFileDevice::NoError ) {
         return QStringLiteral( "cannot read the %1 %2: %3" ).arg( what, path, file.errorString() );
     }
     return {};
@@ -160,6 +66,7 @@ QString natsError( natsStatus status )
 
 QString configureAuth( natsOptions* options, const AuthConfig& auth )
 {
+    const auto what = QString::fromLatin1( authMethodInfo( auth.method ).file );
     natsStatus status = NATS_OK;
     switch ( auth.method ) {
     case AuthMethod::None:
@@ -172,7 +79,7 @@ QString configureAuth( natsOptions* options, const AuthConfig& auth )
         status = natsOptions_SetToken( options, auth.secret.toUtf8().constData() );
         break;
     case AuthMethod::Credentials: {
-        const auto problem = checkReadable( auth.file, QStringLiteral( "credentials file" ) );
+        const auto problem = readFile( auth.file, what );
         if ( !problem.isEmpty() ) {
             return problem;
         }
@@ -181,16 +88,12 @@ QString configureAuth( natsOptions* options, const AuthConfig& auth )
         break;
     }
     case AuthMethod::NKey: {
-        QFile file( auth.file );
-        const auto problem = checkReadable( auth.file, QStringLiteral( "NKey seed file" ) );
-        if ( !problem.isEmpty() || !file.open( QIODevice::ReadOnly ) ) {
+        QByteArray seedFile;
+        const auto problem = readFile( auth.file, what, &seedFile );
+        if ( !problem.isEmpty() ) {
             return problem;
         }
-        // As nats.c reads it: the first user seed in the file.
-        static const QRegularExpression seed( QStringLiteral( "SU[A-Z2-7]{56}" ) );
-        const auto match = seed.match( QString::fromLatin1( file.readAll() ) );
-        const auto publicKey
-            = match.hasMatch() ? userPublicKey( match.captured().toLatin1() ) : QByteArray();
+        const auto publicKey = nkeyUserPublicKey( seedFile );
         if ( publicKey.isEmpty() ) {
             return QStringLiteral( "no NKey seed in %1" ).arg( auth.file );
         }
@@ -209,7 +112,7 @@ QString configureTls( natsOptions* options, const TlsConfig& tls )
 {
     natsStatus status = natsOptions_SetSecure( options, true );
     if ( status == NATS_OK && !tls.caFile.isEmpty() ) {
-        const auto problem = checkReadable( tls.caFile, QStringLiteral( "CA file" ) );
+        const auto problem = readFile( tls.caFile, QStringLiteral( "CA file" ) );
         if ( !problem.isEmpty() ) {
             return problem;
         }
@@ -223,7 +126,7 @@ QString configureTls( natsOptions* options, const TlsConfig& tls )
         for ( const auto& [ path, what ] :
               { std::pair{ tls.certFile, QStringLiteral( "client certificate" ) },
                 std::pair{ tls.keyFile, QStringLiteral( "client key file" ) } } ) {
-            const auto problem = checkReadable( path, what );
+            const auto problem = readFile( path, what );
             if ( !problem.isEmpty() ) {
                 return problem;
             }
@@ -248,20 +151,6 @@ QString configureTls( natsOptions* options, const TlsConfig& tls )
     return {};
 }
 
-/// Whether TLS is used: switched on, or a tls:// URL.
-bool usesTls( const SessionConfig& config )
-{
-    if ( config.tls.enabled ) {
-        return true;
-    }
-    for ( const auto& url : serverUrls( config.url ) ) {
-        if ( url.startsWith( QStringLiteral( "tls://" ), Qt::CaseInsensitive ) ) {
-            return true;
-        }
-    }
-    return false;
-}
-
 /// The host the server's certificate is checked against.
 QString expectedHost( const SessionConfig& config )
 {
@@ -271,6 +160,45 @@ QString expectedHost( const SessionConfig& config )
     const auto urls = serverUrls( config.url );
     const auto host = urls.isEmpty() ? QString() : QUrl( urls.first() ).host();
     return host.isEmpty() ? QStringLiteral( "the server's name" ) : host;
+}
+
+// ── What a failed connect means ──────────────────────────────────────────
+// nats.c's status codes cannot tell most TLS failures apart (they are all
+// NATS_SSL_ERROR, or the connection closed), so these are matched in the
+// text nats.c passes on, lower case: OpenSSL's verification errors and the
+// TLS alerts it reports.  Those texts depend on the OpenSSL version (e.g.
+// "self signed" became "self-signed" in 3.0): check them when OpenSSL is
+// updated; the [auth] tests fail when one no longer matches.
+
+/// The server refused the credentials (its -ERR), besides NATS_NOT_PERMITTED.
+constexpr std::initializer_list<const char*> kAuthRefused{ "authorization violation",
+                                                           "authentication" };
+
+/// The server's certificate is not for the name expected.
+constexpr std::initializer_list<const char*> kWrongHost{ "hostname mismatch",
+                                                         "ip address mismatch" };
+
+/// The server's certificate is not signed by a CA trusted.
+constexpr std::initializer_list<const char*> kUntrusted{
+    "unable to get local issuer certificate", "self-signed certificate", "self signed certificate",
+    "unable to verify the first", "certificate verify failed"
+};
+
+/// The server's TLS alert about the client's certificate (TLS 1.2, or as
+/// nats.c reads it).
+constexpr std::initializer_list<const char*> kClientCertRefused{ "certificate required",
+                                                                 "unknown ca", "bad certificate",
+                                                                 "certificate unknown" };
+
+/// Whether @p lower contains one of @p patterns.
+bool containsAny( const QString& lower, std::initializer_list<const char*> patterns )
+{
+    for ( const char* pattern : patterns ) {
+        if ( lower.contains( QLatin1String( pattern ) ) ) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -285,6 +213,42 @@ QStringList serverUrls( const QString& url )
         }
     }
     return urls;
+}
+
+QString redactUrls( const QString& url )
+{
+    QStringList parts = url.split( ',' );
+    for ( auto& part : parts ) {
+        const auto scheme = part.indexOf( QStringLiteral( "://" ) );
+        const auto start = scheme < 0 ? 0 : scheme + 3;
+        auto end = part.indexOf( '/', start );
+        if ( end < 0 ) {
+            end = part.size();
+        }
+        const auto at = end > start ? part.lastIndexOf( '@', end - 1 ) : -1;
+        if ( at < start ) {
+            continue;
+        }
+        // A user name stays; a password, or a token in place of the user,
+        // does not.
+        const auto colon = part.indexOf( ':', start );
+        const auto kept = colon >= start && colon < at ? colon + 1 - start : 0;
+        part.replace( start + kept, at - start - kept, QStringLiteral( "***" ) );
+    }
+    return parts.join( ',' );
+}
+
+bool usesTls( const QString& url, bool tlsEnabled )
+{
+    if ( tlsEnabled ) {
+        return true;
+    }
+    for ( const auto& one : serverUrls( url ) ) {
+        if ( one.startsWith( QStringLiteral( "tls://" ), Qt::CaseInsensitive ) ) {
+            return true;
+        }
+    }
+    return false;
 }
 
 QString configureConnection( natsOptions* options, const SessionConfig& config )
@@ -308,7 +272,7 @@ QString configureConnection( natsOptions* options, const SessionConfig& config )
     }
 
     auto problem = configureAuth( options, config.auth );
-    if ( problem.isEmpty() && usesTls( config ) ) {
+    if ( problem.isEmpty() && usesTls( config.url, config.tls.enabled ) ) {
         problem = configureTls( options, config.tls );
     }
     return problem;
@@ -318,31 +282,15 @@ QString explainConnectFailure( const SessionConfig& config, natsStatus status,
                                const QString& detail )
 {
     const auto lower = detail.toLower();
-    const auto has
-        = [ &lower ]( const char* text ) { return lower.contains( QLatin1String( text ) ); };
+    const bool tls = usesTls( config.url, config.tls.enabled );
+    const auto& certFile = config.tls.certFile;
 
     QString explanation;
-    if ( status == NATS_NOT_PERMITTED || has( "authorization violation" )
-         || has( "authentication" ) ) {
-        switch ( config.auth.method ) {
-        case AuthMethod::None:
-            explanation = QStringLiteral( "the server requires authentication: choose how to "
-                                          "log in" );
-            break;
-        case AuthMethod::UserPassword:
-            explanation = QStringLiteral( "the server refused the user name or password" );
-            break;
-        case AuthMethod::Token:
-            explanation = QStringLiteral( "the server refused the token" );
-            break;
-        case AuthMethod::Credentials:
-            explanation = QStringLiteral( "the server refused the credentials in %1" )
-                              .arg( config.auth.file );
-            break;
-        case AuthMethod::NKey:
-            explanation
-                = QStringLiteral( "the server refused the NKey in %1" ).arg( config.auth.file );
-            break;
+    if ( status == NATS_NOT_PERMITTED || containsAny( lower, kAuthRefused ) ) {
+        const auto& method = authMethodInfo( config.auth.method );
+        explanation = QString::fromLatin1( method.refused );
+        if ( method.file ) {
+            explanation = explanation.arg( config.auth.file );
         }
     }
     else if ( status == NATS_SECURE_CONNECTION_REQUIRED ) {
@@ -351,43 +299,39 @@ QString explainConnectFailure( const SessionConfig& config, natsStatus status,
     else if ( status == NATS_SECURE_CONNECTION_WANTED ) {
         explanation = QStringLiteral( "the server does not offer TLS: switch TLS off" );
     }
-    else if ( has( "hostname mismatch" ) || has( "ip address mismatch" ) ) {
+    else if ( containsAny( lower, kWrongHost ) ) {
         explanation = QStringLiteral( "the server's certificate is not for %1: set the server "
                                       "name it is for" )
                           .arg( expectedHost( config ) );
     }
-    else if ( has( "unable to get local issuer certificate" ) || has( "self-signed certificate" )
-              || has( "self signed certificate" ) || has( "unable to verify the first" )
-              || has( "certificate verify failed" ) ) {
+    else if ( containsAny( lower, kUntrusted ) ) {
         // Without TLS switched on, nats.c still uses it when the server
         // requires it, but with none of the TLS settings.
-        explanation = usesTls( config )
-                          ? QStringLiteral( "the server's certificate is not trusted: set the CA "
+        explanation = tls ? QStringLiteral( "the server's certificate is not trusted: set the CA "
                                             "file of the CA that signed it" )
                           : QStringLiteral( "the server requires TLS, and its certificate is not "
                                             "trusted: switch TLS on and set the CA file of the CA "
                                             "that signed it" );
     }
-    else if ( has( "certificate required" ) || has( "unknown ca" ) || has( "bad certificate" )
-              || has( "certificate unknown" ) ) {
-        // The server's TLS alert (TLS 1.2, or as nats.c reads it).
+    else if ( containsAny( lower, kClientCertRefused ) ) {
         explanation
-            = config.tls.certFile.isEmpty()
+            = certFile.isEmpty()
                   ? QStringLiteral( "the server requires a client certificate, and none is set" )
                   : QStringLiteral( "the server did not accept the client certificate %1" )
-                        .arg( config.tls.certFile );
+                        .arg( certFile );
     }
-    else if ( ( status == NATS_CONNECTION_CLOSED || ( status == NATS_IO_ERROR && has( "reset" ) ) )
-              && usesTls( config ) ) {
+    else if ( tls
+              && ( status == NATS_CONNECTION_CLOSED
+                   || ( status == NATS_IO_ERROR
+                        && lower.contains( QLatin1String( "reset" ) ) ) ) ) {
         // With TLS 1.3 a server that refuses the client's certificate
         // closes the connection after the handshake, without saying why.
-        explanation
-            = config.tls.certFile.isEmpty()
-                  ? QStringLiteral( "the server closed the TLS connection: it may require a "
-                                    "client certificate, and none is set" )
-                  : QStringLiteral( "the server closed the TLS connection: it may not accept the "
-                                    "client certificate %1" )
-                        .arg( config.tls.certFile );
+        explanation = certFile.isEmpty()
+                          ? QStringLiteral( "the server closed the TLS connection: it may require "
+                                            "a client certificate, and none is set" )
+                          : QStringLiteral( "the server closed the TLS connection: it may not "
+                                            "accept the client certificate %1" )
+                                .arg( certFile );
     }
 
     if ( explanation.isEmpty() ) {

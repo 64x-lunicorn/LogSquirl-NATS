@@ -208,13 +208,37 @@ trusted: set the CA file …"), followed by nats.c's own text. The session
 writes that into its `connection to … failed:` marker and reports it, so
 the dialog shows it in its status line.
 
+- What each method is (its name in a profile, its label in the dialog,
+  whether it takes a user, a secret or a file, what the server refusing it
+  means) is one table, `kAuthMethods` in
+  [`src/authmethods.h`](../src/authmethods.h); `configureAuth()` in
+  natsoptions.cpp sets each on nats.c's options.
 - For an NKey seed file nats.c wants the public key too; the session
-  derives it from the seed (ed25519 through the linked OpenSSL).
+  derives it from the seed (ed25519 through the linked OpenSSL), in
+  [`src/nkey.cpp`](../src/nkey.cpp).
+- The TLS settings apply whenever the connection uses TLS: *Use TLS*
+  checked, or a `tls://` URL (`usesTls()`); the dialog's TLS fields are
+  enabled then, and only then.
 - With TLS 1.3 a server that refuses the client certificate closes the
   connection after the handshake without saying why, so that message says
   the server *may* require or refuse a client certificate.
 - With TLS off, nats.c still uses TLS when the server requires it, but
   without the dialog's CA; the message then says to switch TLS on.
+- Where nats.c's status codes tell the cases apart (refused credentials,
+  TLS required or not offered, the connection closed), the explanation
+  uses them. The TLS failures are all `NATS_SSL_ERROR`, so those are told
+  apart by OpenSSL's text, matched against the pattern lists at the end
+  of natsoptions.cpp's anonymous namespace. That text depends on the
+  OpenSSL version: after updating OpenSSL, run the `[auth]` tests, which
+  fail when a pattern no longer matches.
+- A URL may hold credentials (`nats://bob:s3cret@host`). Wherever a URL is
+  shown or written (the status line, the host log and notifications, the
+  capture file's markers, including nats.c's connected URL) it goes
+  through `redactUrls()`, which replaces the password, or a user
+  information without one (a token), by `***`.
+- The worker clears its copy of the password or token once nats.c's
+  options hold it; `NatsSession` keeps its own, which `start()` needs
+  again.
 
 The dialog saves the connection settings as named **profiles**
 ([`src/profiles.h`](../src/profiles.h)) in `nats.ini`, array `profiles`:
