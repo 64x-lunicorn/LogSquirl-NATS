@@ -24,7 +24,8 @@
  * The file is read as LogSquirl reads a Log Format: its regexes compiled
  * with QRegularExpression and no options, its columns the named groups in
  * pattern order, its timestamp read with its timestamp formats by the rules
- * of LogSquirl's TimestampReader (for the directives ported below).  The
+ * of LogSquirl's TimestampReader (src/logformat/src/timestampreader.cpp),
+ * ported below for the directives a timestamp format may use.  The
  * lines come from the real formatter, so the format and the definition
  * cannot drift apart; the fields expected are written out by hand.
  */
@@ -43,6 +44,7 @@
 #include <QTimeZone>
 
 #include <optional>
+#include <vector>
 
 using nats_monitor::formatLine;
 using nats_monitor::formatMarker;
@@ -129,69 +131,227 @@ QStringList namedGroups( const QString& pattern )
     return names;
 }
 
-/// The instant LogSquirl's TimestampReader reads from @p text with one of
-/// @p formats, to the millisecond.  Ported for the directives a NATS line
-/// needs: whitespace (one or more), %Y (four digits), %m %d %H %M %S (one
-/// or two), %f (digits, the first three the milliseconds), %z (Z, UTC or
-/// an offset).  Any other directive fails the test, so that a change of the
-/// format to one does not pass unchecked.
-std::optional<QDateTime> readTimestamp( const QStringList& formats, const QString& text )
+// ── LogSquirl's TimestampReader, ported ────────────────────────────────────
+//
+// It mirrors LogSquirl's src/logformat/src/timestampreader.cpp (checked
+// against v26.10.0 and 26.12), the same port as LogSquirl-tcpdump's test;
+// it is not the real reader.  The same tokens and reading rules as the
+// host's: a run of whitespace in the format matches one or more whitespace
+// characters, %Y exactly four
+// digits, %m %d %H %M %S one or two, %f and %L any number of digits of which
+// the first three are the milliseconds, %z/%Z an optional zone ("Z", "UTC",
+// "+02:00", ...) that makes the time the UTC instant it names; trailing
+// whitespace is allowed, anything else left over is not.  A directive not
+// ported here makes the format unreadable, so that a change of the format
+// to one fails this test instead of passing unchecked.
+
+enum class Kind { Literal, Space, Year4, Month, Day, Hour, Minute, Second, Fraction, Zone };
+
+struct Token {
+    Kind kind;
+    QChar literal;
+};
+
+std::optional<std::vector<Token>> compileTimestampFormat( const QString& format )
 {
-    for ( const auto& format : formats ) {
-        QString pattern = "^";
-        for ( qsizetype i = 0; i < format.size(); ++i ) {
-            const auto c = format[ i ];
-            if ( c.isSpace() ) {
-                pattern += R"(\s+)";
-                while ( i + 1 < format.size() && format[ i + 1 ].isSpace() ) {
-                    ++i;
-                }
-                continue;
+    std::vector<Token> pattern;
+    for ( qsizetype i = 0; i < format.size(); ++i ) {
+        const auto c = format[ i ];
+        if ( c.isSpace() ) {
+            if ( pattern.empty() || pattern.back().kind != Kind::Space ) {
+                pattern.push_back( { Kind::Space, {} } );
             }
-            if ( c != '%' ) {
-                pattern += QRegularExpression::escape( QString( c ) );
-                continue;
-            }
-            REQUIRE( ++i < format.size() );
-            switch ( format[ i ].unicode() ) {
-            case 'Y':
-                pattern += R"((?<Y>\d{4}))";
-                break;
-            case 'm':
-            case 'd':
-            case 'H':
-            case 'M':
-            case 'S':
-                pattern += QString( R"((?<%1>\d{1,2}))" ).arg( format[ i ] );
-                break;
-            case 'f':
-                pattern += R"((?<f>\d+))";
-                break;
-            case 'z':
-                pattern += R"(\s*(?<z>Z|UTC|[+-]\d{2}:?\d{2}))";
-                break;
-            default:
-                FAIL( "timestamp directive %" << format[ i ].toLatin1() << " is not ported" );
-            }
-        }
-        pattern += R"(\s*$)";
-        const auto m = QRegularExpression( pattern ).match( text );
-        if ( !m.hasMatch() ) {
             continue;
         }
-        const auto number = [ &m ]( const char* name ) { return m.captured( name ).toInt(); };
-        const QDate date( number( "Y" ), number( "m" ), number( "d" ) );
-        const QTime time( number( "H" ), number( "M" ), number( "S" ),
-                          m.captured( "f" ).leftJustified( 3, '0' ).left( 3 ).toInt() );
-        int offset = 0;
-        const auto zone = m.captured( "z" );
-        if ( zone.startsWith( '+' ) || zone.startsWith( '-' ) ) {
-            const auto digits = QString( zone ).remove( ':' );
-            offset = ( zone.startsWith( '-' ) ? -1 : 1 )
-                     * ( digits.mid( 1, 2 ).toInt() * 3600 + digits.mid( 3, 2 ).toInt() * 60 );
+        if ( c != '%' ) {
+            pattern.push_back( { Kind::Literal, c } );
+            continue;
         }
+        if ( ++i >= format.size() ) {
+            return std::nullopt;
+        }
+        switch ( format[ i ].unicode() ) {
+        case 'Y':
+            pattern.push_back( { Kind::Year4, {} } );
+            break;
+        case 'm':
+            pattern.push_back( { Kind::Month, {} } );
+            break;
+        case 'd':
+        case 'e':
+            pattern.push_back( { Kind::Day, {} } );
+            break;
+        case 'H':
+            pattern.push_back( { Kind::Hour, {} } );
+            break;
+        case 'M':
+            pattern.push_back( { Kind::Minute, {} } );
+            break;
+        case 'S':
+            pattern.push_back( { Kind::Second, {} } );
+            break;
+        case 'L':
+        case 'f':
+            pattern.push_back( { Kind::Fraction, {} } );
+            break;
+        case 'z':
+        case 'Z':
+            pattern.push_back( { Kind::Zone, {} } );
+            break;
+        case '%':
+            pattern.push_back( { Kind::Literal, '%' } );
+            break;
+        default:
+            return std::nullopt;
+        }
+    }
+    return pattern;
+}
+
+bool isDigit( QChar c )
+{
+    return c >= '0' && c <= '9';
+}
+
+std::optional<int> readNumber( QStringView text, qsizetype& pos, int maxDigits )
+{
+    int value = 0;
+    int digits = 0;
+    while ( digits < maxDigits && pos < text.size() && isDigit( text[ pos ] ) ) {
+        value = value * 10 + ( text[ pos ].unicode() - '0' );
+        ++pos;
+        ++digits;
+    }
+    return digits == 0 ? std::nullopt : std::optional<int>( value );
+}
+
+std::optional<int> readFraction( QStringView text, qsizetype& pos )
+{
+    int millis = 0;
+    int digits = 0;
+    for ( ; pos < text.size() && isDigit( text[ pos ] ); ++pos, ++digits ) {
+        if ( digits < 3 ) {
+            millis = millis * 10 + ( text[ pos ].unicode() - '0' );
+        }
+    }
+    if ( digits == 0 ) {
+        return std::nullopt;
+    }
+    for ( int d = digits; d < 3; ++d ) {
+        millis *= 10;
+    }
+    return millis;
+}
+
+std::optional<int> readZone( QStringView text, qsizetype& pos )
+{
+    auto p = pos;
+    while ( p < text.size() && text[ p ].isSpace() ) {
+        ++p;
+    }
+    if ( p >= text.size() ) {
+        return std::nullopt;
+    }
+    if ( text[ p ] == '+' || text[ p ] == '-' ) {
+        const auto sign = text[ p ] == '-' ? -1 : 1;
+        const auto digitsStart = ++p;
+        QString digits;
+        for ( ; p < text.size() && ( isDigit( text[ p ] ) || text[ p ] == ':' ); ++p ) {
+            if ( text[ p ] != ':' ) {
+                digits += text[ p ];
+            }
+        }
+        if ( p - digitsStart < 2 ) {
+            return std::nullopt;
+        }
+        pos = p;
+        const auto hours = digits.left( 2 ).toInt();
+        const auto minutes = digits.size() >= 4 ? digits.mid( 2, 2 ).toInt() : 0;
+        if ( hours > 23 || minutes > 59 ) {
+            return std::nullopt;
+        }
+        return sign * ( hours * 3600 + minutes * 60 );
+    }
+    const auto start = p;
+    while ( p < text.size() && text[ p ].isLetter() ) {
+        ++p;
+    }
+    pos = p;
+    const auto name = text.mid( start, p - start ).toString().toUpper();
+    if ( name == "Z" || name == "UTC" || name == "GMT" || name == "UT" ) {
+        return 0;
+    }
+    return std::nullopt;
+}
+
+/// The Timestamp LogSquirl reads from the text of a timestamp field with the
+/// format's timestamp formats, the first that fits winning.
+std::optional<QDateTime> readTimestamp( const QStringList& formats, QStringView text )
+{
+    for ( const auto& format : formats ) {
+        const auto pattern = compileTimestampFormat( format );
+        REQUIRE( pattern ); // a directive LogSquirl knows and this port has
+        int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0, millis = 0;
+        std::optional<int> offset;
+        qsizetype pos = 0;
+        bool fits = true;
+        for ( const auto& token : *pattern ) {
+            std::optional<int> value = 0;
+            switch ( token.kind ) {
+            case Kind::Literal:
+                fits = pos < text.size() && text[ pos ] == token.literal;
+                ++pos;
+                break;
+            case Kind::Space:
+                fits = pos < text.size() && text[ pos ].isSpace();
+                while ( pos < text.size() && text[ pos ].isSpace() ) {
+                    ++pos;
+                }
+                break;
+            case Kind::Year4: {
+                const auto start = pos;
+                value = readNumber( text, pos, 4 );
+                fits = value && pos - start == 4;
+                year = value.value_or( 0 );
+                break;
+            }
+            case Kind::Month:
+                month = ( value = readNumber( text, pos, 2 ) ).value_or( 0 );
+                break;
+            case Kind::Day:
+                day = ( value = readNumber( text, pos, 2 ) ).value_or( 0 );
+                break;
+            case Kind::Hour:
+                hour = ( value = readNumber( text, pos, 2 ) ).value_or( 0 );
+                break;
+            case Kind::Minute:
+                minute = ( value = readNumber( text, pos, 2 ) ).value_or( 0 );
+                break;
+            case Kind::Second:
+                second = ( value = readNumber( text, pos, 2 ) ).value_or( 0 );
+                break;
+            case Kind::Fraction:
+                millis = ( value = readFraction( text, pos ) ).value_or( 0 );
+                break;
+            case Kind::Zone:
+                offset = readZone( text, pos );
+                break;
+            }
+            if ( !fits || !value ) {
+                fits = false;
+                break;
+            }
+        }
+        while ( fits && pos < text.size() && text[ pos ].isSpace() ) {
+            ++pos;
+        }
+        if ( !fits || pos != text.size() ) {
+            continue;
+        }
+        const QDate date( year, month, day );
+        const QTime time( hour, minute, second, millis );
         if ( date.isValid() && time.isValid() ) {
-            return QDateTime( date, time, QTimeZone::UTC ).addSecs( -offset );
+            return QDateTime( date, time, QTimeZone::UTC ).addSecs( -offset.value_or( 0 ) );
         }
     }
     return std::nullopt;
