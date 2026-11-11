@@ -56,7 +56,8 @@
  * ────────────────
  * Each Start starts another session beside those running, as the Serial
  * plugin does per port: its own connection, file and tab.  The settings
- * stay editable while sessions run, for the next one.
+ * stay editable while sessions run, for the next one.  totals() is what the
+ * status widget (statuswidget.h) shows.
  *
  * SETTINGS
  * ────────
@@ -114,6 +115,20 @@ public:
 
     /// Whether a session runs.
     bool isCapturing() const;
+
+    /// What the sessions have done, for the status widget.
+    struct Totals {
+        int sessions = 0;     ///< Running.
+        quint64 received = 0; ///< By every session since the dialog was made: only grows.
+        quint64 dropped = 0;  ///< By the running sessions.
+    };
+
+    /// The totals now.
+    Totals totals() const;
+
+Q_SIGNALS:
+    /// A session was started, or has stopped or ended.
+    void sessionsChanged();
 
 private:
     /// Start a session with the settings entered, and open its file.
@@ -190,6 +205,7 @@ private:
     QLabel* statusLabel_;
     /// The running sessions, in the order of sessionList_'s rows.
     QList<NatsSession*> sessions_;
+    quint64 receivedByEnded_ = 0;  ///< What the sessions no longer running received.
     bool fillingProfiles_ = false; ///< The list is being filled: nothing is loaded.
 };
 

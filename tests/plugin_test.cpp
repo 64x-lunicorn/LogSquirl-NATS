@@ -50,6 +50,7 @@
 #include <QListWidget>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSpinBox>
 #include <QTemporaryDir>
 
@@ -1176,6 +1177,152 @@ SCENARIO( "several sessions run side by side, each in its own file and tab",
                     REQUIRE( endsStopped( first ) );
                     REQUIRE( endsStopped( second ) );
                 }
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+}
+
+namespace {
+
+/// What the plugin's status bar widget reads.
+QString statusBarText( const FakeHost& host )
+{
+    REQUIRE( host.statusWidgets.size() == 1 );
+    auto* label = qobject_cast<QLabel*>( host.statusWidgets.first() );
+    REQUIRE( label );
+    return label->text();
+}
+
+/// The number before @p word in @p text, whatever the locale groups its
+/// digits with; -1 if there is none.
+qint64 numberBefore( const QString& text, const QString& word )
+{
+    const auto match = QRegularExpression( QStringLiteral( "(\\d[\\d.,' \\x{a0}\\x{202f}]*) " )
+                                           + QRegularExpression::escape( word ) )
+                           .match( text );
+    if ( !match.hasMatch() ) {
+        return -1;
+    }
+    return match.captured( 1 ).remove( QRegularExpression( "\\D" ) ).toLongLong();
+}
+
+} // namespace
+
+SCENARIO( "the plugin has a status bar widget, from init to shutdown", "[plugin][status]" )
+{
+    GIVEN( "a host" )
+    {
+        FakeHost host;
+
+        WHEN( "the plugin is initialised" )
+        {
+            REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+
+            THEN( "it registers one status widget, which says that nothing is captured" )
+            {
+                REQUIRE( statusBarText( host ) == "NATS: no capture" );
+            }
+
+            AND_WHEN( "the plugin is shut down" )
+            {
+                auto* widget = host.statusWidgets.value( 0 );
+                logsquirl_plugin_shutdown();
+
+                THEN( "it has unregistered the widget" )
+                {
+                    REQUIRE( host.statusWidgets.isEmpty() );
+                    REQUIRE( host.unregisteredStatusWidgets == QList<QWidget*>{ widget } );
+                }
+            }
+
+            logsquirl_plugin_shutdown();
+        }
+    }
+}
+
+SCENARIO( "the status bar shows the running sessions, msgs/s and drops",
+          "[plugin][server][status]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "an initialised plugin and a server" )
+    {
+        NatsServer server;
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+
+        WHEN( "two sessions are started" )
+        {
+            startFromDialog( host, server.url(), "a" );
+            auto* dialog = openDialog();
+            subjectsField( dialog )->setPlainText( "b" );
+            button( dialog, "start" )->click();
+            REQUIRE( host.openedFiles.size() == 2 );
+            REQUIRE( waitSubscribed( host.openedFiles.at( 0 ) ) );
+            REQUIRE( waitSubscribed( host.openedFiles.at( 1 ) ) );
+
+            THEN( "it says so at once, with nothing received or dropped" )
+            {
+                REQUIRE( numberBefore( statusBarText( host ), "sessions" ) == 2 );
+                REQUIRE( numberBefore( statusBarText( host ), "msgs/s" ) == 0 );
+                REQUIRE( numberBefore( statusBarText( host ), "dropped" ) == 0 );
+            }
+
+            AND_WHEN( "messages arrive steadily" )
+            {
+                Publisher publisher( server.url() );
+                const bool shown = waitFor(
+                    [ & ] {
+                        for ( int i = 0; i < 20; ++i ) {
+                            publisher.publish( i % 2 ? "a" : "b", "x", {}, {}, i == 19 );
+                        }
+                        return numberBefore( statusBarText( host ), "msgs/s" ) > 0;
+                    },
+                    5000 );
+
+                THEN( "it shows the rate the sessions receive" )
+                {
+                    REQUIRE( shown );
+                    INFO( statusBarText( host ).toStdString() );
+                    REQUIRE( numberBefore( statusBarText( host ), "dropped" ) == 0 );
+                }
+            }
+
+            AND_WHEN( "one is stopped, then the other" )
+            {
+                sessionList( dialog )->setCurrentRow( 0 );
+                button( dialog, "stop" )->click();
+
+                THEN( "it counts one, then says that nothing is captured" )
+                {
+                    REQUIRE( statusBarText( host ).contains( "1 session " ) );
+                    button( dialog, "stop" )->click();
+                    REQUIRE( statusBarText( host ) == "NATS: no capture" );
+                }
+            }
+        }
+
+        WHEN( "a session drops as a slow consumer" )
+        {
+            host.menuActions.first().trigger();
+            spinBox( openDialog(), "pendingMessages" )->setValue( 1 );
+            startFromDialog( host, server.url(), "flood" );
+            REQUIRE( waitSubscribed( host.openedFiles.first() ) );
+            {
+                Publisher publisher( server.url() );
+                const QByteArray payload( 200, 'x' );
+                for ( int i = 0; i < 50000; ++i ) {
+                    publisher.publish( "flood", payload, {}, {}, i == 49999 );
+                }
+            }
+
+            THEN( "it shows how many were dropped" )
+            {
+                REQUIRE(
+                    waitFor( [ & ] { return numberBefore( statusBarText( host ), "dropped" ) > 0; },
+                             10000 ) );
             }
         }
 

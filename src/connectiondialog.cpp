@@ -561,6 +561,18 @@ bool ConnectionDialog::isCapturing() const
     return !sessions_.isEmpty();
 }
 
+ConnectionDialog::Totals ConnectionDialog::totals() const
+{
+    Totals totals;
+    totals.sessions = static_cast<int>( sessions_.size() );
+    totals.received = receivedByEnded_;
+    for ( const auto* session : sessions_ ) {
+        totals.received += session->receivedCount();
+        totals.dropped += session->droppedCount();
+    }
+    return totals;
+}
+
 void ConnectionDialog::startCapture()
 {
     if ( const auto missing = missingSetting(); !missing.isEmpty() ) {
@@ -621,6 +633,7 @@ void ConnectionDialog::startCapture()
     sessionList_->addItem( QStringLiteral( "%1 on %2" ).arg( subjects, redactUrls( config.url ) ) );
     sessionList_->setCurrentRow( sessionList_->count() - 1 );
     updateButtons();
+    Q_EMIT sessionsChanged();
 
     if ( g_state.api && g_state.handle ) {
         g_state.api->open_file( g_state.handle, session->filePath().toUtf8().constData(), 1 );
@@ -661,11 +674,13 @@ void ConnectionDialog::releaseSession( NatsSession* session )
     }
     sessions_.removeAt( row );
     delete sessionList_->takeItem( static_cast<int>( row ) );
+    receivedByEnded_ += session->receivedCount();
     session->preserveFile();
     session->disconnect( this );
     session->disconnect( statusLabel_ );
     session->deleteLater();
     updateButtons();
+    Q_EMIT sessionsChanged();
 }
 
 void ConnectionDialog::updateSubjectsWarning()

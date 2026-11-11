@@ -25,7 +25,8 @@
  *
  *   - logsquirl_plugin_get_info()   → static metadata
  *   - logsquirl_plugin_init()       → store host API, create the dialog, register menu action
- *   - logsquirl_plugin_shutdown()   → stop the session, close nats.c, clear state
+ *                                     and status widget
+ *   - logsquirl_plugin_shutdown()   → stop the sessions, close nats.c, clear state
  *   - logsquirl_plugin_configure()  → plugin settings (none yet)
  *
  * No exception may leave an entry point or a host callback: the host is C,
@@ -42,6 +43,7 @@
 #include "plugin.h"
 
 #include "connectiondialog.h"
+#include "statuswidget.h"
 #include "tempdirs.h"
 
 #include <openssl/crypto.h>
@@ -206,6 +208,14 @@ LOGSQUIRL_PLUGIN_EXPORT int logsquirl_plugin_init( const LogSquirlHostApi* api, 
 
         api->register_menu_action( handle, "Plugins", "NATS Monitor…", &showNatsMonitor, nullptr );
 
+        // Running sessions, msgs/s and drops, in the status bar.
+        auto& st = nats_monitor::g_state;
+        st.statusWidget = new nats_monitor::StatusWidget( st.dialog );
+        if ( api->register_status_widget ) {
+            api->register_status_widget( handle, static_cast<void*>( st.statusWidget ) );
+            st.statusWidgetRegistered = true;
+        }
+
         // Which nats.c and OpenSSL the plugin carries: both are linked in.
         nats_monitor::hostLog(
             LOGSQUIRL_LOG_INFO,
@@ -233,9 +243,25 @@ LOGSQUIRL_PLUGIN_EXPORT void logsquirl_plugin_shutdown( void )
         nats_monitor::hostLog( LOGSQUIRL_LOG_INFO, "NATS Monitor plugin shutting down…" );
     } );
 
+    // The host must let go of the widget before it is deleted; it goes
+    // before the dialog, whose totals it shows.
+    if ( st.statusWidgetRegistered ) {
+        st.statusWidgetRegistered = false;
+        guarded( "unregistering the status widget", [ &st ] {
+            if ( st.api && st.handle && st.api->unregister_status_widget ) {
+                st.api->unregister_status_widget( st.handle,
+                                                  static_cast<void*>( st.statusWidget ) );
+            }
+        } );
+    }
+    if ( st.statusWidget ) {
+        guarded( "shutdown", [ &st ] { delete st.statusWidget; } );
+        st.statusWidget = nullptr;
+    }
+
     if ( st.dialog ) {
-        // Stops the session: its file is flushed and kept for the tab.
-        guarded( "stopping the NATS session", [ &st ] { st.dialog->stopAll(); } );
+        // Stops the sessions: their files are flushed and kept for the tabs.
+        guarded( "stopping the NATS sessions", [ &st ] { st.dialog->stopAll(); } );
         guarded( "shutdown", [ &st ] { delete st.dialog; } );
         st.dialog = nullptr;
     }

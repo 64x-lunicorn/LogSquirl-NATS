@@ -36,6 +36,7 @@
 namespace nats_monitor {
 
 class ConnectionDialog;
+class StatusWidget;
 
 /**
  * Global plugin state.
@@ -47,6 +48,8 @@ struct PluginState {
     const LogSquirlHostApi* api = nullptr; ///< Host API function table.
     void* handle = nullptr;                ///< Opaque plugin instance handle.
     ConnectionDialog* dialog = nullptr;    ///< The NATS Monitor dialog, created by init.
+    StatusWidget* statusWidget = nullptr;  ///< In the host's status bar, created by init.
+    bool statusWidgetRegistered = false;   ///< The host took statusWidget.
     bool quitting = false; ///< LogSquirl is quitting (aboutToQuit), not just unloading the plugin.
     QString tempRoot;      ///< Where temporary directories go; empty: the system's (for tests).
 };
