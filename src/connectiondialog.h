@@ -28,6 +28,9 @@
  *   - how many bytes of a binary payload are written (default 256)
  *   - the subscription's pending limits, messages and MiB (default
  *     1,000,000 and 512 MiB): beyond them nats.c drops as a slow consumer
+ *   - the size limit of a file in MiB (default 256, 0 for no limit): each
+ *     next file of the capture opens in a new followed tab, with a line in
+ *     the host log (no notification: a busy capture rotates often)
  *   - Start, which starts a NatsSession and opens its file in a followed tab
  *   - Stop, which stops it; the tab keeps the file until LogSquirl quits
  *   - a status line with the session's connection events and errors
@@ -36,6 +39,13 @@
  * in the Serial plugin; stopAll() (shutdown) is not.
  *
  * One session at a time (several sessions are #7's).
+ *
+ * SETTINGS
+ * ────────
+ * The size limit is remembered between sessions: Start saves it to
+ * nats.ini in the plugin's configuration directory (get_config_dir), and
+ * the dialog proposes it when it is created.  The other fields are not
+ * saved (saved connections are #6's).
  *
  * OWNERSHIP
  * ─────────
@@ -90,6 +100,7 @@ private:
     QSpinBox* maxBinarySpin_;
     QSpinBox* pendingMessagesSpin_;
     QSpinBox* pendingMegabytesSpin_;
+    QSpinBox* maxFileSpin_;
     QPushButton* startButton_;
     QPushButton* stopButton_;
     QLabel* statusLabel_;

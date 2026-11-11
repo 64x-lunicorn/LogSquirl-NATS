@@ -811,3 +811,335 @@ SCENARIO( "without drops no dropped marker is written, and the session counts wh
         }
     }
 }
+
+// ── Rotation at the size limit ──────────────────────────────────────────
+
+namespace {
+
+/// The files of the capture whose first file is @p first, in order:
+/// nats_<name>.log, nats_<name>.2.log, nats_<name>.3.log, …
+QStringList captureFiles( const QString& first )
+{
+    QStringList files;
+    if ( !QFileInfo( first ).isFile() ) {
+        return files;
+    }
+    files << first;
+    auto stem = first;
+    stem.chop( 4 ); // ".log"
+    for ( int n = 2;; ++n ) {
+        const auto next = QStringLiteral( "%1.%2.log" ).arg( stem ).arg( n );
+        if ( !QFileInfo( next ).isFile() ) {
+            return files;
+        }
+        files << next;
+    }
+}
+
+qint64 sizeOf( const QString& path )
+{
+    return QFileInfo( path ).size();
+}
+
+/// Whether the file at @p path is empty or ends with a line terminator.
+bool endsWithNewline( const QString& path )
+{
+    QFile file( path );
+    if ( !file.open( QIODevice::ReadOnly ) ) {
+        return false;
+    }
+    const auto content = file.readAll();
+    return content.isEmpty() || content.endsWith( '\n' );
+}
+
+/// The payloads of the lines on @p subject in @p files, in order.
+QStringList payloadsOn( const QStringList& files, const QString& subject )
+{
+    const QRegularExpression re( kTimestamp + QRegularExpression::escape( subject )
+                                 + " - \\d+ (.*)$" );
+    QStringList payloads;
+    for ( const auto& file : files ) {
+        for ( const auto& line : readLines( file ) ) {
+            const auto match = re.match( line );
+            if ( match.hasMatch() ) {
+                payloads << match.captured( 1 );
+            }
+        }
+    }
+    return payloads;
+}
+
+/// "m0001", "m0002", …, padded with x to @p size bytes.
+QByteArray numbered( int i, int size )
+{
+    return QStringLiteral( "m%1" )
+        .arg( i, 4, 10, QLatin1Char( '0' ) )
+        .toLatin1()
+        .leftJustified( size, 'x' );
+}
+
+} // namespace
+
+SCENARIO( "a capture's file is rotated at its size limit, between messages",
+          "[server][session][rotation]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session with a size limit of 1000 bytes" )
+    {
+        NatsServer server;
+        Publisher publisher( server.url() );
+        auto config = configFor( server.url(), "rot" );
+        config.maxFileBytes = 1000;
+        NatsSession session( config );
+        QStringList rotatedTo;
+        QObject::connect( &session, &NatsSession::fileRotated,
+                          [ & ]( const QString& path ) { rotatedTo << path; } );
+        startAndWaitConnected( session, server.url(), "rot" );
+        const auto first = session.filePath();
+
+        WHEN( "messages of about 100 bytes a line, 3500 bytes in all, are published" )
+        {
+            QStringList published;
+            for ( int i = 1; i <= 35; ++i ) {
+                const auto payload = numbered( i, 60 );
+                published << QString::fromLatin1( payload );
+                publisher.publish( "rot", payload, {}, {}, i == 35 );
+            }
+            REQUIRE( waitFor(
+                [ & ] { return payloadsOn( captureFiles( first ), "rot" ).size() == 35; } ) );
+            session.stop();
+            const auto files = captureFiles( first );
+
+            THEN( "the capture goes on in nats_rot.2.log, nats_rot.3.log, …, each announced" )
+            {
+                REQUIRE( files.size() == 4 );
+                REQUIRE( QFileInfo( files.at( 1 ) ).fileName() == "nats_rot.2.log" );
+                REQUIRE( QFileInfo( files.at( 3 ) ).fileName() == "nats_rot.4.log" );
+                REQUIRE( waitFor( [ & ] { return rotatedTo.size() == 3; } ) );
+                REQUIRE( rotatedTo == files.mid( 1 ) );
+                REQUIRE( session.filePath() == files.last() );
+            }
+
+            THEN( "no file is over the limit, and each was rotated only when the next line "
+                  "would not have fit" )
+            {
+                for ( int i = 0; i < files.size(); ++i ) {
+                    INFO( files.at( i ).toStdString() );
+                    REQUIRE( sizeOf( files.at( i ) ) <= 1000 );
+                    REQUIRE( endsWithNewline( files.at( i ) ) );
+                    if ( i + 1 < files.size() ) {
+                        const auto next = readLines( files.at( i + 1 ) );
+                        REQUIRE_FALSE( next.isEmpty() );
+                        const auto nextLine = next.first().toUtf8().size() + 1;
+                        REQUIRE( sizeOf( files.at( i ) ) + nextLine > 1000 );
+                    }
+                }
+            }
+
+            THEN( "every message is one whole line, in order across the files; the first file "
+                  "starts connected, the last ends stopped" )
+            {
+                REQUIRE( payloadsOn( files, "rot" ) == published );
+                REQUIRE( anyMatches( readLines( files.first() ).mid( 0, 1 ),
+                                     connectedMarker( server.url(), "rot" ) ) );
+                REQUIRE(
+                    readLines( files.last() ).last().endsWith( " $NATS-MONITOR - 7 stopped" ) );
+            }
+        }
+
+        WHEN( "a message longer than the limit is published" )
+        {
+            publisher.publish( "rot", QByteArray( 1500, 'L' ) );
+            publisher.publish( "rot", "after" );
+            REQUIRE( waitFor(
+                [ & ] { return payloadsOn( captureFiles( first ), "rot" ).size() == 2; } ) );
+            session.stop();
+            const auto files = captureFiles( first );
+
+            THEN( "it is written whole, alone in a file of its own" )
+            {
+                REQUIRE( files.size() == 3 );
+                REQUIRE( readLines( files.at( 1 ) ).size() == 1 );
+                REQUIRE( payloadsOn( { files.at( 1 ) }, "rot" )
+                         == QStringList{ QString( 1500, 'L' ) } );
+                REQUIRE( payloadsOn( { files.at( 2 ) }, "rot" ) == QStringList{ "after" } );
+            }
+        }
+    }
+}
+
+SCENARIO( "a session started again goes on in its last file, within the size limit",
+          "[server][session][rotation]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session with a size limit of 1000 bytes that rotated once and was stopped" )
+    {
+        NatsServer server;
+        Publisher publisher( server.url() );
+        auto config = configFor( server.url(), "again" );
+        config.maxFileBytes = 1000;
+        NatsSession session( config );
+        int connections = 0;
+        QObject::connect( &session, &NatsSession::connected, [ & ] { ++connections; } );
+        startAndWaitConnected( session, server.url(), "again" );
+        const auto first = session.filePath();
+
+        int published = 0;
+        const auto publish = [ & ]( int count ) {
+            for ( int i = 0; i < count; ++i ) {
+                ++published;
+                publisher.publish( "again", numbered( published, 60 ), {}, {}, i == count - 1 );
+            }
+            REQUIRE( waitFor( [ & ] {
+                return payloadsOn( captureFiles( first ), "again" ).size() == published;
+            } ) );
+        };
+        publish( 15 ); // about 1500 bytes
+        session.stop();
+        REQUIRE( captureFiles( first ).size() == 2 );
+        const auto last = captureFiles( first ).last();
+        REQUIRE( sizeOf( last ) > 0 );
+
+        WHEN( "it is started again and gets another 1500 bytes" )
+        {
+            REQUIRE( session.start() );
+            REQUIRE( waitFor( [ & ] { return connections == 2; }, 10000 ) );
+            REQUIRE( session.filePath() == last );
+            publish( 15 );
+            session.stop();
+            const auto files = captureFiles( first );
+
+            THEN( "no file is over the limit, and every message is there, in order" )
+            {
+                REQUIRE( files.size() >= 3 );
+                for ( const auto& file : files ) {
+                    INFO( file.toStdString() );
+                    REQUIRE( sizeOf( file ) <= 1000 );
+                    REQUIRE( endsWithNewline( file ) );
+                }
+                QStringList expected;
+                for ( int i = 1; i <= 30; ++i ) {
+                    expected << QString::fromLatin1( numbered( i, 60 ) );
+                }
+                REQUIRE( payloadsOn( files, "again" ) == expected );
+            }
+        }
+    }
+}
+
+SCENARIO( "a rotation that fails is retried one limit later", "[server][session][rotation]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session with a size limit of 1000 bytes whose next file cannot be created" )
+    {
+        NatsServer server;
+        Publisher publisher( server.url() );
+        auto config = configFor( server.url(), "rf" );
+        config.maxFileBytes = 1000;
+        NatsSession session( config );
+        QStringList errors;
+        QStringList rotatedTo;
+        QObject::connect( &session, &NatsSession::errorOccurred,
+                          [ & ]( const QString& message ) { errors << message; } );
+        QObject::connect( &session, &NatsSession::fileRotated,
+                          [ & ]( const QString& path ) { rotatedTo << path; } );
+        startAndWaitConnected( session, server.url(), "rf" );
+        const auto first = session.filePath();
+        // A directory where the next file goes: opening it fails, on every
+        // platform and also for root.
+        const auto second = QFileInfo( first ).dir().filePath( "nats_rf.2.log" );
+        REQUIRE( QDir().mkdir( second ) );
+
+        int published = 0;
+        const auto publish = [ & ]( int count ) {
+            for ( int i = 0; i < count; ++i ) {
+                ++published;
+                publisher.publish( "rf", numbered( published, 60 ), {}, {}, i == count - 1 );
+            }
+            REQUIRE( waitFor(
+                [ & ] { return payloadsOn( captureFiles( first ), "rf" ).size() == published; } ) );
+            settle( 50 ); // for the signals
+        };
+
+        WHEN( "the file reaches the limit" )
+        {
+            publish( 12 ); // about 1300 bytes
+
+            THEN( "the failure is reported, and the capture goes on in the same file" )
+            {
+                REQUIRE( errors.size() == 1 );
+                REQUIRE( errors.first().contains( "nats_rf.2.log" ) );
+                REQUIRE( rotatedTo.isEmpty() );
+                REQUIRE( captureFiles( first ) == QStringList{ first } );
+                REQUIRE( sizeOf( first ) > 1000 );
+                REQUIRE( payloadsOn( { first }, "rf" ).size() == 12 );
+            }
+
+            AND_WHEN( "the next file could be created now, and the file grows by less than "
+                      "the limit since the failure" )
+            {
+                REQUIRE( QDir().rmdir( second ) );
+                publish( 4 ); // about 1700 bytes
+
+                THEN( "it is not retried on every line" )
+                {
+                    REQUIRE( errors.size() == 1 );
+                    REQUIRE_FALSE( QFileInfo::exists( second ) );
+                    REQUIRE( session.filePath() == first );
+                }
+
+                AND_WHEN( "it has grown by the limit since the failure" )
+                {
+                    publish( 10 ); // about 2700 bytes
+
+                    THEN( "the capture goes on in nats_rf.2.log, and nothing is lost" )
+                    {
+                        REQUIRE( errors.size() == 1 );
+                        REQUIRE( captureFiles( first ) == QStringList{ first, second } );
+                        REQUIRE( rotatedTo == QStringList{ second } );
+                        REQUIRE( sizeOf( first ) <= 2000 );
+                        REQUIRE( payloadsOn( { first, second }, "rf" ).size() == 26 );
+                        REQUIRE( payloadsOn( { first, second }, "rf" ).last()
+                                 == QString::fromLatin1( numbered( 26, 60 ) ) );
+                    }
+                }
+            }
+        }
+    }
+}
+
+SCENARIO( "a size limit of 0 means no limit", "[server][session][rotation]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session with a size limit of 0" )
+    {
+        NatsServer server;
+        Publisher publisher( server.url() );
+        auto config = configFor( server.url(), "nolimit" );
+        config.maxFileBytes = 0;
+        NatsSession session( config );
+        startAndWaitConnected( session, server.url(), "nolimit" );
+        const auto first = session.filePath();
+
+        WHEN( "100 KB are published" )
+        {
+            for ( int i = 1; i <= 100; ++i ) {
+                publisher.publish( "nolimit", numbered( i, 1000 ), {}, {}, i == 100 );
+            }
+            REQUIRE(
+                waitFor( [ & ] { return payloadsOn( { first }, "nolimit" ).size() == 100; } ) );
+            session.stop();
+
+            THEN( "they all stay in the one file" )
+            {
+                REQUIRE( captureFiles( first ) == QStringList{ first } );
+                REQUIRE( sizeOf( first ) > 100000 );
+                REQUIRE( session.filePath() == first );
+            }
+        }
+    }
+}
