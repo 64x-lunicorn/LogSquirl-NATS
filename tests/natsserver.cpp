@@ -155,7 +155,9 @@ NatsServer::NatsServer( const NatsServerOptions& options )
     if ( !options.configFile.isEmpty() ) {
         arguments << "-c" << options.configFile;
     }
-    arguments << "-a" << kHost << "-p" << "-1" << "--ports_file_dir" << d->dir.path();
+    arguments << "-a" << kHost << "-p"
+              << ( options.port > 0 ? QString::number( options.port ) : QStringLiteral( "-1" ) )
+              << "--ports_file_dir" << d->dir.path();
     if ( options.jetStream ) {
         arguments << "-js" << "-sd" << d->dir.filePath( "jetstream" );
     }

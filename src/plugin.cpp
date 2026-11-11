@@ -24,8 +24,8 @@
  * The four exported symbols of a LogSquirl plugin:
  *
  *   - logsquirl_plugin_get_info()   → static metadata
- *   - logsquirl_plugin_init()       → store host API, register menu action
- *   - logsquirl_plugin_shutdown()   → release resources, clear state
+ *   - logsquirl_plugin_init()       → store host API, create the dialog, register menu action
+ *   - logsquirl_plugin_shutdown()   → stop the session, close nats.c, clear state
  *   - logsquirl_plugin_configure()  → plugin settings (none yet)
  *
  * No exception may leave an entry point or a host callback: the host is C,
@@ -35,10 +35,19 @@
  * @see logsquirl_plugin_api.h for the full host API reference.
  */
 
+// First: on Windows nats.h includes winsock2.h, which must come before any
+// windows.h.
+#include <nats.h>
+
 #include "plugin.h"
 
-#include <nats.h>
+#include "connectiondialog.h"
+#include "tempdirs.h"
+
 #include <openssl/crypto.h>
+
+#include <QApplication>
+#include <QWindow>
 
 #include <exception>
 
@@ -53,6 +62,17 @@ void hostLog( int level, const QString& message )
         g_state.api->log_message( g_state.handle, level, message.toUtf8().constData() );
     }
 }
+
+void hostNotify( const QString& message )
+{
+    if ( g_state.api && g_state.handle ) {
+        g_state.api->show_notification( g_state.handle, message.toUtf8().constData() );
+    }
+}
+
+/// How long shutdown waits for nats.c's threads to end before the host may
+/// unload the library.
+constexpr int64_t kLibraryCloseTimeoutMs = 5000;
 } // namespace nats_monitor
 
 // ── Plugin metadata ──────────────────────────────────────────────────────
@@ -102,11 +122,33 @@ static bool guarded( const char* what, Work&& work ) noexcept
 
 // ── Menu action callback ─────────────────────────────────────────────────
 
-/// Called when the user clicks "NATS Monitor…" in the Plugins menu.  The
-/// connection dialog comes with the next ticket; until then it does nothing.
+/// Show the NATS Monitor dialog, on top of the window whose menu opened it.
+static void showDialog()
+{
+    auto* dialog = nats_monitor::g_state.dialog;
+    if ( !dialog ) {
+        return;
+    }
+
+    // The dialog is created parentless in init() and deleted in shutdown(),
+    // so it must not become a child of a main window that may be destroyed
+    // first.  A transient parent keeps it on top without handing over
+    // ownership.
+    auto* window = QApplication::activeWindow();
+    if ( window && window != dialog ) {
+        dialog->winId(); // creates the native window, and so windowHandle()
+        dialog->windowHandle()->setTransientParent( window->windowHandle() );
+    }
+
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+}
+
+/// Called when the user clicks "NATS Monitor…" in the Plugins menu.
 static void showNatsMonitor( void* /* userData */ )
 {
-    guarded( "showing the NATS Monitor dialog", [] {} );
+    guarded( "showing the NATS Monitor dialog", [] { showDialog(); } );
 }
 
 // ── Exported C entry points ──────────────────────────────────────────────
@@ -142,9 +184,25 @@ LOGSQUIRL_PLUGIN_EXPORT int logsquirl_plugin_init( const LogSquirlHostApi* api, 
 
     nats_monitor::g_state.api = api;
     nats_monitor::g_state.handle = handle;
+    nats_monitor::g_state.quitting = false;
 
     const bool ok = guarded( "initialisation", [ api, handle ] {
         api->log_message( handle, LOGSQUIRL_LOG_INFO, "NATS Monitor plugin initialising…" );
+
+        // Files of LogSquirl processes that ended without removing them,
+        // e.g. after a crash: no tab can show them any more.
+        nats_monitor::removeStaleTempDirs( nats_monitor::tempRoot() );
+
+        nats_monitor::g_state.dialog = new nats_monitor::ConnectionDialog();
+
+        // The host shuts the plugin down both when LogSquirl quits (after
+        // aboutToQuit) and when the plugin is disabled or updated at
+        // runtime, with the tabs left open; only in the first case may the
+        // temporary files go.
+        if ( auto* app = QCoreApplication::instance() ) {
+            QObject::connect( app, &QCoreApplication::aboutToQuit, nats_monitor::g_state.dialog,
+                              [] { nats_monitor::g_state.quitting = true; } );
+        }
 
         api->register_menu_action( handle, "Plugins", "NATS Monitor…", &showNatsMonitor, nullptr );
 
@@ -169,12 +227,38 @@ LOGSQUIRL_PLUGIN_EXPORT int logsquirl_plugin_init( const LogSquirlHostApi* api, 
  */
 LOGSQUIRL_PLUGIN_EXPORT void logsquirl_plugin_shutdown( void )
 {
+    auto& st = nats_monitor::g_state;
+    // Each step on its own, so that one failing does not skip the others.
     guarded( "shutdown", [] {
         nats_monitor::hostLog( LOGSQUIRL_LOG_INFO, "NATS Monitor plugin shutting down…" );
     } );
 
-    nats_monitor::g_state.api = nullptr;
-    nats_monitor::g_state.handle = nullptr;
+    if ( st.dialog ) {
+        // Stops the session: its file is flushed and kept for the tab.
+        guarded( "stopping the NATS session", [ &st ] { st.dialog->stopAll(); } );
+        guarded( "shutdown", [ &st ] { delete st.dialog; } );
+        st.dialog = nullptr;
+    }
+
+    // The tabs close with LogSquirl: remove the files of every instance of
+    // the plugin in this process, also those of instances before a runtime
+    // disable or update, which only the directory names remember.
+    if ( st.quitting ) {
+        guarded( "removing temporary files",
+                 [] { nats_monitor::removeOwnTempDirs( nats_monitor::tempRoot() ); } );
+    }
+
+    // nats.c's threads run code of this library: they must have ended
+    // before the host unloads it.  Every connection is destroyed by now.
+    guarded( "closing nats.c", [] {
+        if ( nats_CloseAndWait( nats_monitor::kLibraryCloseTimeoutMs ) == NATS_TIMEOUT ) {
+            nats_monitor::hostLog( LOGSQUIRL_LOG_WARNING,
+                                   "NATS Monitor plugin: nats.c did not close in time." );
+        }
+    } );
+
+    st.api = nullptr;
+    st.handle = nullptr;
 }
 
 /**

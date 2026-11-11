@@ -29,12 +29,14 @@
 #pragma once
 
 #include "logsquirl_plugin_api.h"
+#include "plugin.h"
 
 #include <catch2/catch.hpp>
 
 #include <QList>
 #include <QString>
 #include <QStringList>
+#include <QTemporaryDir>
 
 #include <stdexcept>
 
@@ -65,8 +67,9 @@ public:
         api_.show_notification = []( void* handle, const char* message ) {
             self( handle )->notifications << QString::fromUtf8( message );
         };
-        api_.open_file = []( void* handle, const char* filePath, int ) {
+        api_.open_file = []( void* handle, const char* filePath, int follow ) {
             self( handle )->openedFiles << QString::fromUtf8( filePath );
+            self( handle )->openedFollow << ( follow != 0 );
         };
         api_.register_menu_action = []( void* handle, const char* menuPath, const char* label,
                                         void ( *callback )( void* ), void* userData ) {
@@ -77,6 +80,15 @@ public:
             host->menuActions.append(
                 { QString::fromUtf8( menuPath ), QString::fromUtf8( label ), callback, userData } );
         };
+
+        // The plugin's temporary directories go below a root of this host's
+        // own, which it removes.
+        nats_monitor::g_state.tempRoot = tempRoot_.path();
+    }
+
+    ~FakeHost()
+    {
+        nats_monitor::g_state.tempRoot.clear();
     }
 
     FakeHost( const FakeHost& ) = delete;
@@ -94,9 +106,16 @@ public:
         return this;
     }
 
+    /** The plugin's temporary root, private to this host. */
+    QString tempRoot() const
+    {
+        return tempRoot_.path();
+    }
+
     QStringList logs;
     QStringList notifications;
     QStringList openedFiles;
+    QList<bool> openedFollow; ///< For each of openedFiles: whether it is followed.
     QList<MenuAction> menuActions;
     /// register_menu_action() throws, as a broken host might.
     bool failMenuAction = false;
@@ -108,6 +127,7 @@ private:
     }
 
     LogSquirlHostApi api_{};
+    QTemporaryDir tempRoot_;
 };
 
 } // namespace nats_test
