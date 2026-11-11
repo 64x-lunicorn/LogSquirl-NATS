@@ -16,6 +16,7 @@ Tickets: see [Tickets](#tickets).
 | How messages reach LogSquirl | **Plugin type `ui`, temp file + `open_file(path, follow=1)`**, as LogSquirl-Serial does | Works with today's LogSquirl releases; LogSquirl's indexing of large growing files does the heavy lifting; the capture survives Stop. The DataSource `push_line` API (LogSquirl 26.12) is unreleased and untested at high rates. |
 | Scope of v1 | Core NATS subscribe; JetStream replay in the release after | Live capture first; replay builds on the same writer and line format. |
 | TLS backend | **OpenSSL 3.x LTS, built by the plugin's CMake, linked in statically** | No change to the shared CI, no extra library in the package, same on every platform; [ADR 1](adr/0001-static-openssl-built-by-the-plugin.md). |
+| Saved connections | **Profiles in `nats.ini`** (URLs, auth method, user name, file paths, TLS settings); **passwords and tokens never saved**, entered at Start (#6) | Nothing secret in a plain-text file; a `.creds` file is the way to keep credentials without typing them. A keychain is not needed for v1. |
 
 ## Architecture
 
