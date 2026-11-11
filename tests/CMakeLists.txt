@@ -75,3 +75,24 @@ add_test(NAME logsquirl_nats_tests COMMAND logsquirl_nats_tests "~[server]")
 # Exit code 77: every server test was skipped (tests_main.cpp).
 add_test(NAME logsquirl_nats_server_tests COMMAND logsquirl_nats_tests "[server]")
 set_tests_properties(logsquirl_nats_server_tests PROPERTIES SKIP_RETURN_CODE 77)
+
+# ── The plugin library links no OpenSSL shared library ────────────────────
+# With the platform's own tool; under MSVC dumpbin sits next to link.exe.
+if(APPLE)
+    find_program(DEPENDENCY_TOOL otool)
+elseif(WIN32)
+    get_filename_component(_linker_dir "${CMAKE_LINKER}" DIRECTORY)
+    find_program(DEPENDENCY_TOOL dumpbin HINTS "${_linker_dir}")
+else()
+    find_program(DEPENDENCY_TOOL objdump HINTS "${CMAKE_OBJDUMP}")
+endif()
+if(DEPENDENCY_TOOL)
+    add_test(NAME no_shared_openssl
+        COMMAND "${CMAKE_COMMAND}" "-DBINARY=$<TARGET_FILE:logsquirl_nats>"
+                "-DTOOL=${DEPENDENCY_TOOL}" -P "${CMAKE_SOURCE_DIR}/cmake/CheckNoSharedOpenSSL.cmake")
+else()
+    # Never a silent pass: without the tool the test fails, saying why.
+    add_test(NAME no_shared_openssl
+        COMMAND "${CMAKE_COMMAND}" -E echo "no otool, objdump or dumpbin to list the dependencies with")
+    set_tests_properties(no_shared_openssl PROPERTIES WILL_FAIL TRUE)
+endif()
