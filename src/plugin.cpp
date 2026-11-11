@@ -142,7 +142,6 @@ LOGSQUIRL_PLUGIN_EXPORT int logsquirl_plugin_init( const LogSquirlHostApi* api, 
 
     nats_monitor::g_state.api = api;
     nats_monitor::g_state.handle = handle;
-    nats_monitor::g_state.initialised = true;
 
     const bool ok = guarded( "initialisation", [ api, handle ] {
         api->log_message( handle, LOGSQUIRL_LOG_INFO, "NATS Monitor plugin initialising…" );
@@ -176,7 +175,6 @@ LOGSQUIRL_PLUGIN_EXPORT void logsquirl_plugin_shutdown( void )
 
     nats_monitor::g_state.api = nullptr;
     nats_monitor::g_state.handle = nullptr;
-    nats_monitor::g_state.initialised = false;
 }
 
 /**

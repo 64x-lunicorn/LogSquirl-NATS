@@ -44,7 +44,6 @@ namespace nats_monitor {
 struct PluginState {
     const LogSquirlHostApi* api = nullptr; ///< Host API function table.
     void* handle = nullptr;                ///< Opaque plugin instance handle.
-    bool initialised = false;              ///< True between init() and shutdown().
 };
 
 /// The single global instance — defined in plugin.cpp.
