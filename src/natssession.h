@@ -117,7 +117,8 @@ public:
     }
 
 Q_SIGNALS:
-    /// Connected to @p url and subscribed.
+    /// Connected to @p url and subscribed: after start(), and again after
+    /// each reconnect.
     void connected( const QString& url );
 
     /// A connection event, as written to the file (without the marker

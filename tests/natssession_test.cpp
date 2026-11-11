@@ -344,6 +344,9 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
         QStringList status;
         QObject::connect( &session, &NatsSession::statusChanged,
                           [ &status ]( const QString& text ) { status << text; } );
+        QStringList connected;
+        QObject::connect( &session, &NatsSession::connected,
+                          [ &connected ]( const QString& server ) { connected << server; } );
         startAndWaitConnected( session, url, "back" );
 
         WHEN( "the server stops" )
@@ -386,6 +389,8 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
                     REQUIRE( status.at( 0 ) == "connected to " + url );
                     REQUIRE( status.at( 1 ) == "disconnected" );
                     REQUIRE( status.at( 2 ) == "reconnected to " + url );
+                    // Connected again, as after the first connect.
+                    REQUIRE( connected == QStringList{ url, url } );
                 }
             }
         }

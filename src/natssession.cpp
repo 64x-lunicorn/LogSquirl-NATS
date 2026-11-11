@@ -69,10 +69,11 @@ constexpr auto kCallbackTimeout = std::chrono::seconds( 5 );
 
 /// What the writer reports to the session along with a line.
 enum class Event {
-    None,      ///< A message: nothing to report.
-    Connected, ///< Subscribed; the text is the server URL.
-    Status,    ///< A connection event.
-    Error,     ///< Something failed.
+    None,        ///< A message: nothing to report.
+    Connected,   ///< Subscribed; the text is the server URL.
+    Reconnected, ///< Connected again, the subscription restored; the text is the server URL.
+    Status,      ///< A connection event.
+    Error,       ///< Something failed.
 };
 
 struct Item {
@@ -219,9 +220,9 @@ struct Shared {
 
     static void onReconnected( natsConnection* connection, void* closure )
     {
+        const auto server = connectedUrl( connection );
         static_cast<Shared*>( closure )->pushMarker(
-            QStringLiteral( "reconnected to %1" ).arg( connectedUrl( connection ) ),
-            Event::Status );
+            QStringLiteral( "reconnected to %1" ).arg( server ), Event::Reconnected, server );
     }
 
     static void onClosed( natsConnection*, void* closure )
@@ -307,6 +308,12 @@ struct NatsSession::Worker {
             post( [ url = item.text ]( NatsSession* s ) {
                 Q_EMIT s->connected( url );
                 Q_EMIT s->statusChanged( QStringLiteral( "connected to %1" ).arg( url ) );
+            } );
+            return;
+        case Event::Reconnected:
+            post( [ url = item.text ]( NatsSession* s ) {
+                Q_EMIT s->connected( url );
+                Q_EMIT s->statusChanged( QStringLiteral( "reconnected to %1" ).arg( url ) );
             } );
             return;
         case Event::Status:
