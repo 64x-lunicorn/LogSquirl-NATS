@@ -12,10 +12,10 @@
 # ============================================================================
 
 include(FetchContent)
-FetchContent_Declare(
-    Catch2
-    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-    GIT_TAG        v2.13.10
+FetchContent_Declare(Catch2
+    URL      "${CATCH2_PIN_URL}"
+    URL_HASH "SHA256=${CATCH2_PIN_SHA256}"
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(Catch2)
 

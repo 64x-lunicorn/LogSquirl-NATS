@@ -18,8 +18,10 @@
 set(NATS_SERVER_EXECUTABLE "" CACHE FILEPATH
     "A nats-server binary for the tests; empty: download the pinned release")
 option(NATS_SERVER_DOWNLOAD "Download the pinned nats-server for the tests" ON)
-set(NATS_SERVER_URL_BASE "${NATS_SERVER_PIN_URL_BASE}" CACHE STRING
-    "Where the pinned nats-server release archives are (a mirror, say); their SHA-256 must match")
+# Without the version: a pin bump in cmake/Dependencies.cmake takes effect
+# also in an existing build directory, where this cache entry stays.
+set(NATS_SERVER_RELEASES_URL "${NATS_SERVER_PIN_RELEASES_URL}" CACHE STRING
+    "Where the nats-server releases are (a mirror, say): <this>/v<version>/<archive>; the SHA-256 must match")
 
 set(LOGSQUIRL_NATS_TEST_SERVER "")
 set(LOGSQUIRL_NATS_TEST_SERVER_UNAVAILABLE "")
@@ -81,7 +83,7 @@ function(_nats_server_provide)
         return()
     endif()
 
-    set(_url "${NATS_SERVER_URL_BASE}/${_name}.${_archive_ext}")
+    set(_url "${NATS_SERVER_RELEASES_URL}/v${NATS_SERVER_PIN_VERSION}/${_name}.${_archive_ext}")
     set(_archive "${CMAKE_BINARY_DIR}/${_name}.${_archive_ext}")
     message(STATUS "Downloading nats-server ${NATS_SERVER_PIN_VERSION} for the tests")
     file(DOWNLOAD "${_url}" "${_archive}"

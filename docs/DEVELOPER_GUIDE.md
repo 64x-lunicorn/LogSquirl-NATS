@@ -75,7 +75,7 @@ version, checks its SHA-256 and unpacks it into the build tree.
 
 - `-DNATS_SERVER_EXECUTABLE=/path/to/nats-server` uses that binary instead.
 - `-DNATS_SERVER_DOWNLOAD=OFF` downloads nothing.
-- `-DNATS_SERVER_URL_BASE=<url>` downloads from a mirror (the hash must match).
+- `-DNATS_SERVER_RELEASES_URL=<url>` downloads `<url>/v<version>/<archive>` from a mirror (the hash must match).
 
 Without a server (offline, switched off, no build for the platform) the
 build succeeds and `logsquirl_nats_server_tests` is reported by ctest as

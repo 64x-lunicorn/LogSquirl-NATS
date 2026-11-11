@@ -9,6 +9,7 @@
 #   OpenSSL      openssl-<v>.tar.gz of the release (its .sha256 file)
 #   nats.c       GitHub's source archive of the tag
 #   nats-server  the release's SHA256SUMS, one entry per platform
+#   Catch2       GitHub's source archive of the tag
 # ============================================================================
 
 # OpenSSL 3.5 is an LTS release (supported until April 2030).
@@ -27,5 +28,11 @@ set(NATS_SERVER_PIN_VERSION 2.15.2)
 set(NATS_SERVER_PIN_SHA256_darwin-arm64  cbd2219d01502c38733485ac684269da585ee479fa3b1377264beecdefdf9e9d)
 set(NATS_SERVER_PIN_SHA256_linux-amd64   67cb8e10bc6f0c4b47f75a728529a20953dbae2a4f9a4a52ae8517d65ae303ff)
 set(NATS_SERVER_PIN_SHA256_windows-amd64 f6398d5d11093778f870db70242cb50d20a58134c937c805ba8d114e7e398766)
-set(NATS_SERVER_PIN_URL_BASE
-    "https://github.com/nats-io/nats-server/releases/download/v${NATS_SERVER_PIN_VERSION}")
+# Where the releases are; the version directory v<version> is added to it.
+set(NATS_SERVER_PIN_RELEASES_URL "https://github.com/nats-io/nats-server/releases/download")
+
+# Only for the tests: the test framework (v2, as LogSquirl's own tests).
+set(CATCH2_PIN_VERSION 2.13.10)
+set(CATCH2_PIN_SHA256  d54a712b7b1d7708bc7a819a8e6e47b2fde9536f487b89ccbca295072a7d9943)
+set(CATCH2_PIN_URL
+    "https://github.com/catchorg/Catch2/archive/refs/tags/v${CATCH2_PIN_VERSION}.tar.gz")
