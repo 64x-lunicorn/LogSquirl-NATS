@@ -37,6 +37,7 @@ add_executable(logsquirl_nats_tests
     lineformat_test.cpp
     logformat_test.cpp
     natssession_test.cpp
+    auth_test.cpp
 )
 
 set_target_properties(logsquirl_nats_tests PROPERTIES
@@ -55,6 +56,7 @@ endfunction()
 _c_string(TESTCONFIG_SERVER "${LOGSQUIRL_NATS_TEST_SERVER}")
 _c_string(TESTCONFIG_SERVER_UNAVAILABLE "${LOGSQUIRL_NATS_TEST_SERVER_UNAVAILABLE}")
 _c_string(TESTCONFIG_CERTS "${CMAKE_CURRENT_SOURCE_DIR}/certs")
+_c_string(TESTCONFIG_AUTH "${CMAKE_CURRENT_SOURCE_DIR}/auth")
 _c_string(TESTCONFIG_SOURCE_DIR "${CMAKE_SOURCE_DIR}")
 configure_file(testconfig.h.in "${CMAKE_CURRENT_BINARY_DIR}/testconfig.h" @ONLY)
 target_include_directories(logsquirl_nats_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")

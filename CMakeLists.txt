@@ -48,6 +48,7 @@ set(LOGSQUIRL_NATS_SOURCES
     src/plugin.cpp
     src/connectiondialog.cpp
     src/lineformat.cpp
+    src/natsoptions.cpp
     src/natssession.cpp
     src/tempdirs.cpp
 )

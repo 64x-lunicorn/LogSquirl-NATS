@@ -54,6 +54,7 @@
 
 #include "natssession.h"
 
+#include "natsoptions.h"
 #include "tempdirs.h"
 
 #include <QFile>
@@ -659,12 +660,9 @@ struct NatsSession::Worker {
     }
 
     /// Create the options with the callbacks.
-    natsStatus createOptions( natsOptions** options, const QByteArray& url )
+    natsStatus createOptions( natsOptions** options )
     {
         natsStatus status = natsOptions_Create( options );
-        if ( status == NATS_OK ) {
-            status = natsOptions_SetURL( *options, url.constData() );
-        }
         if ( status == NATS_OK ) {
             // A monitor keeps trying for as long as it runs.
             status = natsOptions_SetMaxReconnect( *options, -1 );
@@ -687,16 +685,22 @@ struct NatsSession::Worker {
     /// Connect and subscribe; false, after an error marker, if that failed.
     bool open( natsOptions** options, natsConnection** connection, natsSubscription** subscription )
     {
-        const auto url = config.url.toUtf8();
-        natsStatus status = createOptions( options, url );
-        if ( status == NATS_OK ) {
-            status = natsConnection_Connect( connection, *options );
-        }
-        if ( status != NATS_OK ) {
-            shared->pushMarker( QStringLiteral( "connection to %1 failed: %2" )
-                                    .arg( config.url, lastError( status ) ),
-                                Event::Error );
+        const auto fail = [ this ]( const QString& why ) {
+            shared->pushMarker(
+                QStringLiteral( "connection to %1 failed: %2" ).arg( config.url, why ),
+                Event::Error );
             return false;
+        };
+        natsStatus status = createOptions( options );
+        if ( status != NATS_OK ) {
+            return fail( lastError( status ) );
+        }
+        if ( const auto problem = configureConnection( *options, config ); !problem.isEmpty() ) {
+            return fail( problem );
+        }
+        status = natsConnection_Connect( connection, *options );
+        if ( status != NATS_OK ) {
+            return fail( explainConnectFailure( config, status, lastError( status ) ) );
         }
 
         const auto subject = config.subject.toUtf8();

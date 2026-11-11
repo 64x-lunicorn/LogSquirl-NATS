@@ -38,6 +38,7 @@
 #include <QStringList>
 #include <QThread>
 
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -89,11 +90,17 @@ inline QStringList readLines( const QString& path )
 /// A nats.c connection that publishes test messages.
 class Publisher {
 public:
-    explicit Publisher( const QString& url )
+    /// Connect to @p url; @p configure sets further options (credentials,
+    /// TLS) before it connects.
+    explicit Publisher( const QString& url,
+                        const std::function<void( natsOptions* )>& configure = {} )
     {
         natsOptions* options = nullptr;
         check( natsOptions_Create( &options ), "natsOptions_Create" );
         natsOptions_SetURL( options, url.toUtf8().constData() );
+        if ( configure ) {
+            configure( options );
+        }
         natsOptions_SetTimeout( options, 5000 );
         const auto status = natsConnection_Connect( &connection_, options );
         natsOptions_Destroy( options );

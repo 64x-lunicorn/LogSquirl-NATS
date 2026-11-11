@@ -117,9 +117,38 @@ inline constexpr qint64 kBytesPerMiB = 1024 * 1024;
 /// The size limit in MiB the dialog proposes, unless the user chose another.
 inline constexpr int kDefaultMaxFileMiB = 256;
 
+/// How a session proves who it is to the server.
+enum class AuthMethod {
+    None,         ///< No credentials.
+    UserPassword, ///< AuthConfig::user and the password in AuthConfig::secret.
+    Token,        ///< The token in AuthConfig::secret.
+    Credentials,  ///< A .creds file (user JWT and NKey seed) in AuthConfig::file.
+    NKey,         ///< A file with an NKey seed (SU…) in AuthConfig::file.
+};
+
+struct AuthConfig {
+    AuthMethod method = AuthMethod::None;
+    QString user;
+    QString secret; ///< The password or token: asked for at Start, never saved.
+    QString file;   ///< The .creds or NKey seed file.
+};
+
+struct TlsConfig {
+    /// Connect with TLS; a tls:// URL does so too.
+    bool enabled = false;
+    QString caFile;     ///< The CA(s) the server's certificate must be signed by (PEM).
+    QString certFile;   ///< A client certificate (PEM); with keyFile.
+    QString keyFile;    ///< Its private key (PEM).
+    QString serverName; ///< The name the server's certificate must be for; empty: the URL's host.
+    bool skipVerify = false; ///< Accept any server certificate: insecure.
+};
+
 struct SessionConfig {
-    QString url = QString::fromLatin1( kDefaultUrl ); ///< One or more URLs, comma-separated.
-    QString subject;                                  ///< May contain the wildcards * and >.
+    /// One or more URLs, comma-separated: the seeds of a cluster.
+    QString url = QString::fromLatin1( kDefaultUrl );
+    QString subject; ///< May contain the wildcards * and >.
+    AuthConfig auth;
+    TlsConfig tls;
     FormatOptions format;
     /// The subscription's pending limits; both must be > 0.
     PendingLimits pendingLimits = kDefaultPendingLimits;
