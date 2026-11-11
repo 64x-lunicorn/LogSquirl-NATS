@@ -53,17 +53,14 @@ endfunction()
 _c_string(TESTCONFIG_SERVER "${LOGSQUIRL_NATS_TEST_SERVER}")
 _c_string(TESTCONFIG_SERVER_UNAVAILABLE "${LOGSQUIRL_NATS_TEST_SERVER_UNAVAILABLE}")
 _c_string(TESTCONFIG_CERTS "${CMAKE_CURRENT_SOURCE_DIR}/certs")
+_c_string(TESTCONFIG_SOURCE_DIR "${CMAKE_SOURCE_DIR}")
 configure_file(testconfig.h.in "${CMAKE_CURRENT_BINARY_DIR}/testconfig.h" @ONLY)
 target_include_directories(logsquirl_nats_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
 # The built plugin library, which library_test.cpp loads as the host would.
 add_dependencies(logsquirl_nats_tests logsquirl_nats)
 target_compile_definitions(logsquirl_nats_tests
-    PRIVATE LOGSQUIRL_NATS_LIBRARY="$<TARGET_FILE:logsquirl_nats>"
-            # The Log Format, which logformat_test.cpp reads formatter lines with
-            NATS_FORMAT_FILE="${CMAKE_SOURCE_DIR}/formats/nats_log.json"
-            # plugin.json and .github/plugin-ci.json, which ship it
-            LOGSQUIRL_NATS_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    PRIVATE LOGSQUIRL_NATS_LIBRARY="$<TARGET_FILE:logsquirl_nats>")
 
 target_link_libraries(logsquirl_nats_tests
     PRIVATE

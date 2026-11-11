@@ -32,6 +32,7 @@
 #include <catch2/catch.hpp>
 
 #include "lineformat.h"
+#include "testconfig.h"
 
 #include <QDateTime>
 #include <QFile>
@@ -61,7 +62,7 @@ struct LogFormat {
 
 LogFormat loadFormat()
 {
-    QFile file( QStringLiteral( NATS_FORMAT_FILE ) );
+    QFile file( QStringLiteral( LOGSQUIRL_NATS_TEST_SOURCE_DIR "/formats/nats_log.json" ) );
     REQUIRE( file.open( QIODevice::ReadOnly ) );
     QJsonParseError error;
     const auto document = QJsonDocument::fromJson( file.readAll(), &error );
@@ -493,7 +494,7 @@ SCENARIO( "the Log Format reads no line of another log", "[logformat]" )
 SCENARIO( "the package carries the Log Format", "[logformat]" )
 {
     const auto readJson = []( const QString& relativePath ) {
-        QFile file( QStringLiteral( LOGSQUIRL_NATS_SOURCE_DIR "/" ) + relativePath );
+        QFile file( QStringLiteral( LOGSQUIRL_NATS_TEST_SOURCE_DIR "/" ) + relativePath );
         REQUIRE( file.open( QIODevice::ReadOnly ) );
         return QJsonDocument::fromJson( file.readAll() ).object();
     };
