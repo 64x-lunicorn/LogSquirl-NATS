@@ -1,0 +1,51 @@
+{
+    "$schema": "https://lnav.org/schemas/format-v1.schema.json",
+    "logsquirl_nats_log": {
+        "title": "NATS Monitor messages",
+        "description": "The lines the NATS Monitor plugin writes: one per NATS message, with its receive time in UTC, subject, reply subject (- for none), payload size in bytes, then the headers in brackets and the payload, escaped to one line (hex: for a payload that is not UTF-8). Lines the plugin itself writes, such as connection events, have the subject $NATS-MONITOR.",
+        "url": "https://github.com/64x-lunicorn/LogSquirl-NATS#readme",
+        "multiline": false,
+        "regex": {
+            "message": {
+                "pattern": "^(?<timestamp>\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{6}Z) (?<subject>\\S++) (?<reply>\\S++) (?<size>\\d++)(?: (?<body>.*))?$"
+            }
+        },
+        "timestamp-field": "timestamp",
+        "timestamp-format": [
+            "%Y-%m-%d %H:%M:%S.%f%z"
+        ],
+        "body-field": "body",
+        "value": {
+            "subject": {
+                "kind": "string",
+                "identifier": true,
+                "description": "The subject the message was published to; $NATS-MONITOR for a line of the plugin itself"
+            },
+            "reply": {
+                "kind": "string",
+                "description": "The reply subject, - for none"
+            },
+            "size": {
+                "kind": "integer",
+                "description": "The payload's size in bytes, also when the line shows only part of it"
+            }
+        },
+        "sample": [
+            {
+                "line": "2026-11-11 10:00:00.123456Z orders.eu.created _INBOX.ab12 20 {\"id\":1,\"total\":9.5}"
+            },
+            {
+                "line": "2026-11-11 10:00:00.124001Z sensors.t1 - 4 [Nats-Msg-Id=42; Trace=abc] 21.5"
+            },
+            {
+                "line": "2026-11-11 10:00:00.125000Z bin - 4 hex:0001feff"
+            },
+            {
+                "line": "2026-11-11 10:00:00.126000Z ping - 0"
+            },
+            {
+                "line": "2026-11-11 10:00:01.000000Z $NATS-MONITOR - 12 disconnected"
+            }
+        ]
+    }
+}

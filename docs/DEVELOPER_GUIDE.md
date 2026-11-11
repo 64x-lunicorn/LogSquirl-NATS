@@ -126,6 +126,25 @@ a stopped server back for a reconnect test.
   then on every message published is captured.
 - **The formatter** (`lineformat_test.cpp`): `formatLine()` is a pure
   function from a message to one line.
+- **The Log Format** (`logformat_test.cpp`) is tested at the same seam: it
+  reads the formatter's lines with the regex and timestamp format of
+  [`formats/nats_log.json`](../formats/nats_log.json), as LogSquirl does,
+  and checks the columns. A change of the line format that the definition
+  does not follow fails it.
+
+### The Log Format
+
+`formats/nats_log.json` gives LogSquirl's Table View the columns
+*timestamp, subject, reply, size, body* (the body being the headers and
+the payload). CI packages it beside the library (`package_files` in
+`.github/plugin-ci.json`, flat), the install rule does the same, and
+`plugin.json`'s `formats` names it, so LogSquirl 26.12 and later read it
+while the plugin is enabled; older versions need it imported.
+
+LogSquirl does not match or extract fields from a line longer than
+1,000,000 characters (`MaxUiThreadLineLength`), so a line over about 1 MB,
+a message with a large payload, gets no columns in the Table View. The
+regex covers such lines; the test checks that with a 4 MiB payload.
 
 ### TLS test certificates
 
