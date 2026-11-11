@@ -52,6 +52,7 @@ set(LOGSQUIRL_NATS_SOURCES
     src/natssession.cpp
     src/nkey.cpp
     src/profiles.cpp
+    src/subjects.cpp
     src/tempdirs.cpp
 )
 

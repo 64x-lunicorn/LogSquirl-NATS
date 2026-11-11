@@ -47,6 +47,8 @@
 #include <QFileInfo>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTemporaryDir>
@@ -69,7 +71,7 @@ QDialog* openDialog()
 {
     for ( auto* widget : QApplication::topLevelWidgets() ) {
         auto* dialog = qobject_cast<QDialog*>( widget );
-        if ( dialog && dialog->isVisible() && dialog->findChild<QLineEdit*>( "subject" ) ) {
+        if ( dialog && dialog->isVisible() && dialog->findChild<QPlainTextEdit*>( "subjects" ) ) {
             return dialog;
         }
     }
@@ -109,6 +111,30 @@ QCheckBox* checkBox( QDialog* dialog, const char* name )
     auto* check = dialog ? dialog->findChild<QCheckBox*>( name ) : nullptr;
     REQUIRE( check );
     return check;
+}
+
+/// The subjects to capture, one a line: "<subject> [<queue group>]".
+QPlainTextEdit* subjectsField( QDialog* dialog )
+{
+    auto* edit = dialog ? dialog->findChild<QPlainTextEdit*>( "subjects" ) : nullptr;
+    REQUIRE( edit );
+    return edit;
+}
+
+/// The dialog's warning about the subjects entered; empty if none.
+QString subjectsWarning( QDialog* dialog )
+{
+    auto* label = dialog ? dialog->findChild<QLabel*>( "subjectsWarning" ) : nullptr;
+    REQUIRE( label );
+    return label->text();
+}
+
+/// The list of the running sessions.
+QListWidget* sessionList( QDialog* dialog )
+{
+    auto* list = dialog ? dialog->findChild<QListWidget*>( "sessions" ) : nullptr;
+    REQUIRE( list );
+    return list;
 }
 
 QString statusText( QDialog* dialog )
@@ -173,7 +199,7 @@ void startFromDialog( FakeHost& host, const QString& url, const QString& subject
     host.menuActions.first().trigger();
     auto* dialog = openDialog();
     field( dialog, "url" )->setText( url );
-    field( dialog, "subject" )->setText( subject );
+    subjectsField( dialog )->setPlainText( subject );
     button( dialog, "start" )->click();
 }
 
@@ -227,7 +253,7 @@ SCENARIO( "the plugin adds NATS Monitor to the Plugins menu", "[plugin]" )
                     REQUIRE( dialog );
                     REQUIRE( dialog->isVisible() );
                     REQUIRE( field( dialog, "url" )->text() == "nats://localhost:4222" );
-                    REQUIRE( field( dialog, "subject" )->text().isEmpty() );
+                    REQUIRE( subjectsField( dialog )->toPlainText().isEmpty() );
                     REQUIRE( spinBox( dialog, "maxBinaryBytes" )->value() == 256 );
                     REQUIRE( host.openedFiles.isEmpty() );
                     REQUIRE_FALSE( host.logs.join( '\n' ).contains( "failed" ) );
@@ -939,6 +965,217 @@ SCENARIO( "a password in the URL is never written to the log, the status or the 
                 INFO( everything.toStdString() );
                 REQUIRE( everything.contains( "connected to nats://alice:***@" ) );
                 REQUIRE_FALSE( everything.contains( "s3cret" ) );
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+}
+
+SCENARIO( "the dialog warns when the subjects of a session overlap", "[plugin][subjects]" )
+{
+    GIVEN( "the dialog of an initialised plugin" )
+    {
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+        auto* dialog = openDialog();
+
+        THEN( "subjects that do not overlap get no warning" )
+        {
+            for ( const auto* subjects : { "orders.>", "orders.eu.*\nbilling.>", "orders.>\norders",
+                                           "*\na.b", "a.*.c\na.b.d", "  \norders.>\n\n" } ) {
+                subjectsField( dialog )->setPlainText( QString::fromUtf8( subjects ) );
+                INFO( subjects );
+                REQUIRE( subjectsWarning( dialog ).isEmpty() );
+            }
+        }
+
+        WHEN( "one subject covers another" )
+        {
+            subjectsField( dialog )->setPlainText( "orders.>\norders.eu.*" );
+
+            THEN( "the warning says a message on both is written once for each, and suggests "
+                  "dropping the narrower one" )
+            {
+                const auto warning = subjectsWarning( dialog );
+                REQUIRE( warning.contains( "orders.> and orders.eu.* overlap" ) );
+                REQUIRE( warning.contains( "once for each" ) );
+                REQUIRE( warning.contains( "drop orders.eu.*" ) );
+            }
+
+            AND_WHEN( "the narrower one is removed" )
+            {
+                subjectsField( dialog )->setPlainText( "orders.>" );
+
+                THEN( "the warning goes" )
+                {
+                    REQUIRE( subjectsWarning( dialog ).isEmpty() );
+                }
+            }
+        }
+
+        WHEN( "the narrower one comes first, in a queue group, and > covers a subject" )
+        {
+            subjectsField( dialog )->setPlainText( "a.b workers\n>" );
+
+            THEN( "the suggestion is still to drop the narrower one" )
+            {
+                REQUIRE( subjectsWarning( dialog ).contains( "> and a.b overlap" ) );
+                REQUIRE( subjectsWarning( dialog ).contains( "drop a.b" ) );
+            }
+        }
+
+        WHEN( "two subjects overlap without either covering the other" )
+        {
+            subjectsField( dialog )->setPlainText( "orders.*.paid\norders.eu.*" );
+
+            THEN( "the warning says they overlap, without telling to drop either" )
+            {
+                const auto warning = subjectsWarning( dialog );
+                REQUIRE( warning.contains( "orders.*.paid and orders.eu.* overlap" ) );
+                REQUIRE_FALSE( warning.contains( "drop" ) );
+            }
+        }
+
+        WHEN( "a subject is entered twice" )
+        {
+            subjectsField( dialog )->setPlainText( "orders.>\norders.> audit" );
+
+            THEN( "the warning says so" )
+            {
+                REQUIRE( subjectsWarning( dialog ).contains( "orders.> twice" ) );
+            }
+        }
+
+        WHEN( "a line has more than a subject and a queue group, and Start is clicked" )
+        {
+            subjectsField( dialog )->setPlainText( "orders.>\nbilling.> workers extra" );
+            button( dialog, "start" )->click();
+
+            THEN( "nothing starts, and the dialog says which line is wrong" )
+            {
+                REQUIRE( host.openedFiles.isEmpty() );
+                REQUIRE( statusText( dialog ).contains( "billing.> workers extra" ) );
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+}
+
+SCENARIO( "several sessions run side by side, each in its own file and tab",
+          "[plugin][server][subjects]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "an initialised plugin and a server" )
+    {
+        NatsServer server;
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+
+        WHEN( "the user starts a session of two subjects, then one of another subject" )
+        {
+            startFromDialog( host, server.url(), "orders.>\nbilling.* auditors" );
+            auto* dialog = openDialog();
+            subjectsField( dialog )->setPlainText( "metrics.>" );
+            button( dialog, "start" )->click();
+            REQUIRE( host.openedFiles.size() == 2 );
+            const auto first = host.openedFiles.at( 0 );
+            const auto second = host.openedFiles.at( 1 );
+            REQUIRE( waitSubscribed( first ) );
+            REQUIRE( waitSubscribed( second ) );
+
+            THEN( "both are listed, each tab follows its own file, and each captures its "
+                  "subjects only" )
+            {
+                REQUIRE( first != second );
+                REQUIRE( host.openedFollow == QList<bool>{ true, true } );
+                REQUIRE( sessionList( dialog )->count() == 2 );
+                REQUIRE( sessionList( dialog )->item( 0 )->text().contains(
+                    "orders.>, billing.* (queue auditors)" ) );
+                REQUIRE( sessionList( dialog )->item( 1 )->text().contains( "metrics.>" ) );
+                REQUIRE( readLines( first ).first().contains(
+                    "subscribed to orders.>, billing.* (queue auditors)" ) );
+                {
+                    Publisher publisher( server.url() );
+                    publisher.publish( "orders.eu", "o" );
+                    publisher.publish( "billing.eu", "b" );
+                    publisher.publish( "metrics.cpu", "m" );
+                }
+                REQUIRE( waitFor( [ & ] {
+                    return readLines( first ).join( '\n' ).contains( " billing.eu - 1 b" )
+                           && readLines( second ).join( '\n' ).contains( " metrics.cpu - 1 m" );
+                } ) );
+                REQUIRE( readLines( first ).join( '\n' ).contains( " orders.eu - 1 o" ) );
+                REQUIRE_FALSE( readLines( first ).join( '\n' ).contains( "metrics" ) );
+                REQUIRE_FALSE( readLines( second ).join( '\n' ).contains( "orders" ) );
+            }
+
+            AND_WHEN( "the user selects the first session and clicks Stop" )
+            {
+                sessionList( dialog )->setCurrentRow( 0 );
+                button( dialog, "stop" )->click();
+
+                THEN( "it stops, and the other runs on" )
+                {
+                    REQUIRE( endsStopped( first ) );
+                    REQUIRE( host.notifications.last()
+                             == "NATS capture of orders.>, billing.* (queue auditors) stopped." );
+                    REQUIRE( sessionList( dialog )->count() == 1 );
+                    REQUIRE( sessionList( dialog )->item( 0 )->text().contains( "metrics.>" ) );
+                    {
+                        Publisher publisher( server.url() );
+                        publisher.publish( "metrics.mem", "still" );
+                        publisher.publish( "orders.us", "late" );
+                    }
+                    REQUIRE( waitFor( [ & ] {
+                        return readLines( second ).last().endsWith( " metrics.mem - 5 still" );
+                    } ) );
+                    REQUIRE_FALSE( readLines( first ).join( '\n' ).contains( "late" ) );
+                }
+            }
+
+            AND_WHEN( "the user clicks Stop all" )
+            {
+                button( dialog, "stopAll" )->click();
+
+                THEN( "both stop, each file ends with its stopped marker" )
+                {
+                    REQUIRE( endsStopped( first ) );
+                    REQUIRE( endsStopped( second ) );
+                    REQUIRE( sessionList( dialog )->count() == 0 );
+                    REQUIRE_FALSE( button( dialog, "stop" )->isEnabled() );
+                    REQUIRE_FALSE( button( dialog, "stopAll" )->isEnabled() );
+                }
+            }
+
+            AND_WHEN( "LogSquirl quits, which shuts the plugin down" )
+            {
+                QElapsedTimer timer;
+                timer.start();
+                QMetaObject::invokeMethod( QCoreApplication::instance(), "aboutToQuit" );
+                logsquirl_plugin_shutdown();
+
+                THEN( "every session stops quickly and cleanly, and the files are removed" )
+                {
+                    REQUIRE( timer.elapsed() < 5000 );
+                    REQUIRE_FALSE( QFileInfo::exists( QFileInfo( first ).path() ) );
+                    REQUIRE_FALSE( QFileInfo::exists( QFileInfo( second ).path() ) );
+                    REQUIRE( QDir( host.tempRoot() ).isEmpty() );
+                }
+            }
+
+            AND_WHEN( "the plugin is disabled, LogSquirl running on" )
+            {
+                logsquirl_plugin_shutdown();
+
+                THEN( "every session's file ends with its stopped marker, kept for its tab" )
+                {
+                    REQUIRE( endsStopped( first ) );
+                    REQUIRE( endsStopped( second ) );
+                }
             }
         }
 

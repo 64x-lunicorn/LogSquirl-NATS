@@ -29,6 +29,7 @@
 #include "natssession.h"
 #include "plugin.h"
 #include "profiles.h"
+#include "subjects.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -38,6 +39,8 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSettings>
 #include <QSpinBox>
@@ -148,13 +151,16 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
     , serverNameEdit_( new QLineEdit( this ) )
     , skipVerifyCheck_( new QCheckBox(
           QStringLiteral( "Skip the verification of the server's certificate (insecure)" ), this ) )
-    , subjectEdit_( new QLineEdit( this ) )
+    , subjectsEdit_( new QPlainTextEdit( this ) )
+    , subjectsWarning_( new QLabel( this ) )
     , maxBinarySpin_( new QSpinBox( this ) )
     , pendingMessagesSpin_( new QSpinBox( this ) )
     , pendingMegabytesSpin_( new QSpinBox( this ) )
     , maxFileSpin_( new QSpinBox( this ) )
     , startButton_( new QPushButton( QStringLiteral( "▶ Start" ), this ) )
+    , sessionList_( new QListWidget( this ) )
     , stopButton_( new QPushButton( QStringLiteral( "■ Stop" ), this ) )
+    , stopAllButton_( new QPushButton( QStringLiteral( "Stop all" ), this ) )
     , statusLabel_( new QLabel( QStringLiteral( "Not capturing." ), this ) )
 {
     setWindowTitle( QStringLiteral( "NATS Monitor" ) );
@@ -203,10 +209,20 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
     skipVerifyCheck_->setToolTip(
         QStringLiteral( "Accepts any certificate, so anyone between LogSquirl and the server can "
                         "read and change the traffic: for testing only" ) );
-    subjectEdit_->setObjectName( "subject" );
-    subjectEdit_->setPlaceholderText( QStringLiteral( "orders.>" ) );
-    subjectEdit_->setToolTip( QStringLiteral( "The subject to capture: * matches one token, "
-                                              "> the rest of the subject" ) );
+    subjectsEdit_->setObjectName( "subjects" );
+    subjectsEdit_->setTabChangesFocus( true );
+    subjectsEdit_->setPlaceholderText( QStringLiteral( "orders.>\njobs.* workers" ) );
+    subjectsEdit_->setToolTip(
+        QStringLiteral( "The subjects to capture into one file, one a line: * matches one "
+                        "token, > the rest of the subject. A queue group after a subject "
+                        "subscribes in it: the group's members then share the messages, so "
+                        "the capture takes them away from the others" ) );
+    subjectsEdit_->setFixedHeight(
+        subjectsEdit_->fontMetrics().lineSpacing() * 4 + 2 * subjectsEdit_->frameWidth()
+        + static_cast<int>( subjectsEdit_->document()->documentMargin() * 2 ) );
+    subjectsWarning_->setObjectName( "subjectsWarning" );
+    subjectsWarning_->setWordWrap( true );
+    subjectsWarning_->hide();
     maxBinarySpin_->setObjectName( "maxBinaryBytes" );
     maxBinarySpin_->setRange( 0, 1024 * 1024 );
     maxBinarySpin_->setSuffix( QStringLiteral( " bytes" ) );
@@ -240,7 +256,15 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
                         "opened in a new tab; remembered for the next session" ) );
     startButton_->setObjectName( "start" );
     startButton_->setDefault( true );
+    sessionList_->setObjectName( "sessions" );
+    sessionList_->setToolTip(
+        QStringLiteral( "The running captures; Stop stops the one selected" ) );
+    sessionList_->setFixedHeight( sessionList_->fontMetrics().lineSpacing() * 4
+                                  + 2 * sessionList_->frameWidth() );
     stopButton_->setObjectName( "stop" );
+    stopButton_->setAutoDefault( false );
+    stopAllButton_->setObjectName( "stopAll" );
+    stopAllButton_->setAutoDefault( false );
     statusLabel_->setObjectName( "status" );
     statusLabel_->setWordWrap( true );
     statusLabel_->setTextInteractionFlags( Qt::TextSelectableByMouse );
@@ -298,7 +322,8 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
     connection->addRow( QStringLiteral( "Server:" ), urlEdit_ );
 
     auto* form = new QFormLayout;
-    form->addRow( QStringLiteral( "Subject:" ), subjectEdit_ );
+    form->addRow( QStringLiteral( "Subjects:" ), subjectsEdit_ );
+    form->addRow( QString(), subjectsWarning_ );
     form->addRow( QStringLiteral( "Binary payloads, first:" ), maxBinarySpin_ );
     auto* pending = new QHBoxLayout;
     pending->addWidget( pendingMessagesSpin_ );
@@ -309,7 +334,11 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
     auto* buttons = new QHBoxLayout;
     buttons->addStretch();
     buttons->addWidget( startButton_ );
-    buttons->addWidget( stopButton_ );
+
+    auto* sessionButtons = new QHBoxLayout;
+    sessionButtons->addStretch();
+    sessionButtons->addWidget( stopButton_ );
+    sessionButtons->addWidget( stopAllButton_ );
 
     auto* layout = new QVBoxLayout( this );
     layout->addLayout( connection );
@@ -317,15 +346,18 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
     layout->addWidget( tlsBox );
     layout->addLayout( form );
     layout->addLayout( buttons );
+    layout->addWidget( new QLabel( QStringLiteral( "Running:" ), this ) );
+    layout->addWidget( sessionList_ );
+    layout->addLayout( sessionButtons );
     layout->addWidget( statusLabel_ );
 
     connect( startButton_, &QPushButton::clicked, this, &ConnectionDialog::startCapture );
-    connect( stopButton_, &QPushButton::clicked, this, &ConnectionDialog::stopCapture );
-    connect( subjectEdit_, &QLineEdit::returnPressed, this, [ this ] {
-        if ( !session_ ) {
-            startCapture();
-        }
-    } );
+    connect( stopButton_, &QPushButton::clicked, this, &ConnectionDialog::stopSelected );
+    connect( stopAllButton_, &QPushButton::clicked, this, &ConnectionDialog::stopAllCaptures );
+    connect( sessionList_, &QListWidget::currentRowChanged, this,
+             &ConnectionDialog::updateButtons );
+    connect( subjectsEdit_, &QPlainTextEdit::textChanged, this,
+             &ConnectionDialog::updateSubjectsWarning );
     connect( profileCombo_, &QComboBox::currentIndexChanged, this, &ConnectionDialog::loadProfile );
     connect( saveProfileButton_, &QPushButton::clicked, this, &ConnectionDialog::saveProfile );
     connect( deleteProfileButton_, &QPushButton::clicked, this, &ConnectionDialog::deleteProfile );
@@ -472,7 +504,11 @@ QString ConnectionDialog::missingSetting() const
     if ( profile.url.isEmpty() ) {
         return QStringLiteral( "Enter the server URL." );
     }
-    if ( subjectEdit_->text().trimmed().isEmpty() ) {
+    const auto subjects = parseSubscriptions( subjectsEdit_->toPlainText() );
+    if ( !subjects.error.isEmpty() ) {
+        return subjects.error;
+    }
+    if ( subjects.subscriptions.isEmpty() ) {
         return QStringLiteral( "Enter the subject to capture." );
     }
     const auto& method = authMethodInfo( profile.auth.method );
@@ -508,25 +544,25 @@ ConnectionDialog::~ConnectionDialog()
 
 void ConnectionDialog::stopAll()
 {
-    if ( !session_ ) {
+    if ( sessions_.isEmpty() ) {
         return;
     }
-    session_->stop();
-    releaseSession();
+    // Stopped one after the other: each waits for its writer.
+    while ( !sessions_.isEmpty() ) {
+        auto* session = sessions_.first();
+        session->stop();
+        releaseSession( session );
+    }
     statusLabel_->setText( QStringLiteral( "Stopped." ) );
 }
 
 bool ConnectionDialog::isCapturing() const
 {
-    return session_ != nullptr;
+    return !sessions_.isEmpty();
 }
 
 void ConnectionDialog::startCapture()
 {
-    if ( session_ ) {
-        return;
-    }
-
     if ( const auto missing = missingSetting(); !missing.isEmpty() ) {
         statusLabel_->setText( missing );
         return;
@@ -539,7 +575,7 @@ void ConnectionDialog::startCapture()
     if ( usesTls( profile.url, profile.tls.enabled ) ) {
         config.tls = profile.tls; // also for a tls:// URL with Use TLS unchecked
     }
-    config.subscriptions = { { subjectEdit_->text().trimmed(), {} } };
+    config.subscriptions = parseSubscriptions( subjectsEdit_->toPlainText() ).subscriptions;
     config.format.maxBinaryBytes = maxBinarySpin_->value();
     config.pendingLimits = { pendingMessagesSpin_->value(),
                              static_cast<int>( pendingMegabytesSpin_->value() * kBytesPerMiB ) };
@@ -552,94 +588,111 @@ void ConnectionDialog::startCapture()
                      .arg( redactUrls( config.url ) ) );
     }
 
+    const auto subjects = describeSubscriptions( config.subscriptions );
     auto* session = new NatsSession( config, this );
-    connect( session, &NatsSession::statusChanged, statusLabel_, &QLabel::setText );
-    connect( session, &NatsSession::errorOccurred, this,
-             [ subject = describeSubscriptions( config.subscriptions ) ]( const QString& message ) {
-                 const auto text
-                     = QStringLiteral( "NATS Monitor (%1): %2" ).arg( subject, message );
-                 hostLog( LOGSQUIRL_LOG_WARNING, text );
-                 hostNotify( text );
+    // With several sessions running, the status line says whose event it is.
+    connect( session, &NatsSession::statusChanged, statusLabel_,
+             [ label = statusLabel_, subjects ]( const QString& text ) {
+                 label->setText( QStringLiteral( "%1: %2" ).arg( subjects, text ) );
              } );
-    connect( session, &NatsSession::finished, this, &ConnectionDialog::onSessionFinished );
+    connect( session, &NatsSession::errorOccurred, this, [ subjects ]( const QString& message ) {
+        const auto text = QStringLiteral( "NATS Monitor (%1): %2" ).arg( subjects, message );
+        hostLog( LOGSQUIRL_LOG_WARNING, text );
+        hostNotify( text );
+    } );
+    // Ended on its own: the status line shows why; the tab keeps what was
+    // captured.
+    connect( session, &NatsSession::finished, this,
+             [ this, session ] { releaseSession( session ); } );
     // In the session's context, not the dialog's: releaseSession() keeps
     // it, so a file the session goes on in while it stops still gets its
     // tab (the queued signal comes before the session's deleteLater()).
     connect( session, &NatsSession::fileRotated, session,
              [ session ]( const QString& path ) { openRotatedFile( session->config(), path ); } );
 
-    statusLabel_->setText( QStringLiteral( "Connecting to %1…" ).arg( redactUrls( config.url ) ) );
+    statusLabel_->setText(
+        QStringLiteral( "%1: connecting to %2…" ).arg( subjects, redactUrls( config.url ) ) );
     if ( !session->start() ) {
         // start() has said why, in the status line and the log
         delete session;
         return;
     }
-    session_ = session;
+    sessions_ << session;
+    sessionList_->addItem( QStringLiteral( "%1 on %2" ).arg( subjects, redactUrls( config.url ) ) );
+    sessionList_->setCurrentRow( sessionList_->count() - 1 );
     updateButtons();
 
     if ( g_state.api && g_state.handle ) {
         g_state.api->open_file( g_state.handle, session->filePath().toUtf8().constData(), 1 );
     }
-    hostNotify(
-        QStringLiteral( "NATS capture of %1 started on %2." )
-            .arg( describeSubscriptions( config.subscriptions ), redactUrls( config.url ) ) );
+    hostNotify( QStringLiteral( "NATS capture of %1 started on %2." )
+                    .arg( subjects, redactUrls( config.url ) ) );
 }
 
-void ConnectionDialog::stopCapture()
+void ConnectionDialog::stopSelected()
 {
-    if ( !session_ ) {
-        return;
+    const int row = sessionList_->currentRow();
+    if ( row >= 0 && row < sessions_.size() ) {
+        stopCapture( sessions_.at( row ) );
     }
-    const auto subject = describeSubscriptions( session_->config().subscriptions );
-    stopAll();
-    hostNotify( QStringLiteral( "NATS capture of %1 stopped." ).arg( subject ) );
 }
 
-void ConnectionDialog::onSessionFinished()
+void ConnectionDialog::stopAllCaptures()
 {
-    // The status line shows why; the tab keeps what was captured.
-    releaseSession();
+    while ( !sessions_.isEmpty() ) {
+        stopCapture( sessions_.first() );
+    }
 }
 
-void ConnectionDialog::releaseSession()
+void ConnectionDialog::stopCapture( NatsSession* session )
 {
-    session_->preserveFile();
-    session_->disconnect( this );
-    session_->disconnect( statusLabel_ );
-    session_->deleteLater();
-    session_ = nullptr;
+    const auto subjects = describeSubscriptions( session->config().subscriptions );
+    session->stop();
+    releaseSession( session );
+    statusLabel_->setText( QStringLiteral( "%1: stopped." ).arg( subjects ) );
+    hostNotify( QStringLiteral( "NATS capture of %1 stopped." ).arg( subjects ) );
+}
+
+void ConnectionDialog::releaseSession( NatsSession* session )
+{
+    const auto row = sessions_.indexOf( session );
+    if ( row < 0 ) {
+        return; // released already
+    }
+    sessions_.removeAt( row );
+    delete sessionList_->takeItem( static_cast<int>( row ) );
+    session->preserveFile();
+    session->disconnect( this );
+    session->disconnect( statusLabel_ );
+    session->deleteLater();
     updateButtons();
+}
+
+void ConnectionDialog::updateSubjectsWarning()
+{
+    const auto warning
+        = overlapWarning( parseSubscriptions( subjectsEdit_->toPlainText() ).subscriptions );
+    subjectsWarning_->setText( warning );
+    subjectsWarning_->setVisible( !warning.isEmpty() );
 }
 
 void ConnectionDialog::updateButtons()
 {
-    const bool capturing = session_ != nullptr;
-    startButton_->setEnabled( !capturing );
-    stopButton_->setEnabled( capturing );
+    stopButton_->setEnabled( sessionList_->currentRow() >= 0 );
+    stopAllButton_->setEnabled( !sessions_.isEmpty() );
     const auto& method = chosenMethod( authCombo_ );
-    profileCombo_->setEnabled( !capturing );
-    saveProfileButton_->setEnabled( !capturing );
-    deleteProfileButton_->setEnabled( !capturing );
-    urlEdit_->setEnabled( !capturing );
-    authCombo_->setEnabled( !capturing );
-    userEdit_->setEnabled( !capturing && method.takesUser );
-    secretEdit_->setEnabled( !capturing && method.secret );
+    userEdit_->setEnabled( method.takesUser );
+    secretEdit_->setEnabled( method.secret );
     secretEdit_->setPlaceholderText(
         method.secret
             ? QStringLiteral( "The %1, never saved" ).arg( QLatin1String( method.secret ) )
             : QString() );
-    authFileEdit_->setEnabled( !capturing && method.file );
-    authFileButton_->setEnabled( !capturing && method.file );
-    tlsCheck_->setEnabled( !capturing );
+    authFileEdit_->setEnabled( method.file );
+    authFileButton_->setEnabled( method.file );
     const bool tls = usesTls( urlEdit_->text(), tlsCheck_->isChecked() );
     for ( auto* widget : tlsWidgets_ ) {
-        widget->setEnabled( !capturing && tls );
+        widget->setEnabled( tls );
     }
-    subjectEdit_->setEnabled( !capturing );
-    maxBinarySpin_->setEnabled( !capturing );
-    pendingMessagesSpin_->setEnabled( !capturing );
-    pendingMegabytesSpin_->setEnabled( !capturing );
-    maxFileSpin_->setEnabled( !capturing );
 }
 
 } // namespace nats_monitor
