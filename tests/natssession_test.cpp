@@ -811,3 +811,160 @@ SCENARIO( "without drops no dropped marker is written, and the session counts wh
         }
     }
 }
+
+// ── Rotation at the size limit ──────────────────────────────────────────
+
+namespace {
+
+/// The files of the capture whose first file is @p first, in order:
+/// nats_<name>.log, nats_<name>.2.log, nats_<name>.3.log, …
+QStringList captureFiles( const QString& first )
+{
+    QStringList files;
+    if ( !QFileInfo( first ).isFile() ) {
+        return files;
+    }
+    files << first;
+    auto stem = first;
+    stem.chop( 4 ); // ".log"
+    for ( int n = 2;; ++n ) {
+        const auto next = QStringLiteral( "%1.%2.log" ).arg( stem ).arg( n );
+        if ( !QFileInfo( next ).isFile() ) {
+            return files;
+        }
+        files << next;
+    }
+}
+
+qint64 sizeOf( const QString& path )
+{
+    return QFileInfo( path ).size();
+}
+
+/// Whether the file at @p path is empty or ends with a line terminator.
+bool endsWithNewline( const QString& path )
+{
+    QFile file( path );
+    if ( !file.open( QIODevice::ReadOnly ) ) {
+        return false;
+    }
+    const auto content = file.readAll();
+    return content.isEmpty() || content.endsWith( '\n' );
+}
+
+/// The payloads of the lines on @p subject in @p files, in order.
+QStringList payloadsOn( const QStringList& files, const QString& subject )
+{
+    const QRegularExpression re( kTimestamp + QRegularExpression::escape( subject )
+                                 + " - \\d+ (.*)$" );
+    QStringList payloads;
+    for ( const auto& file : files ) {
+        for ( const auto& line : readLines( file ) ) {
+            const auto match = re.match( line );
+            if ( match.hasMatch() ) {
+                payloads << match.captured( 1 );
+            }
+        }
+    }
+    return payloads;
+}
+
+/// "m0001", "m0002", …, padded with x to @p size bytes.
+QByteArray numbered( int i, int size )
+{
+    return QStringLiteral( "m%1" )
+        .arg( i, 4, 10, QLatin1Char( '0' ) )
+        .toLatin1()
+        .leftJustified( size, 'x' );
+}
+
+} // namespace
+
+SCENARIO( "a capture's file is rotated at its size limit, between messages",
+          "[server][session][rotation]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session with a size limit of 1000 bytes" )
+    {
+        NatsServer server;
+        Publisher publisher( server.url() );
+        auto config = configFor( server.url(), "rot" );
+        config.maxFileBytes = 1000;
+        NatsSession session( config );
+        QStringList rotatedTo;
+        QObject::connect( &session, &NatsSession::fileRotated,
+                          [ & ]( const QString& path ) { rotatedTo << path; } );
+        startAndWaitConnected( session, server.url(), "rot" );
+        const auto first = session.filePath();
+
+        WHEN( "messages of about 100 bytes a line, 3500 bytes in all, are published" )
+        {
+            QStringList published;
+            for ( int i = 1; i <= 35; ++i ) {
+                const auto payload = numbered( i, 60 );
+                published << QString::fromLatin1( payload );
+                publisher.publish( "rot", payload, {}, {}, i == 35 );
+            }
+            REQUIRE( waitFor(
+                [ & ] { return payloadsOn( captureFiles( first ), "rot" ).size() == 35; } ) );
+            session.stop();
+            const auto files = captureFiles( first );
+
+            THEN( "the capture goes on in nats_rot.2.log, nats_rot.3.log, …, each announced" )
+            {
+                REQUIRE( files.size() == 4 );
+                REQUIRE( QFileInfo( files.at( 1 ) ).fileName() == "nats_rot.2.log" );
+                REQUIRE( QFileInfo( files.at( 3 ) ).fileName() == "nats_rot.4.log" );
+                REQUIRE( waitFor( [ & ] { return rotatedTo.size() == 3; } ) );
+                REQUIRE( rotatedTo == files.mid( 1 ) );
+                REQUIRE( session.filePath() == files.last() );
+            }
+
+            THEN( "no file is over the limit, and each was rotated only when the next line "
+                  "would not have fit" )
+            {
+                for ( int i = 0; i < files.size(); ++i ) {
+                    INFO( files.at( i ).toStdString() );
+                    REQUIRE( sizeOf( files.at( i ) ) <= 1000 );
+                    REQUIRE( endsWithNewline( files.at( i ) ) );
+                    if ( i + 1 < files.size() ) {
+                        const auto next = readLines( files.at( i + 1 ) );
+                        REQUIRE_FALSE( next.isEmpty() );
+                        const auto nextLine = next.first().toUtf8().size() + 1;
+                        REQUIRE( sizeOf( files.at( i ) ) + nextLine > 1000 );
+                    }
+                }
+            }
+
+            THEN( "every message is one whole line, in order across the files; the first file "
+                  "starts connected, the last ends stopped" )
+            {
+                REQUIRE( payloadsOn( files, "rot" ) == published );
+                REQUIRE( anyMatches( readLines( files.first() ).mid( 0, 1 ),
+                                     connectedMarker( server.url(), "rot" ) ) );
+                REQUIRE(
+                    readLines( files.last() ).last().endsWith( " $NATS-MONITOR - 7 stopped" ) );
+            }
+        }
+
+        WHEN( "a message longer than the limit is published" )
+        {
+            publisher.publish( "rot", QByteArray( 1500, 'L' ) );
+            publisher.publish( "rot", "after" );
+            REQUIRE( waitFor(
+                [ & ] { return payloadsOn( captureFiles( first ), "rot" ).size() == 2; } ) );
+            session.stop();
+            const auto files = captureFiles( first );
+
+            THEN( "it is written whole, alone in a file of its own" )
+            {
+                REQUIRE( files.size() == 3 );
+                REQUIRE( readLines( files.at( 1 ) ).size() == 1 );
+                REQUIRE( payloadsOn( { files.at( 1 ) }, "rot" )
+                         == QStringList{ QString( 1500, 'L' ) } );
+                REQUIRE( payloadsOn( { files.at( 2 ) }, "rot" ) == QStringList{ "after" } );
+            }
+        }
+    }
+}

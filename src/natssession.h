@@ -61,6 +61,17 @@
  * the server sent before the unsubscribe, so nothing that reached the
  * session before stop() is lost uncounted.
  *
+ * ROTATION
+ * ────────
+ * A file grows to SessionConfig::maxFileBytes at most.  When the next line
+ * would not fit, the writer closes the file there, at a line boundary, and
+ * goes on in the next one: nats_<name>.log, nats_<name>.2.log,
+ * nats_<name>.3.log, …, all in the session's temporary directory, and
+ * reports it with fileRotated().  A line longer than the limit is written
+ * whole, alone in its file.  Should the next file not open, the writer
+ * keeps writing the current one, reports the error once and tries again
+ * once that file has grown by the limit once more.  0 means no limit.
+ *
  * USAGE
  * ─────
  *   NatsSession session( { "nats://localhost:4222", "orders.>" } );
@@ -100,6 +111,12 @@ inline constexpr PendingLimits kDefaultPendingLimits{ 1000000, 512 * 1024 * 1024
 /// Default for SessionConfig::queueLimit: two seconds at 50k msgs/s.
 inline constexpr int kDefaultQueueLimit = 100000;
 
+/// Bytes in a MiB, the unit the size limit is set in.
+inline constexpr qint64 kBytesPerMiB = 1024 * 1024;
+
+/// The size limit in MiB the dialog proposes, unless the user chose another.
+inline constexpr int kDefaultMaxFileMiB = 256;
+
 struct SessionConfig {
     QString url = QString::fromLatin1( kDefaultUrl ); ///< One or more URLs, comma-separated.
     QString subject;                                  ///< May contain the wildcards * and >.
@@ -109,6 +126,9 @@ struct SessionConfig {
     /// How many messages the session's own queue to the writer holds before
     /// it drops new ones (queue full).  Must be > 0.
     int queueLimit = kDefaultQueueLimit;
+    /// The size at which the capture goes on in a new file (ROTATION); 0
+    /// for no limit.
+    qint64 maxFileBytes = kDefaultMaxFileMiB * kBytesPerMiB;
 };
 
 class NatsSession : public QObject {
@@ -148,7 +168,8 @@ public:
     /// Whether the session runs: between start() and stop() or finished().
     bool isRunning() const;
 
-    /// The file the session writes; valid after start().
+    /// The file the session writes; valid after start().  After a rotation
+    /// the new file, once fileRotated() has been emitted for it.
     QString filePath() const;
 
     /// Keep the temporary directory when the session is destroyed, for the
@@ -200,6 +221,10 @@ Q_SIGNALS:
     /// reported an error.
     void errorOccurred( const QString& message );
 
+    /// The file reached the size limit: the capture goes on in @p path,
+    /// the next file of the session (ROTATION).
+    void fileRotated( const QString& path );
+
     /// The session ended on its own (it could not connect, or the
     /// connection was closed for good); not emitted by stop().
     void finished();
@@ -209,6 +234,9 @@ private:
 
     /// The writer thread of start number @p generation has ended on its own.
     void onWorkerFinished( int generation );
+
+    /// The writer of start number @p generation goes on in @p path.
+    void onWorkerRotated( int generation, const QString& path );
 
     /// Stop the writer, wait for it and keep its counts.
     void releaseWorker();
