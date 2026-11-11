@@ -4,7 +4,9 @@ A LogSquirl plugin that subscribes to NATS subjects and writes every message as
 one line to a growing file that LogSquirl follows, so live traffic can be
 searched, filtered and highlighted like any log — also at high message rates.
 
-Status: plan only, no code yet. Tickets: see [Tickets](#tickets).
+Status: scaffold in place (#1: the plugin builds with nats.c and a static
+OpenSSL, and its tests run against a real `nats-server`); no capture yet.
+Tickets: see [Tickets](#tickets).
 
 ## Decisions
 
@@ -13,6 +15,7 @@ Status: plan only, no code yet. Tickets: see [Tickets](#tickets).
 | NATS client | **nats.c** (official C client, Apache-2.0), built statically via CMake `FetchContent` at a pinned tag | Full protocol: headers, NKey/creds (ed25519), TLS, JetStream; no user-installed CLI. Apache-2.0 is compatible with GPL-3.0-or-later. |
 | How messages reach LogSquirl | **Plugin type `ui`, temp file + `open_file(path, follow=1)`**, as LogSquirl-Serial does | Works with today's LogSquirl releases; LogSquirl's indexing of large growing files does the heavy lifting; the capture survives Stop. The DataSource `push_line` API (LogSquirl 26.12) is unreleased and untested at high rates. |
 | Scope of v1 | Core NATS subscribe; JetStream replay in the release after | Live capture first; replay builds on the same writer and line format. |
+| TLS backend | **OpenSSL 3.x LTS, built by the plugin's CMake, linked in statically** | No change to the shared CI, no extra library in the package, same on every platform; [ADR 1](adr/0001-static-openssl-built-by-the-plugin.md). |
 
 ## Architecture
 
@@ -101,13 +104,11 @@ truth, this plan only gives the overview:
 
 ## Open questions
 
-- **TLS backend.** nats.c needs OpenSSL for TLS. LogSquirl ships no OpenSSL
-  (Qt uses SecureTransport / Schannel on macOS / Windows), and
-  `bundle_qt_frameworks` only covers Qt libraries. Options: link OpenSSL
-  statically into `logsquirl_nats` (vcpkg / Homebrew static libs in CI), or
-  extend LogSquirl-Plugin-CI with a way to bundle non-Qt libraries. To decide in #1.
-- **NKey signing.** Check whether the pinned nats.c needs libsodium or uses its
-  built-in ed25519 (prefer built-in: one dependency less).
+- ~~**TLS backend.**~~ Decided in #1: OpenSSL 3.x LTS built statically by the
+  plugin's own CMake and linked into `logsquirl_nats`; see
+  [ADR 1](adr/0001-static-openssl-built-by-the-plugin.md) and
+  [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md).
+- ~~**NKey signing.**~~ nats.c's built-in ed25519, no libsodium (#1).
 - **Throughput target.** Which message rate must v1 sustain without drops on a
   typical laptop (e.g. 50k msgs/s at 200 B)? Asked in #4.
 - **Repository.** `64x-lunicorn/LogSquirl-NATS` on GitHub, add to the plugin

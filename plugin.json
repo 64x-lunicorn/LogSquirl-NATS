@@ -1,0 +1,12 @@
+{
+    "id": "io.github.logsquirl.nats",
+    "name": "NATS Monitor",
+    "version": "0.1.0",
+    "type": "ui",
+    "library": "logsquirl_nats",
+    "api_version": 1,
+    "description": "Stream NATS messages into a live, searchable LogSquirl tab",
+    "author": "LogSquirl Contributors",
+    "license": "GPL-3.0-or-later",
+    "icon": "icon.png"
+}

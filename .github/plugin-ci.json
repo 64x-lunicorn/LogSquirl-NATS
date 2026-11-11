@@ -1,0 +1,5 @@
+{
+  "host_ref": "v26.10.0",
+  "package_files": ["LICENSE", "NOTICE", "LICENSES/Apache-2.0.txt"],
+  "sanitizers": true
+}
