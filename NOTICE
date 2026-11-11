@@ -26,8 +26,9 @@ Linked into the plugin library
 The plugin library contains, statically linked, the two libraries below.
 Both are licensed under the Apache License, Version 2.0, which is
 compatible with the GPL version 3.  Their source is downloaded by the
-build at the versions cmake/Dependencies.cmake pins.  A copy of the Apache
-License, Version 2.0 is at https://www.apache.org/licenses/LICENSE-2.0.
+build at the versions cmake/Dependencies.cmake pins.  The text of the
+Apache License, Version 2.0 is in Apache-2.0.txt (LICENSES/Apache-2.0.txt
+in the source), which the package carries next to LICENSE and this file.
 
 ### nats.c — the NATS C client
 
@@ -44,8 +45,4 @@ memory-clearing function derived from libsodium's sodium_memzero()
     https://www.openssl.org
     Copyright (c) 1998-2026 The OpenSSL Project Authors
     Copyright (c) 1995-1998 Eric A. Young, Tim J. Hudson
-    All rights reserved.
     SPDX-License-Identifier: Apache-2.0
-
-This product includes software developed by the OpenSSL Project for use
-in the OpenSSL Toolkit (https://www.openssl.org/).

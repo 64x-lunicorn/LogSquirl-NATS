@@ -116,7 +116,10 @@ set(PLUGIN_INSTALL_DIR
 
 install(TARGETS logsquirl_nats LIBRARY DESTINATION "${PLUGIN_INSTALL_DIR}"
                                RUNTIME DESTINATION "${PLUGIN_INSTALL_DIR}")
-install(FILES   plugin.json icon.png DESTINATION "${PLUGIN_INSTALL_DIR}")
+# The licence texts as the CI package carries them (package_files in
+# .github/plugin-ci.json): the library contains Apache-2.0 code.
+install(FILES   plugin.json icon.png LICENSE NOTICE LICENSES/Apache-2.0.txt
+        DESTINATION "${PLUGIN_INSTALL_DIR}")
 
 # ── Tests (opt-in) ────────────────────────────────────────────────────────
 option(BUILD_TESTS "Build unit tests" OFF)
