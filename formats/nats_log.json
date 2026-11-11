@@ -2,7 +2,7 @@
     "$schema": "https://lnav.org/schemas/format-v1.schema.json",
     "logsquirl_nats_log": {
         "title": "NATS Monitor messages",
-        "description": "The lines the NATS Monitor plugin writes: one per NATS message, with its receive time in UTC, subject, reply subject (- for none), payload size in bytes, then the headers in brackets and the payload, escaped to one line (hex: for a payload that is not UTF-8). Lines the plugin itself writes, such as connection events, have the subject $NATS-MONITOR.",
+        "description": "The lines the NATS Monitor plugin writes: one per NATS message, with its receive time in UTC, subject, reply subject (- for none), payload size in bytes, then the headers in brackets and the payload, escaped to one line (hex: for a payload that is not UTF-8). Lines the plugin itself writes, such as connection events and the counts of dropped messages (dropped=<n> (slow consumer|queue full)), have the subject $NATS-MONITOR.",
         "url": "https://github.com/64x-lunicorn/LogSquirl-NATS#readme",
         "multiline": false,
         "regex": {
@@ -45,6 +45,12 @@
             },
             {
                 "line": "2026-11-11 10:00:01.000000Z $NATS-MONITOR - 12 disconnected"
+            },
+            {
+                "line": "2026-11-11 10:00:02.000000Z $NATS-MONITOR - 28 dropped=1234 (slow consumer)"
+            },
+            {
+                "line": "2026-11-11 10:00:02.500000Z $NATS-MONITOR - 23 dropped=87 (queue full)"
             }
         ]
     }

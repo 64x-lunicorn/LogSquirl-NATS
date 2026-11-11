@@ -40,6 +40,7 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QTemporaryDir>
 
 #include <memory>
 
@@ -392,6 +393,420 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
                     // Connected again, as after the first connect.
                     REQUIRE( connected == QStringList{ url, url } );
                 }
+            }
+        }
+    }
+}
+
+// ── Dropped messages ─────────────────────────────────────────────────────
+
+namespace {
+
+/// What a capture's file says about its messages and drops.
+struct Tally {
+    qint64 written = 0;      ///< Message lines on the subject.
+    qint64 slowConsumer = 0; ///< The sum of dropped= of the slow-consumer markers.
+    qint64 queueFull = 0;    ///< The sum of dropped= of the queue-full markers.
+    int markers = 0;         ///< dropped= markers.
+    int unknown = 0;         ///< Lines that say dropped= in another shape.
+
+    qint64 dropped() const
+    {
+        return slowConsumer + queueFull;
+    }
+};
+
+Tally tally( const QStringList& lines, const QString& subject )
+{
+    static const QRegularExpression marker(
+        kTimestamp + "\\$NATS-MONITOR - \\d+ dropped=(\\d+) \\((slow consumer|queue full)\\)$" );
+    const QRegularExpression message( kTimestamp + QRegularExpression::escape( subject ) + " " );
+    Tally t;
+    for ( const auto& line : lines ) {
+        if ( message.match( line ).hasMatch() ) {
+            ++t.written;
+            continue;
+        }
+        const auto m = marker.match( line );
+        if ( m.hasMatch() ) {
+            REQUIRE( m.captured( 1 ).toLongLong() > 0 );
+            ++t.markers;
+            ( m.captured( 2 ) == "slow consumer" ? t.slowConsumer : t.queueFull )
+                += m.captured( 1 ).toLongLong();
+        }
+        else if ( line.contains( "dropped=" ) ) {
+            ++t.unknown;
+        }
+    }
+    return t;
+}
+
+/// Publish @p count messages of 200 bytes on @p subject as fast as the
+/// connection takes them, then wait until the server has them all.
+void flood( Publisher& publisher, const char* subject, int count )
+{
+    const QByteArray payload( 200, 'x' );
+    for ( int i = 0; i < count; ++i ) {
+        publisher.publish( subject, payload, {}, {}, i == count - 1 );
+    }
+}
+
+/// Wait until each of the @p published messages on @p subject is
+/// accounted for: a line in the file, or counted as dropped.  Each message
+/// is counted at most once, so the sum reaches @p published only once the
+/// session has taken them all.  (Drops still to be marked are in
+/// droppedCount() already; slow-consumer drops are counted when nats.c
+/// delivers the next message, which it holds while it drops.)
+void waitAccounted( const NatsSession& session, const char* subject, qint64 published )
+{
+    REQUIRE( waitFor(
+        [ & ] {
+            const auto written = tally( readLines( session.filePath() ), subject ).written;
+            return written + static_cast<qint64>( session.droppedCount() ) >= published;
+        },
+        30000 ) );
+}
+
+} // namespace
+
+SCENARIO( "the subscription gets the session's pending limits", "[server][session][drops]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a server" )
+    {
+        NatsServer server;
+
+        WHEN( "a session is started with the default configuration" )
+        {
+            NatsSession session( configFor( server.url(), "limits" ) );
+            startAndWaitConnected( session, server.url(), "limits" );
+
+            THEN( "the subscription holds up to 1,000,000 messages and 512 MiB" )
+            {
+                REQUIRE( session.pendingLimits().messages == 1000000 );
+                REQUIRE( session.pendingLimits().bytes == 512 * 1024 * 1024 );
+            }
+        }
+
+        WHEN( "a session is started with limits of its own" )
+        {
+            auto config = configFor( server.url(), "limits" );
+            config.pendingLimits = { 1234, 5678 * 1024 };
+            NatsSession session( config );
+            startAndWaitConnected( session, server.url(), "limits" );
+
+            THEN( "the subscription has them" )
+            {
+                REQUIRE( session.pendingLimits().messages == 1234 );
+                REQUIRE( session.pendingLimits().bytes == 5678 * 1024 );
+            }
+        }
+    }
+}
+
+SCENARIO( "a slow consumer's drops are counted and marked where they happen",
+          "[server][session][drops]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session whose subscription may hold a single pending message" )
+    {
+        NatsServer server;
+        Publisher publisher( server.url() );
+        auto config = configFor( server.url(), "flood" );
+        config.pendingLimits.messages = 1;
+        NatsSession session( config );
+        startAndWaitConnected( session, server.url(), "flood" );
+
+        WHEN( "it is flooded faster than it can take the messages, and stopped" )
+        {
+            qint64 published = 0;
+            for ( int round = 0; round < 20 && session.droppedCount() == 0; ++round ) {
+                flood( publisher, "flood", 5000 );
+                published += 5000;
+                settle( 50 );
+            }
+            waitAccounted( session, "flood", published );
+            session.stop();
+
+            THEN( "the slow-consumer markers add up to the messages not written" )
+            {
+                const auto t = tally( readLines( session.filePath() ), "flood" );
+                REQUIRE( t.unknown == 0 );
+                REQUIRE( t.slowConsumer > 0 );
+                REQUIRE( t.queueFull == 0 );
+                REQUIRE( t.dropped() == published - t.written );
+                REQUIRE( session.droppedCount() == static_cast<quint64>( t.dropped() ) );
+                REQUIRE( readLines( session.filePath() ).last().endsWith( " stopped" ) );
+            }
+        }
+    }
+}
+
+SCENARIO( "under a flood every drop is counted in exactly one marker", "[server][session][drops]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session with small pending limits and a small queue" )
+    {
+        NatsServer server;
+        Publisher publisher( server.url() );
+        auto config = configFor( server.url(), "flood" );
+        config.pendingLimits.messages = 16;
+        config.queueLimit = 1;
+        NatsSession session( config );
+        startAndWaitConnected( session, server.url(), "flood" );
+        const qint64 published = 50000;
+
+        WHEN( "it is flooded faster than it can write, and stopped once it has taken it all" )
+        {
+            flood( publisher, "flood", published );
+            waitAccounted( session, "flood", published );
+            session.stop();
+
+            THEN( "the dropped= counts of both kinds add up to published - written, and to the "
+                  "session's dropped total" )
+            {
+                const auto t = tally( readLines( session.filePath() ), "flood" );
+                REQUIRE( t.unknown == 0 );
+                REQUIRE( t.slowConsumer > 0 );
+                REQUIRE( t.queueFull > 0 );
+                REQUIRE( t.dropped() == published - t.written );
+                REQUIRE( session.droppedCount() == static_cast<quint64>( t.dropped() ) );
+            }
+        }
+
+        WHEN( "it is stopped right after the flood, still dropping" )
+        {
+            flood( publisher, "flood", published );
+            session.stop();
+
+            THEN( "every message published is written or counted in a marker before the stopped "
+                  "marker, none lost" )
+            {
+                const auto lines = readLines( session.filePath() );
+                const auto t = tally( lines, "flood" );
+                REQUIRE( t.unknown == 0 );
+                REQUIRE( t.dropped() > 0 );
+                REQUIRE( t.dropped() == published - t.written );
+                REQUIRE( session.droppedCount() == static_cast<quint64>( t.dropped() ) );
+                // What reached the session was written or dropped from its queue.
+                REQUIRE( session.receivedCount()
+                         == static_cast<quint64>( t.written + t.queueFull ) );
+                REQUIRE( lines.last().endsWith( " stopped" ) );
+            }
+        }
+    }
+}
+
+SCENARIO( "when the server goes away during a flood, the drops until then are still marked",
+          "[server][session][drops]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session with small pending limits, flooded, whose server then goes away" )
+    {
+        auto server = std::make_unique<NatsServer>();
+        const int port = server->port();
+        const QString url = server->url();
+        auto config = configFor( url, "flood" );
+        config.pendingLimits.messages = 16;
+        config.queueLimit = 1;
+        NatsSession session( config );
+        int finished = 0;
+        QObject::connect( &session, &NatsSession::finished, [ &finished ] { ++finished; } );
+        startAndWaitConnected( session, url, "flood" );
+        {
+            Publisher publisher( url );
+            flood( publisher, "flood", 50000 );
+        }
+        server.reset(); // while the session is still taking the flood
+
+        // Messages the server had not sent yet are gone with it: what is
+        // checked is that each message nats.c took is written or counted.
+        const auto check = [ & ]( const QString& lastLine ) {
+            const auto lines = readLines( session.filePath() );
+            const auto t = tally( lines, "flood" );
+            REQUIRE( t.unknown == 0 );
+            REQUIRE( t.slowConsumer > 0 );
+            REQUIRE( session.droppedCount() == static_cast<quint64>( t.dropped() ) );
+            REQUIRE( session.receivedCount() == static_cast<quint64>( t.written + t.queueFull ) );
+            REQUIRE( lines.last().endsWith( lastLine ) );
+        };
+
+        WHEN( "the session is stopped while disconnected" )
+        {
+            REQUIRE( waitFor(
+                [ & ] { return anyMatches( readLines( session.filePath() ), " disconnected$" ); },
+                10000 ) );
+            QElapsedTimer timer;
+            timer.start();
+            session.stop();
+
+            THEN( "it stops at once, and every drop is in a marker before the stopped marker" )
+            {
+                REQUIRE( timer.elapsed() < 3000 );
+                check( " stopped" );
+            }
+        }
+
+        WHEN( "the connection is then closed for good (a server on the port refuses it)" )
+        {
+            QTemporaryDir dir;
+            REQUIRE( dir.isValid() );
+            const QString configFile = dir.filePath( "auth.conf" );
+            {
+                QFile file( configFile );
+                REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::Text ) );
+                file.write( "authorization { token: \"not-the-session's\" }\n" );
+            }
+            NatsServerOptions options;
+            options.port = port;
+            options.configFile = configFile;
+            NatsServer refusing( options );
+
+            THEN( "the session ends, and every drop is in a marker before the closed marker" )
+            {
+                REQUIRE( waitFor( [ & ] { return finished == 1; }, 30000 ) );
+                check( " connection closed" );
+            }
+        }
+    }
+}
+
+// Opt-in, not run by ctest or CI (hidden tag; no [server], which ctest
+// selects): logsquirl_nats_tests "[benchmark]".  See DEVELOPER_GUIDE.md.
+SCENARIO( "a session sustains 50k msgs/s at 200 B without drops", "[.benchmark]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    constexpr int kRate = 50000;  // messages per second
+    constexpr int kSeconds = 10;  // how long it is published
+    constexpr int kPayload = 200; // bytes
+    constexpr qint64 kTotal = qint64( kRate ) * kSeconds;
+
+    GIVEN( "a session with the default limits" )
+    {
+        NatsServer server;
+        Publisher publisher( server.url() );
+        NatsSession session( configFor( server.url(), "bench" ) );
+        startAndWaitConnected( session, server.url(), "bench" );
+
+        WHEN( "50k msgs/s of 200 B are published for 10 seconds" )
+        {
+            const QByteArray payload( kPayload, 'x' );
+            QElapsedTimer timer;
+            timer.start();
+            qint64 sent = 0;
+            while ( sent < kTotal ) {
+                const qint64 due = std::min( kTotal, timer.nsecsElapsed() * kRate / 1000000000 );
+                for ( ; sent < due; ++sent ) {
+                    publisher.publish( "bench", payload, {}, {}, false );
+                }
+                QThread::usleep( 200 );
+            }
+            publisher.publish( "bench", payload, {}, {}, true );
+            ++sent;
+            const double publishSeconds = timer.nsecsElapsed() / 1e9;
+            REQUIRE(
+                waitFor( [ & ] { return session.receivedCount() >= quint64( sent ); }, 30000 ) );
+            const double takenSeconds = timer.nsecsElapsed() / 1e9;
+            waitAccounted( session, "bench", sent );
+            session.stop();
+
+            THEN( "every message is written, nothing is dropped, and no dropped= marker" )
+            {
+                const auto t = tally( readLines( session.filePath() ), "bench" );
+                WARN( "published " << sent << " messages of " << kPayload << " B in "
+                                   << publishSeconds << " s (" << qRound( sent / publishSeconds )
+                                   << " msgs/s); received in " << takenSeconds << " s; written "
+                                   << t.written << ", dropped " << session.droppedCount() );
+                REQUIRE( t.markers == 0 );
+                REQUIRE( t.unknown == 0 );
+                REQUIRE( session.droppedCount() == 0 );
+                REQUIRE( t.written == sent );
+            }
+        }
+    }
+}
+
+SCENARIO( "when the session's own queue is full, its drops are counted and marked",
+          "[server][session][drops]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session whose queue to the writer holds a single message" )
+    {
+        NatsServer server;
+        Publisher publisher( server.url() );
+        auto config = configFor( server.url(), "flood" );
+        config.queueLimit = 1;
+        NatsSession session( config );
+        startAndWaitConnected( session, server.url(), "flood" );
+
+        WHEN( "it is flooded faster than it can write, and stopped" )
+        {
+            qint64 published = 0;
+            for ( int round = 0; round < 20 && session.droppedCount() == 0; ++round ) {
+                flood( publisher, "flood", 5000 );
+                published += 5000;
+                settle( 50 );
+            }
+            waitAccounted( session, "flood", published );
+            session.stop();
+
+            THEN( "the queue-full markers add up to the messages not written, each before the "
+                  "next message written" )
+            {
+                const auto lines = readLines( session.filePath() );
+                const auto t = tally( lines, "flood" );
+                REQUIRE( t.unknown == 0 );
+                REQUIRE( t.queueFull > 0 );
+                REQUIRE( t.slowConsumer == 0 );
+                REQUIRE( t.dropped() == published - t.written );
+                REQUIRE( session.droppedCount() == static_cast<quint64>( t.dropped() ) );
+                REQUIRE( session.receivedCount() == static_cast<quint64>( published ) );
+                for ( int i = 0; i + 1 < lines.size(); ++i ) {
+                    if ( lines.at( i ).contains( "(queue full)" ) ) {
+                        INFO( lines.at( i + 1 ).toStdString() );
+                        REQUIRE( ( lines.at( i + 1 ).contains( " flood - 200 " )
+                                   || lines.at( i + 1 ).endsWith( " stopped" ) ) );
+                    }
+                }
+            }
+        }
+    }
+}
+
+SCENARIO( "without drops no dropped marker is written, and the session counts what it received",
+          "[server][session][drops]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session with the default limits" )
+    {
+        NatsServer server;
+        Publisher publisher( server.url() );
+        NatsSession session( configFor( server.url(), "calm" ) );
+        startAndWaitConnected( session, server.url(), "calm" );
+
+        WHEN( "a burst it can keep up with is published, and the session stopped" )
+        {
+            for ( int i = 0; i < 1000; ++i ) {
+                publisher.publish( "calm", QByteArray( 200, 'x' ), {}, {}, i % 100 == 99 );
+            }
+            REQUIRE(
+                waitFor( [ & ] { return readLines( session.filePath() ).size() == 1001; }, 5000 ) );
+            session.stop();
+
+            THEN( "every message is a line, no line says dropped=, and the counts say so" )
+            {
+                const auto lines = readLines( session.filePath() );
+                REQUIRE( lines.size() == 1002 ); // connected, 1000 messages, stopped
+                REQUIRE_FALSE( anyMatches( lines, "dropped=" ) );
+                REQUIRE( session.receivedCount() == 1000 );
+                REQUIRE( session.droppedCount() == 0 );
             }
         }
     }

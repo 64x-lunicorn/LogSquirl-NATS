@@ -598,6 +598,14 @@ SCENARIO( "the Log Format reads every line the formatter writes", "[logformat]" 
             requireFields( format, formatMarker( kReceived, "disconnected" ),
                            { ts, "$NATS-MONITOR", "-", "12", "disconnected" } );
         }
+
+        THEN( "the dropped markers are read too, the count and reason in the body" )
+        {
+            requireFields( format, formatMarker( kReceived, "dropped=1234 (slow consumer)" ),
+                           { ts, "$NATS-MONITOR", "-", "28", "dropped=1234 (slow consumer)" } );
+            requireFields( format, formatMarker( kReceived, "dropped=87 (queue full)" ),
+                           { ts, "$NATS-MONITOR", "-", "23", "dropped=87 (queue full)" } );
+        }
     }
 }
 

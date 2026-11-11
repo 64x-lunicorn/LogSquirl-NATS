@@ -35,13 +35,26 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 
+#include <limits>
+
 namespace nats_monitor {
+
+namespace {
+
+constexpr int kMegabyte = 1024 * 1024;
+
+/// nats.c takes the byte limit as an int.
+constexpr int kMaxPendingMegabytes = std::numeric_limits<int>::max() / kMegabyte;
+
+} // namespace
 
 ConnectionDialog::ConnectionDialog( QWidget* parent )
     : QDialog( parent )
     , urlEdit_( new QLineEdit( QString::fromLatin1( kDefaultUrl ), this ) )
     , subjectEdit_( new QLineEdit( this ) )
     , maxBinarySpin_( new QSpinBox( this ) )
+    , pendingMessagesSpin_( new QSpinBox( this ) )
+    , pendingMegabytesSpin_( new QSpinBox( this ) )
     , startButton_( new QPushButton( QStringLiteral( "▶ Start" ), this ) )
     , stopButton_( new QPushButton( QStringLiteral( "■ Stop" ), this ) )
     , statusLabel_( new QLabel( QStringLiteral( "Not capturing." ), this ) )
@@ -62,6 +75,20 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
     maxBinarySpin_->setToolTip(
         QStringLiteral( "How much of a payload that is not UTF-8 text is "
                         "written, as hex; its size is always the real one" ) );
+    pendingMessagesSpin_->setObjectName( "pendingMessages" );
+    pendingMessagesSpin_->setRange( 1, std::numeric_limits<int>::max() );
+    pendingMessagesSpin_->setGroupSeparatorShown( true );
+    pendingMessagesSpin_->setSuffix( QStringLiteral( " messages" ) );
+    pendingMessagesSpin_->setValue( kDefaultPendingLimits.messages );
+    pendingMegabytesSpin_->setObjectName( "pendingMegabytes" );
+    pendingMegabytesSpin_->setRange( 1, kMaxPendingMegabytes );
+    pendingMegabytesSpin_->setSuffix( QStringLiteral( " MiB" ) );
+    pendingMegabytesSpin_->setValue( kDefaultPendingLimits.bytes / kMegabyte );
+    for ( auto* spin : { pendingMessagesSpin_, pendingMegabytesSpin_ } ) {
+        spin->setToolTip( QStringLiteral(
+            "How much the NATS client holds for the capture while it writes: beyond it, "
+            "messages are dropped as a slow consumer, and the file says how many" ) );
+    }
     startButton_->setObjectName( "start" );
     startButton_->setDefault( true );
     stopButton_->setObjectName( "stop" );
@@ -73,6 +100,10 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
     form->addRow( QStringLiteral( "Server:" ), urlEdit_ );
     form->addRow( QStringLiteral( "Subject:" ), subjectEdit_ );
     form->addRow( QStringLiteral( "Binary payloads, first:" ), maxBinarySpin_ );
+    auto* pending = new QHBoxLayout;
+    pending->addWidget( pendingMessagesSpin_ );
+    pending->addWidget( pendingMegabytesSpin_ );
+    form->addRow( QStringLiteral( "Pending at most:" ), pending );
 
     auto* buttons = new QHBoxLayout;
     buttons->addStretch();
@@ -126,6 +157,8 @@ void ConnectionDialog::startCapture()
     config.url = urlEdit_->text().trimmed();
     config.subject = subjectEdit_->text().trimmed();
     config.format.maxBinaryBytes = maxBinarySpin_->value();
+    config.pendingLimits
+        = { pendingMessagesSpin_->value(), pendingMegabytesSpin_->value() * kMegabyte };
     if ( config.url.isEmpty() ) {
         statusLabel_->setText( QStringLiteral( "Enter the server URL." ) );
         return;
@@ -196,6 +229,8 @@ void ConnectionDialog::updateButtons()
     urlEdit_->setEnabled( !capturing );
     subjectEdit_->setEnabled( !capturing );
     maxBinarySpin_->setEnabled( !capturing );
+    pendingMessagesSpin_->setEnabled( !capturing );
+    pendingMegabytesSpin_->setEnabled( !capturing );
 }
 
 } // namespace nats_monitor

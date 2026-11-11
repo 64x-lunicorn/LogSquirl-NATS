@@ -41,7 +41,7 @@
  *     binary payload.  Anything else is `hex:` and lower-case hex digits,
  *     cut at FormatOptions::maxBinaryBytes.
  *
- * Marker lines (connection events, and later drops) use the subject
+ * Marker lines (connection events, counts of dropped messages) use the subject
  * `$NATS-MONITOR`, which no client can publish to, in the same format.
  *
  * Pure functions: callable from any thread, nats.c's delivery threads

@@ -46,9 +46,15 @@ temp file  logsquirl-nats-<pid>-XXXXXX/nats_<name>.log  → open_file(follow=1)
 - **Backpressure.** NATS core drops messages for slow consumers. Set generous
   pending limits (`natsSubscription_SetPendingLimits`), react to the async
   error `NATS_SLOW_CONSUMER`, read `natsSubscription_GetDropped`, and write a
-  marker line (`… NATS-MONITOR dropped=1234 since last marker`) so gaps are
-  visible in the log itself, plus a counter in the dialog/status widget.
+  marker line (`… $NATS-MONITOR - 28 dropped=1234 (slow consumer)`, the drops
+  since the last marker) so gaps are visible in the log itself, plus a
+  counter in the status widget (#7).
   If the plugin's own queue overflows, it drops too and counts the same way.
+  nats.c reports how many it dropped, not where: a slow-consumer marker may
+  land up to the pending-message limit earlier in the file than the actual
+  gap, since the messages nats.c still held when it dropped are written
+  after the marker. On stop the subscription is drained, so nothing nats.c
+  holds is discarded uncounted.
 - **Limits.** Size limit with rotation, as Serial does (#33 there): default
   e.g. 256 MiB, 0 = unlimited. Rotation opens the next file in a new tab.
 - **Temp dirs.** Same lifecycle as Serial: kept until LogSquirl quits, removed
@@ -118,8 +124,12 @@ truth, this plan only gives the overview:
   [ADR 1](adr/0001-static-openssl-built-by-the-plugin.md) and
   [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md).
 - ~~**NKey signing.**~~ nats.c's built-in ed25519, no libsodium (#1).
-- **Throughput target.** Which message rate must v1 sustain without drops on a
-  typical laptop (e.g. 50k msgs/s at 200 B)? Asked in #4.
+- ~~**Throughput target.**~~ Decided in #4: v1 sustains **50k msgs/s at
+  200 B payload** without drops on a typical laptop, with the default pending
+  limits of 1,000,000 messages / 512 MiB. The benchmark that checks it is
+  opt-in and local (hidden Catch2 tag `[.benchmark]`, see
+  [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)); CI runs only the deterministic
+  stress tests.
 - **Repository.** `64x-lunicorn/LogSquirl-NATS` on GitHub, add to the plugin
   table and `plugin-drift.yml` in LogSquirl-Plugin-CI, and to LogSquirl's
   `plugins.json` at the first release.

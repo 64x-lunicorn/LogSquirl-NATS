@@ -29,8 +29,14 @@
  *   3. nats.c's callbacks format a line and push it onto the queue under a
  *      mutex, and wake the writer.  The writer swaps the whole queue out,
  *      writes the batch and flushes, so it never holds the mutex while
- *      writing.
- *   4. stop() asks the writer to end: it unsubscribes, closes the
+ *      writing.  A full queue drops the message and counts it; the next
+ *      message queued is preceded by the dropped= marker.  Each message
+ *      callback (and the slow-consumer error, and the disconnected
+ *      callback) also reads nats.c's dropped count and marks what is new.
+ *   4. stop() asks the writer to end.  It lifts the pending limits, so
+ *      nats.c drops nothing more, and marks its last dropped count.  It
+ *      drains the subscription (or, not connected, waits until nats.c
+ *      holds nothing for it), writing all the while, closes the
  *      connection, waits until nats.c has made its last callback, writes
  *      what is left and a "stopped" marker, and closes the file.
  *
@@ -52,6 +58,7 @@
 #include <QRegularExpression>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -65,7 +72,11 @@ namespace nats_monitor {
 namespace {
 
 /// How long stopping waits for nats.c to confirm its last callback.
-constexpr auto kCallbackTimeout = std::chrono::seconds( 5 );
+constexpr auto kCallbackTimeout = std::chrono::milliseconds( 5000 );
+
+/// How long stopping lets nats.c drain the subscription: its flush may take
+/// its own timeout of 10 s, if the connection breaks meanwhile.
+constexpr auto kDrainTimeout = std::chrono::milliseconds( 15000 );
 
 /// What the writer reports to the session along with a line.
 enum class Event {
@@ -157,23 +168,123 @@ Message toMessage( natsMsg* msg )
 
 /// What nats.c's callbacks and the writer share.
 struct Shared {
+    /// What drops and messages are counted in, here and in NatsSession.
+    using Count = quint64;
+
     FormatOptions format;
 
     std::mutex mutex;
     std::condition_variable wake;
-    std::vector<Item> queue; ///< Unbounded for now: bounding and counting drops is #4's.
+    std::vector<Item> queue;
+    int queueLimit = kDefaultQueueLimit; ///< Message lines the queue holds; markers always fit.
+    int queuedMessages = 0;              ///< Message lines in the queue.
+    Count queueFullUnmarked = 0;         ///< Dropped from a full queue, not marked yet.
     bool stopRequested = false;
     bool stopping = false;         ///< The writer closes the connection: no disconnect marker.
     bool closed = false;           ///< nats.c made the closed callback.
     bool subscriptionDone = false; ///< nats.c made the subscription's completion callback.
+    /// nats.c's dropped count of the subscription that the markers cover;
+    /// under the mutex.
+    Count slowConsumerMarked = 0;
+
+    std::atomic<Count> received{ 0 };    ///< Messages nats.c handed over.
+    std::atomic<Count> dropped{ 0 };     ///< Drops counted: marked, or to be marked.
+    std::atomic<int> limitMessages{ 0 }; ///< The subscription's pending limits, read back.
+    std::atomic<int> limitBytes{ 0 };
+    /// The subscription, for the disconnected callback; set once subscribed.
+    std::atomic<natsSubscription*> subscription{ nullptr };
+
+    /// The counts, each read on its own (see NatsSession::receivedCount()).
+    NatsSession::Counts snapshot() const
+    {
+        return { received.load(), dropped.load(), { limitMessages.load(), limitBytes.load() } };
+    }
+
+    /// Queue @p line (without terminator); under the mutex.
+    void enqueueLocked( QByteArray line, Event event = Event::None, const QString& text = {} )
+    {
+        line.append( '\n' );
+        queue.push_back( { std::move( line ), event, text } );
+    }
 
     /// Queue @p line (without terminator) and wake the writer.
     void push( QByteArray line, Event event = Event::None, const QString& text = {} )
     {
-        line.append( '\n' );
         {
             std::lock_guard<std::mutex> lock( mutex );
-            queue.push_back( { std::move( line ), event, text } );
+            enqueueLocked( std::move( line ), event, text );
+        }
+        wake.notify_all();
+    }
+
+    /// Queue the message line @p line (without terminator), or drop it if
+    /// the queue is full.  The first message queued after drops is preceded
+    /// by their marker.
+    void pushMessage( QByteArray line )
+    {
+        {
+            std::lock_guard<std::mutex> lock( mutex );
+            if ( queuedMessages >= queueLimit ) {
+                ++queueFullUnmarked;
+                dropped.fetch_add( 1 );
+                return;
+            }
+            markQueueFullLocked();
+            enqueueLocked( std::move( line ) );
+            ++queuedMessages;
+        }
+        wake.notify_all();
+    }
+
+    /// Queue the marker of the queue-full drops not marked yet; under the mutex.
+    void markQueueFullLocked()
+    {
+        if ( queueFullUnmarked > 0 ) {
+            pushDroppedLocked( queueFullUnmarked, "queue full" );
+            queueFullUnmarked = 0;
+        }
+    }
+
+    /// Take what is queued, under the mutex.
+    std::vector<Item> takeLocked()
+    {
+        std::vector<Item> batch;
+        batch.swap( queue );
+        queuedMessages = 0;
+        return batch;
+    }
+
+    /// Queue a dropped= marker for @p count drops for @p reason; under the mutex.
+    void pushDroppedLocked( Count count, const char* reason )
+    {
+        enqueueLocked( formatMarker( nowUs(), "dropped=" + QByteArray::number( count ) + " ("
+                                                  + reason + ")" ) );
+    }
+
+    /// Mark the slow-consumer drops of @p subscription not marked yet.
+    void markSlowConsumer( natsSubscription* subscription )
+    {
+        int64_t total = 0;
+        if ( natsSubscription_GetDropped( subscription, &total ) != NATS_OK ) {
+            // Closed: nats.c no longer says.  It closes the subscription
+            // when the connection closes, before it makes the disconnected
+            // and closed callbacks, and discards what is still pending
+            // (natsSub_close, dispatch.c).  So the count is read while it
+            // still can be: before each message it delivers, at each slow
+            // consumer error, when the connection breaks (still open then,
+            // for the reconnect), and on stop.
+            return;
+        }
+        const auto count = static_cast<Count>( total );
+        {
+            std::lock_guard<std::mutex> lock( mutex );
+            if ( count <= slowConsumerMarked ) {
+                return;
+            }
+            const auto unmarked = count - slowConsumerMarked;
+            slowConsumerMarked = count;
+            dropped.fetch_add( unmarked );
+            pushDroppedLocked( unmarked, "slow consumer" );
         }
         wake.notify_all();
     }
@@ -188,12 +299,16 @@ struct Shared {
 
     // ── nats.c callbacks, on nats.c's threads ────────────────────────
 
-    static void onMessage( natsConnection*, natsSubscription*, natsMsg* msg, void* closure )
+    static void onMessage( natsConnection*, natsSubscription* subscription, natsMsg* msg,
+                           void* closure )
     {
         auto* self = static_cast<Shared*>( closure );
+        self->received.fetch_add( 1, std::memory_order_relaxed );
+        // Drops since the last message: the gap is before this one.
+        self->markSlowConsumer( subscription );
         auto line = formatLine( toMessage( msg ), self->format );
         natsMsg_Destroy( msg );
-        self->push( std::move( line ) );
+        self->pushMessage( std::move( line ) );
     }
 
     static void onSubscriptionComplete( void* closure )
@@ -215,6 +330,14 @@ struct Shared {
                 return;
             }
         }
+        // Nothing arrives until reconnected, so nothing is dropped: the
+        // count now is the count of the gap, readable still should the
+        // connection now be closed for good.  The writer destroys the
+        // subscription only after the closed callback, which comes after
+        // this one.
+        if ( auto* subscription = self->subscription.load() ) {
+            self->markSlowConsumer( subscription );
+        }
         self->pushMarker( QStringLiteral( "disconnected" ), Event::Status );
     }
 
@@ -235,13 +358,18 @@ struct Shared {
         self->wake.notify_all();
     }
 
-    static void onError( natsConnection* connection, natsSubscription*, natsStatus status,
-                         void* closure )
+    static void onError( natsConnection* connection, natsSubscription* subscription,
+                         natsStatus status, void* closure )
     {
+        auto* self = static_cast<Shared*>( closure );
+        if ( status == NATS_SLOW_CONSUMER && subscription ) {
+            self->markSlowConsumer( subscription );
+            return;
+        }
         const char* detail = nullptr;
         natsConnection_GetLastError( connection, &detail );
-        static_cast<Shared*>( closure )->pushMarker(
-            QStringLiteral( "error: %1" ).arg( describe( status, detail ) ), Event::Error );
+        self->pushMarker( QStringLiteral( "error: %1" ).arg( describe( status, detail ) ),
+                          Event::Error );
     }
 };
 
@@ -267,10 +395,11 @@ struct NatsSession::Worker {
         , generation( startNumber )
     {
         shared->format = config.format;
+        shared->queueLimit = config.queueLimit;
     }
 
     /// Stops the thread and waits for it.
-    ~Worker()
+    void join()
     {
         if ( thread.joinable() ) {
             {
@@ -280,6 +409,11 @@ struct NatsSession::Worker {
             shared->wake.notify_all();
             thread.join();
         }
+    }
+
+    ~Worker()
+    {
+        join();
         if ( released ) {
             delete shared;
         }
@@ -360,7 +494,7 @@ struct NatsSession::Worker {
         std::vector<Item> batch;
         {
             std::lock_guard<std::mutex> lock( shared->mutex );
-            batch.swap( shared->queue );
+            batch = shared->takeLocked();
         }
         write( batch );
     }
@@ -419,8 +553,20 @@ struct NatsSession::Worker {
         status = natsConnection_Subscribe( subscription, *connection, subject.constData(),
                                            &Shared::onMessage, shared );
         if ( status == NATS_OK ) {
+            shared->subscription = *subscription;
             status = natsSubscription_SetOnCompleteCB( *subscription,
                                                        &Shared::onSubscriptionComplete, shared );
+        }
+        if ( status == NATS_OK ) {
+            status = natsSubscription_SetPendingLimits(
+                *subscription, config.pendingLimits.messages, config.pendingLimits.bytes );
+        }
+        if ( status == NATS_OK ) {
+            int messages = 0;
+            int bytes = 0;
+            status = natsSubscription_GetPendingLimits( *subscription, &messages, &bytes );
+            shared->limitMessages = messages;
+            shared->limitBytes = bytes;
         }
         if ( status == NATS_OK ) {
             // A round trip: once the server has answered, it has the
@@ -455,7 +601,7 @@ struct NatsSession::Worker {
                 shared->wake.wait( lock, [ this ] {
                     return !shared->queue.empty() || shared->stopRequested || shared->closed;
                 } );
-                batch.swap( shared->queue );
+                batch = shared->takeLocked();
                 stop = shared->stopRequested;
                 closed = shared->closed;
             }
@@ -466,22 +612,81 @@ struct NatsSession::Worker {
         }
     }
 
-    /// Unsubscribe, close and destroy; whether nats.c confirmed that it
-    /// makes no callback any more.
+    /// Write what the callbacks queue until @p done (called without the
+    /// mutex) holds, or @p timeout passed; whether it holds.
+    template <typename Done>
+    bool writeUntil( Done done, std::chrono::milliseconds timeout )
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        for ( ;; ) {
+            const bool finished = done(); // before drain(): what came before is written
+            drain();
+            if ( finished ) {
+                return true;
+            }
+            if ( std::chrono::steady_clock::now() >= deadline ) {
+                return false;
+            }
+            std::unique_lock<std::mutex> lock( shared->mutex );
+            shared->wake.wait_for( lock, std::chrono::milliseconds( 10 ),
+                                   [ this ] { return !shared->queue.empty(); } );
+        }
+    }
+
+    /// End the subscription without losing what nats.c still holds for it:
+    /// nats.c discards the messages pending in a subscription once it is
+    /// closed (dispatch.c), uncounted.
+    void endSubscription( natsConnection* connection, natsSubscription* subscription )
+    {
+        // Lifted, nats.c drops nothing more (it decides under the lock that
+        // SetPendingLimits takes), so the count read now is the last.
+        natsSubscription_SetPendingLimits( subscription, -1, -1 );
+        shared->markSlowConsumer( subscription );
+        // Connected: drain.  nats.c sends UNSUB, waits for the server's
+        // answer (so all that was sent before has arrived), delivers what
+        // is pending and then makes the completion callback.  With no
+        // timeout of its own (-1) it never closes the subscription early.
+        if ( natsConnection_Status( connection ) == NATS_CONN_STATUS_CONNECTED
+             && natsSubscription_DrainTimeout( subscription, -1 ) == NATS_OK ) {
+            writeUntil(
+                [ this ] {
+                    std::lock_guard<std::mutex> lock( shared->mutex );
+                    return shared->subscriptionDone;
+                },
+                kDrainTimeout );
+            return;
+        }
+        // Not connected, nothing more arrives (and a drain would wait for
+        // its flush to time out): wait until nats.c has delivered what it
+        // holds.  A message it has taken from the queue it delivers even if
+        // the subscription is closed meanwhile.
+        writeUntil(
+            [ subscription ] {
+                int pending = 0;
+                return natsSubscription_GetPending( subscription, &pending, nullptr ) != NATS_OK
+                       || pending == 0;
+            },
+            kCallbackTimeout );
+        natsSubscription_Unsubscribe( subscription );
+    }
+
+    /// End the subscription, close and destroy; whether nats.c confirmed
+    /// that it makes no callback any more.
     bool close( natsConnection* connection, natsSubscription* subscription )
     {
         {
             std::lock_guard<std::mutex> lock( shared->mutex );
             shared->stopping = true;
         }
-        bool confirmed = true;
         if ( subscription ) {
-            natsSubscription_Unsubscribe( subscription );
-            confirmed = waitUntil( []( const Shared& s ) { return s.subscriptionDone; } );
+            endSubscription( connection, subscription );
         }
+        bool confirmed = true;
         if ( connection ) {
             natsConnection_Close( connection );
-            confirmed = waitUntil( []( const Shared& s ) { return s.closed; } ) && confirmed;
+            confirmed = waitUntil( [ subscription ]( const Shared& s ) {
+                return s.closed && ( !subscription || s.subscriptionDone );
+            } );
         }
         natsSubscription_Destroy( subscription );
         natsConnection_Destroy( connection );
@@ -507,6 +712,11 @@ struct NatsSession::Worker {
         released = close( connection, subscription );
         natsOptions_Destroy( options );
 
+        {
+            // Drops no message after them marks yet.
+            std::lock_guard<std::mutex> lock( shared->mutex );
+            shared->markQueueFullLocked();
+        }
         drain(); // what arrived before the subscription ended
         if ( stopped ) {
             shared->pushMarker( QStringLiteral( "stopped" ), Event::Status );
@@ -575,12 +785,42 @@ bool NatsSession::start()
 
 void NatsSession::stop()
 {
-    worker_.reset(); // asks the writer to stop, and waits for it
+    releaseWorker();
+}
+
+void NatsSession::releaseWorker()
+{
+    if ( !worker_ ) {
+        return;
+    }
+    worker_->join(); // asks the writer to stop, and waits for it
+    counts_ = worker_->shared->snapshot();
+    worker_.reset();
+}
+
+NatsSession::Counts NatsSession::counts() const
+{
+    return worker_ ? worker_->shared->snapshot() : counts_;
+}
+
+PendingLimits NatsSession::pendingLimits() const
+{
+    return counts().pendingLimits;
 }
 
 bool NatsSession::isRunning() const
 {
     return worker_ != nullptr;
+}
+
+quint64 NatsSession::receivedCount() const
+{
+    return counts().received;
+}
+
+quint64 NatsSession::droppedCount() const
+{
+    return counts().dropped;
 }
 
 QString NatsSession::filePath() const
@@ -598,7 +838,7 @@ void NatsSession::onWorkerFinished( int generation )
     if ( !worker_ || generation != generation_ ) {
         return; // stopped meanwhile, or the report of an earlier start
     }
-    worker_.reset(); // the thread has ended: joins at once
+    releaseWorker(); // the thread has ended: joins at once
     Q_EMIT finished();
 }
 

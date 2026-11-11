@@ -75,6 +75,9 @@ Catch2 v2, one test program run as two ctest entries, plus a dependency check:
 | `logsquirl_nats_server_tests` | the tests tagged `[server]`, against a real `nats-server` |
 | `no_shared_openssl` | the plugin library links no OpenSSL shared library |
 
+Hidden tests (`[.benchmark]`) run in neither; see
+[the benchmark](#dropped-messages-and-the-benchmark).
+
 ### The nats-server of the tests
 
 A plugin has no workflows of its own, so the test build provides the server
@@ -131,6 +134,29 @@ a stopped server back for a reconnect test.
   [`formats/nats_log.json`](../formats/nats_log.json), as LogSquirl does,
   and checks the columns. A change of the line format that the definition
   does not follow fails it.
+
+### Dropped messages and the benchmark
+
+A capture never loses a message silently: nats.c's slow-consumer drops
+(beyond the subscription's pending limits) and the drops of the session's
+own queue (beyond `SessionConfig::queueLimit`) are each counted in one
+marker line, `$NATS-MONITOR - <n> dropped=<count> (slow consumer)` or
+`(queue full)`, and in `NatsSession::droppedCount()`. The stress tests
+(`[drops]`, part of the server tests) flood a session with small limits
+and check that the `dropped=` counts add up to the messages published but
+not written.
+
+Whether v1 keeps up with its target, **50k msgs/s at 200 B** without drops,
+is a benchmark, not run by ctest or CI (its tag is hidden). Run it by hand
+on a Release build, on an otherwise idle machine:
+
+```sh
+build/tests/logsquirl_nats_tests "[benchmark]"
+```
+
+It publishes at that rate for 10 seconds with the default limits, requires
+every message written and no `dropped=` marker, and prints the rate
+reached (a Catch2 warning, also when it passes).
 
 ### The Log Format
 
