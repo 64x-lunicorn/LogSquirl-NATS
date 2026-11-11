@@ -46,6 +46,7 @@ qt_standard_project_setup()
 # ── Plugin shared library ─────────────────────────────────────────────────
 set(LOGSQUIRL_NATS_SOURCES
     src/plugin.cpp
+    src/lineformat.cpp
 )
 
 # What the plugin's sources need to compile and link: shared by the plugin
