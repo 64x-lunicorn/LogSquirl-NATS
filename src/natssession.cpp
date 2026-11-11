@@ -31,11 +31,12 @@
  *      writes the batch and flushes, so it never holds the mutex while
  *      writing.  A full queue drops the message and counts it; the next
  *      message queued is preceded by the dropped= marker.  Each message
- *      callback (and the slow-consumer error) also reads nats.c's dropped
- *      count and marks what is new.
- *   4. On stop the pending limits are lifted, so nats.c drops nothing more,
- *      and its last dropped count is marked before it unsubscribes.
- *   5. stop() asks the writer to end: it unsubscribes, closes the
+ *      callback (and the slow-consumer error, and the disconnected
+ *      callback) also reads nats.c's dropped count and marks what is new.
+ *   4. stop() asks the writer to end.  It lifts the pending limits, so
+ *      nats.c drops nothing more, and marks its last dropped count.  It
+ *      drains the subscription (or, not connected, waits until nats.c
+ *      holds nothing for it), writing all the while, closes the
  *      connection, waits until nats.c has made its last callback, writes
  *      what is left and a "stopped" marker, and closes the file.
  *
@@ -167,6 +168,9 @@ Message toMessage( natsMsg* msg )
 
 /// What nats.c's callbacks and the writer share.
 struct Shared {
+    /// What drops and messages are counted in, here and in NatsSession.
+    using Count = quint64;
+
     FormatOptions format;
 
     std::mutex mutex;
@@ -174,28 +178,41 @@ struct Shared {
     std::vector<Item> queue;
     int queueLimit = kDefaultQueueLimit; ///< Message lines the queue holds; markers always fit.
     int queuedMessages = 0;              ///< Message lines in the queue.
-    qint64 queueFullUnmarked = 0;        ///< Dropped from a full queue, not marked yet.
+    Count queueFullUnmarked = 0;         ///< Dropped from a full queue, not marked yet.
     bool stopRequested = false;
     bool stopping = false;         ///< The writer closes the connection: no disconnect marker.
     bool closed = false;           ///< nats.c made the closed callback.
     bool subscriptionDone = false; ///< nats.c made the subscription's completion callback.
+    /// nats.c's dropped count of the subscription that the markers cover;
+    /// under the mutex.
+    Count slowConsumerMarked = 0;
 
-    std::atomic<quint64> received{ 0 };  ///< Messages nats.c handed over.
-    std::atomic<quint64> dropped{ 0 };   ///< Drops counted: marked, or to be marked.
+    std::atomic<Count> received{ 0 };    ///< Messages nats.c handed over.
+    std::atomic<Count> dropped{ 0 };     ///< Drops counted: marked, or to be marked.
     std::atomic<int> limitMessages{ 0 }; ///< The subscription's pending limits, read back.
     std::atomic<int> limitBytes{ 0 };
     /// The subscription, for the disconnected callback; set once subscribed.
     std::atomic<natsSubscription*> subscription{ nullptr };
-    /// nats.c's dropped count of the subscription that the markers cover.
-    int64_t slowConsumerMarked = 0;
+
+    /// The counts, each read on its own (see NatsSession::receivedCount()).
+    NatsSession::Counts snapshot() const
+    {
+        return { received.load(), dropped.load(), { limitMessages.load(), limitBytes.load() } };
+    }
+
+    /// Queue @p line (without terminator); under the mutex.
+    void enqueueLocked( QByteArray line, Event event = Event::None, const QString& text = {} )
+    {
+        line.append( '\n' );
+        queue.push_back( { std::move( line ), event, text } );
+    }
 
     /// Queue @p line (without terminator) and wake the writer.
     void push( QByteArray line, Event event = Event::None, const QString& text = {} )
     {
-        line.append( '\n' );
         {
             std::lock_guard<std::mutex> lock( mutex );
-            queue.push_back( { std::move( line ), event, text } );
+            enqueueLocked( std::move( line ), event, text );
         }
         wake.notify_all();
     }
@@ -205,7 +222,6 @@ struct Shared {
     /// by their marker.
     void pushMessage( QByteArray line )
     {
-        line.append( '\n' );
         {
             std::lock_guard<std::mutex> lock( mutex );
             if ( queuedMessages >= queueLimit ) {
@@ -214,7 +230,7 @@ struct Shared {
                 return;
             }
             markQueueFullLocked();
-            queue.push_back( { std::move( line ), Event::None, {} } );
+            enqueueLocked( std::move( line ) );
             ++queuedMessages;
         }
         wake.notify_all();
@@ -239,12 +255,10 @@ struct Shared {
     }
 
     /// Queue a dropped= marker for @p count drops for @p reason; under the mutex.
-    void pushDroppedLocked( qint64 count, const char* reason )
+    void pushDroppedLocked( Count count, const char* reason )
     {
-        auto line = formatMarker( nowUs(),
-                                  "dropped=" + QByteArray::number( count ) + " (" + reason + ")" );
-        line.append( '\n' );
-        queue.push_back( { std::move( line ), Event::None, {} } );
+        enqueueLocked( formatMarker( nowUs(), "dropped=" + QByteArray::number( count ) + " ("
+                                                  + reason + ")" ) );
     }
 
     /// Mark the slow-consumer drops of @p subscription not marked yet.
@@ -261,15 +275,16 @@ struct Shared {
             // for the reconnect), and on stop.
             return;
         }
+        const auto count = static_cast<Count>( total );
         {
             std::lock_guard<std::mutex> lock( mutex );
-            if ( total <= slowConsumerMarked ) {
+            if ( count <= slowConsumerMarked ) {
                 return;
             }
-            const auto count = total - slowConsumerMarked;
-            slowConsumerMarked = total;
-            dropped.fetch_add( static_cast<quint64>( count ) );
-            pushDroppedLocked( count, "slow consumer" );
+            const auto unmarked = count - slowConsumerMarked;
+            slowConsumerMarked = count;
+            dropped.fetch_add( unmarked );
+            pushDroppedLocked( unmarked, "slow consumer" );
         }
         wake.notify_all();
     }
@@ -346,14 +361,15 @@ struct Shared {
     static void onError( natsConnection* connection, natsSubscription* subscription,
                          natsStatus status, void* closure )
     {
+        auto* self = static_cast<Shared*>( closure );
         if ( status == NATS_SLOW_CONSUMER && subscription ) {
-            static_cast<Shared*>( closure )->markSlowConsumer( subscription );
+            self->markSlowConsumer( subscription );
             return;
         }
         const char* detail = nullptr;
         natsConnection_GetLastError( connection, &detail );
-        static_cast<Shared*>( closure )->pushMarker(
-            QStringLiteral( "error: %1" ).arg( describe( status, detail ) ), Event::Error );
+        self->pushMarker( QStringLiteral( "error: %1" ).arg( describe( status, detail ) ),
+                          Event::Error );
     }
 };
 
@@ -542,8 +558,8 @@ struct NatsSession::Worker {
                                                        &Shared::onSubscriptionComplete, shared );
         }
         if ( status == NATS_OK ) {
-            status = natsSubscription_SetPendingLimits( *subscription, config.pendingMessagesLimit,
-                                                        config.pendingBytesLimit );
+            status = natsSubscription_SetPendingLimits(
+                *subscription, config.pendingLimits.messages, config.pendingLimits.bytes );
         }
         if ( status == NATS_OK ) {
             int messages = 0;
@@ -778,18 +794,18 @@ void NatsSession::releaseWorker()
         return;
     }
     worker_->join(); // asks the writer to stop, and waits for it
-    received_ = worker_->shared->received.load();
-    dropped_ = worker_->shared->dropped.load();
-    pendingLimits_ = { worker_->shared->limitMessages.load(), worker_->shared->limitBytes.load() };
+    counts_ = worker_->shared->snapshot();
     worker_.reset();
 }
 
-NatsSession::PendingLimits NatsSession::pendingLimits() const
+NatsSession::Counts NatsSession::counts() const
 {
-    if ( !worker_ ) {
-        return pendingLimits_;
-    }
-    return { worker_->shared->limitMessages.load(), worker_->shared->limitBytes.load() };
+    return worker_ ? worker_->shared->snapshot() : counts_;
+}
+
+PendingLimits NatsSession::pendingLimits() const
+{
+    return counts().pendingLimits;
 }
 
 bool NatsSession::isRunning() const
@@ -799,12 +815,12 @@ bool NatsSession::isRunning() const
 
 quint64 NatsSession::receivedCount() const
 {
-    return worker_ ? worker_->shared->received.load() : received_;
+    return counts().received;
 }
 
 quint64 NatsSession::droppedCount() const
 {
-    return worker_ ? worker_->shared->dropped.load() : dropped_;
+    return counts().dropped;
 }
 
 QString NatsSession::filePath() const

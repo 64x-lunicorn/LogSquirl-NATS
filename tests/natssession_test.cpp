@@ -39,8 +39,8 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
-#include <QTemporaryDir>
 #include <QRegularExpression>
+#include <QTemporaryDir>
 
 #include <memory>
 
@@ -492,8 +492,7 @@ SCENARIO( "the subscription gets the session's pending limits", "[server][sessio
         WHEN( "a session is started with limits of its own" )
         {
             auto config = configFor( server.url(), "limits" );
-            config.pendingMessagesLimit = 1234;
-            config.pendingBytesLimit = 5678 * 1024;
+            config.pendingLimits = { 1234, 5678 * 1024 };
             NatsSession session( config );
             startAndWaitConnected( session, server.url(), "limits" );
 
@@ -516,7 +515,7 @@ SCENARIO( "a slow consumer's drops are counted and marked where they happen",
         NatsServer server;
         Publisher publisher( server.url() );
         auto config = configFor( server.url(), "flood" );
-        config.pendingMessagesLimit = 1;
+        config.pendingLimits.messages = 1;
         NatsSession session( config );
         startAndWaitConnected( session, server.url(), "flood" );
 
@@ -554,7 +553,7 @@ SCENARIO( "under a flood every drop is counted in exactly one marker", "[server]
         NatsServer server;
         Publisher publisher( server.url() );
         auto config = configFor( server.url(), "flood" );
-        config.pendingMessagesLimit = 16;
+        config.pendingLimits.messages = 16;
         config.queueLimit = 1;
         NatsSession session( config );
         startAndWaitConnected( session, server.url(), "flood" );
@@ -612,7 +611,7 @@ SCENARIO( "when the server goes away during a flood, the drops until then are st
         const int port = server->port();
         const QString url = server->url();
         auto config = configFor( url, "flood" );
-        config.pendingMessagesLimit = 16;
+        config.pendingLimits.messages = 16;
         config.queueLimit = 1;
         NatsSession session( config );
         int finished = 0;

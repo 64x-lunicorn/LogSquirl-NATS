@@ -47,11 +47,19 @@
  *     <time> $NATS-MONITOR - <n> dropped=87 (queue full)
  *
  * written at the gap: a slow-consumer marker before the next message
- * nats.c delivers (or when it reports the slow consumer), a queue-full
- * marker before the next message the queue takes.  Since nats.c says only
- * how many it dropped, not where, a slow-consumer marker may come up to
- * the pending messages early.  Drops not yet marked when the session stops
- * get their markers before "stopped".  droppedCount() is the sum.
+ * nats.c delivers (or when it reports the slow consumer, or the connection
+ * breaks), a queue-full marker before the next message the queue takes.
+ * Drops not yet marked when the session stops get their markers before
+ * "stopped".  droppedCount() is the sum.
+ *
+ * A slow-consumer marker may land up to the pending-message limit earlier
+ * in the file than the actual gap: nats.c reports how many it dropped, not
+ * where, so the messages it still held when it dropped, received before
+ * the gap, are written after the marker.
+ *
+ * stop() drains the subscription: nats.c delivers what it holds and what
+ * the server sent before the unsubscribe, so nothing that reached the
+ * session before stop() is lost uncounted.
  *
  * USAGE
  * ─────
@@ -77,10 +85,17 @@ namespace nats_monitor {
 /// The server URL the dialog proposes.
 inline constexpr const char* kDefaultUrl = "nats://localhost:4222";
 
-/// Defaults for SessionConfig's pending limits: nats.c's own (65,536
+/// A subscription's pending limits (natsSubscription_SetPendingLimits): how
+/// many messages, and how many bytes, nats.c holds for the session before
+/// it drops as a slow consumer.
+struct PendingLimits {
+    int messages = 0;
+    int bytes = 0;
+};
+
+/// Default for SessionConfig::pendingLimits: nats.c's own (65,536
 /// messages, 64 MiB) drop too early for a capture.
-inline constexpr int kDefaultPendingMessages = 1000000;
-inline constexpr int kDefaultPendingBytes = 512 * 1024 * 1024;
+inline constexpr PendingLimits kDefaultPendingLimits{ 1000000, 512 * 1024 * 1024 };
 
 /// Default for SessionConfig::queueLimit: two seconds at 50k msgs/s.
 inline constexpr int kDefaultQueueLimit = 100000;
@@ -89,11 +104,8 @@ struct SessionConfig {
     QString url = QString::fromLatin1( kDefaultUrl ); ///< One or more URLs, comma-separated.
     QString subject;                                  ///< May contain the wildcards * and >.
     FormatOptions format;
-    /// The subscription's pending limits (natsSubscription_SetPendingLimits):
-    /// how many messages, and how many bytes, nats.c holds for the session
-    /// before it drops as a slow consumer.  Must be > 0.
-    int pendingMessagesLimit = kDefaultPendingMessages;
-    int pendingBytesLimit = kDefaultPendingBytes;
+    /// The subscription's pending limits; both must be > 0.
+    PendingLimits pendingLimits = kDefaultPendingLimits;
     /// How many messages the session's own queue to the writer holds before
     /// it drops new ones (queue full).  Must be > 0.
     int queueLimit = kDefaultQueueLimit;
@@ -125,10 +137,11 @@ public:
     bool start();
 
     /**
-     * Close the connection, write what was received before and a
-     * "stopped" marker, and close the file.  Waits for the writer thread,
-     * which nats.c lets go within a few seconds at most.  No-op if not
-     * running.
+     * Drain the subscription and close the connection, write what was
+     * received before and a "stopped" marker, and close the file.  Waits
+     * for the writer thread: a round trip to the server and the writing of
+     * what nats.c held, at most about 15 s should the connection break
+     * while draining.  No-op if not running.
      */
     void stop();
 
@@ -151,6 +164,11 @@ public:
     /// written or dropped from the session's queue: what a msgs/s is
     /// computed from.  Kept after stop().  Any thread may call it, though
     /// it is meant for the GUI thread.
+    ///
+    /// receivedCount() and droppedCount() are each read on their own, not
+    /// as one consistent snapshot: while messages arrive, one may be a few
+    /// messages ahead of the other.  Fine for a msgs/s and a running total;
+    /// after stop() both are final.
     quint64 receivedCount() const;
 
     /// How many messages were dropped since start(), slow consumer and
@@ -158,14 +176,16 @@ public:
     /// or about to be.  After stop() it equals the sum of all of them.
     quint64 droppedCount() const;
 
-    struct PendingLimits {
-        int messages = 0;
-        int bytes = 0;
-    };
-
     /// The pending limits nats.c has for the subscription, read back from
     /// it once subscribed; zero before, and after a failed subscribe.
     PendingLimits pendingLimits() const;
+
+    /// What the accessors above return, taken together.
+    struct Counts {
+        quint64 received = 0;
+        quint64 dropped = 0;
+        PendingLimits pendingLimits;
+    };
 
 Q_SIGNALS:
     /// Connected to @p url and subscribed: after start(), and again after
@@ -193,14 +213,15 @@ private:
     /// Stop the writer, wait for it and keep its counts.
     void releaseWorker();
 
+    /// The running worker's counts, or those the last one left.
+    Counts counts() const;
+
     SessionConfig config_;
     QTemporaryDir tempDir_; ///< Declared before worker_: removed after the file is closed.
     QString filePath_;
     int generation_ = 0; ///< Counts start(), to tell a stale finished report from the current.
     std::unique_ptr<Worker> worker_;
-    quint64 received_ = 0; ///< The counts of the last worker, once it is gone.
-    quint64 dropped_ = 0;
-    PendingLimits pendingLimits_;
+    Counts counts_; ///< The counts of the last worker, once it is gone.
 };
 
 } // namespace nats_monitor

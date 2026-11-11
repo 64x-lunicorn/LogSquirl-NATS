@@ -79,11 +79,11 @@ ConnectionDialog::ConnectionDialog( QWidget* parent )
     pendingMessagesSpin_->setRange( 1, std::numeric_limits<int>::max() );
     pendingMessagesSpin_->setGroupSeparatorShown( true );
     pendingMessagesSpin_->setSuffix( QStringLiteral( " messages" ) );
-    pendingMessagesSpin_->setValue( kDefaultPendingMessages );
+    pendingMessagesSpin_->setValue( kDefaultPendingLimits.messages );
     pendingMegabytesSpin_->setObjectName( "pendingMegabytes" );
     pendingMegabytesSpin_->setRange( 1, kMaxPendingMegabytes );
     pendingMegabytesSpin_->setSuffix( QStringLiteral( " MiB" ) );
-    pendingMegabytesSpin_->setValue( kDefaultPendingBytes / kMegabyte );
+    pendingMegabytesSpin_->setValue( kDefaultPendingLimits.bytes / kMegabyte );
     for ( auto* spin : { pendingMessagesSpin_, pendingMegabytesSpin_ } ) {
         spin->setToolTip( QStringLiteral(
             "How much the NATS client holds for the capture while it writes: beyond it, "
@@ -157,8 +157,8 @@ void ConnectionDialog::startCapture()
     config.url = urlEdit_->text().trimmed();
     config.subject = subjectEdit_->text().trimmed();
     config.format.maxBinaryBytes = maxBinarySpin_->value();
-    config.pendingMessagesLimit = pendingMessagesSpin_->value();
-    config.pendingBytesLimit = pendingMegabytesSpin_->value() * kMegabyte;
+    config.pendingLimits
+        = { pendingMessagesSpin_->value(), pendingMegabytesSpin_->value() * kMegabyte };
     if ( config.url.isEmpty() ) {
         statusLabel_->setText( QStringLiteral( "Enter the server URL." ) );
         return;
