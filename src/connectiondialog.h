@@ -26,6 +26,8 @@
  *   - the server URL (default nats://localhost:4222; several comma-separated)
  *   - the subject, with the wildcards * and >
  *   - how many bytes of a binary payload are written (default 256)
+ *   - the subscription's pending limits, messages and MiB (default
+ *     1,000,000 and 512 MiB): beyond them nats.c drops as a slow consumer
  *   - Start, which starts a NatsSession and opens its file in a followed tab
  *   - Stop, which stops it; the tab keeps the file until LogSquirl quits
  *   - a status line with the session's connection events and errors
@@ -86,6 +88,8 @@ private:
     QLineEdit* urlEdit_;
     QLineEdit* subjectEdit_;
     QSpinBox* maxBinarySpin_;
+    QSpinBox* pendingMessagesSpin_;
+    QSpinBox* pendingMegabytesSpin_;
     QPushButton* startButton_;
     QPushButton* stopButton_;
     QLabel* statusLabel_;

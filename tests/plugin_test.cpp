@@ -319,6 +319,49 @@ SCENARIO( "the cut length of binary payloads is set in the dialog", "[plugin][se
     }
 }
 
+SCENARIO( "the pending limits are set in the dialog", "[plugin][server]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "an initialised plugin and a server" )
+    {
+        NatsServer server;
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+
+        THEN( "the dialog proposes 1,000,000 messages and 512 MiB" )
+        {
+            REQUIRE( spinBox( openDialog(), "pendingMessages" )->value() == 1000000 );
+            REQUIRE( spinBox( openDialog(), "pendingMegabytes" )->value() == 512 );
+        }
+
+        WHEN( "the user sets a single pending message and starts a capture that is flooded" )
+        {
+            spinBox( openDialog(), "pendingMessages" )->setValue( 1 );
+            startFromDialog( host, server.url(), "flood" );
+            REQUIRE( host.openedFiles.size() == 1 );
+            const auto path = host.openedFiles.first();
+            REQUIRE( waitSubscribed( path ) );
+            {
+                Publisher publisher( server.url() );
+                const QByteArray payload( 200, 'x' );
+                for ( int i = 0; i < 50000; ++i ) {
+                    publisher.publish( "flood", payload, {}, {}, i == 49999 );
+                }
+            }
+            button( openDialog(), "stop" )->click();
+
+            THEN( "the capture drops as a slow consumer, and says so in the file" )
+            {
+                REQUIRE( readLines( path ).join( '\n' ).contains( " (slow consumer)" ) );
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+}
+
 SCENARIO( "a capture that fails is notified", "[plugin][server]" )
 {
     SKIP_WITHOUT_NATS_SERVER();
