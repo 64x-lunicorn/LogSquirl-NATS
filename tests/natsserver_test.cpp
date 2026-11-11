@@ -54,13 +54,29 @@ void requireOk( natsStatus status, const char* what )
     }
 }
 
-/// Owns what a test creates through nats.c.
-struct Client {
+/// Owns what a test creates through nats.c.  A base of Client, so that what
+/// Client's constructor created is destroyed also when it fails half-way.
+struct NatsHandles {
     natsOptions* options = nullptr;
     natsConnection* connection = nullptr;
     natsSubscription* subscription = nullptr;
     natsMsg* message = nullptr;
 
+    NatsHandles() = default;
+    NatsHandles( const NatsHandles& ) = delete;
+    NatsHandles& operator=( const NatsHandles& ) = delete;
+
+    ~NatsHandles()
+    {
+        natsMsg_Destroy( message );
+        natsSubscription_Destroy( subscription );
+        natsConnection_Destroy( connection );
+        natsOptions_Destroy( options );
+    }
+};
+
+/// A nats.c client with a short connect timeout and no reconnecting.
+struct Client : NatsHandles {
     Client()
     {
         requireOk( natsOptions_Create( &options ), "natsOptions_Create" );
@@ -68,17 +84,6 @@ struct Client {
         requireOk( natsOptions_SetAllowReconnect( options, false ),
                    "natsOptions_SetAllowReconnect" );
     }
-
-    ~Client()
-    {
-        natsMsg_Destroy( message );
-        natsSubscription_Destroy( subscription );
-        natsConnection_Destroy( connection );
-        natsOptions_Destroy( options );
-    }
-
-    Client( const Client& ) = delete;
-    Client& operator=( const Client& ) = delete;
 
     /// Connect, subscribe to @p subject, publish @p payload on it and wait
     /// for it to come back.
@@ -179,10 +184,17 @@ SCENARIO( "nats.c connects over TLS", "[server][tls]" )
             requireOk( natsOptions_SetURL( client.options, server.url().toUtf8().constData() ),
                        "natsOptions_SetURL" );
             const natsStatus status = natsConnection_Connect( &client.connection, client.options );
+            const char* error = nats_GetLastError( nullptr ); // NULL without one
+            const std::string detail = error ? error : "";
 
-            THEN( "the certificate check refuses the connection" )
+            THEN( "OpenSSL's certificate check refuses the connection" )
             {
-                REQUIRE( status != NATS_OK );
+                INFO( natsStatus_GetText( status ) << ": " << detail );
+                REQUIRE( status == NATS_SSL_ERROR );
+                // OpenSSL's X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY: the
+                // chain ends at a CA the client does not know.
+                REQUIRE( detail.find( "unable to get local issuer certificate" )
+                         != std::string::npos );
             }
         }
     }
