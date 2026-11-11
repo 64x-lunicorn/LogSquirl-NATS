@@ -21,12 +21,19 @@
  * @file plugininfo_test.cpp
  * @brief BDD tests verifying the plugin's C ABI metadata.
  *
- * logsquirl_plugin_get_info() must describe the plugin as plugin.json does.
+ * logsquirl_plugin_get_info() must describe the plugin as plugin.json does,
+ * and the package must carry what plugin.json names.
  */
 
 #include <catch2/catch.hpp>
 
 #include "logsquirl_plugin_api.h"
+#include "testconfig.h"
+
+#include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 #include <cstring>
 
@@ -52,5 +59,27 @@ SCENARIO( "logsquirl_plugin_get_info returns valid metadata", "[plugininfo]" )
             REQUIRE( info->type == LOGSQUIRL_PLUGIN_UI );
             REQUIRE( info->api_version == 1 );
         }
+    }
+}
+
+SCENARIO( "the package carries the Log Format", "[plugininfo]" )
+{
+    const auto readJson = []( const QString& relativePath ) {
+        QFile file( QStringLiteral( LOGSQUIRL_NATS_TEST_SOURCE_DIR "/" ) + relativePath );
+        REQUIRE( file.open( QIODevice::ReadOnly ) );
+        return QJsonDocument::fromJson( file.readAll() ).object();
+    };
+
+    THEN( "CI packages formats/nats_log.json beside the library" )
+    {
+        const auto packageFiles = readJson( ".github/plugin-ci.json" ).value( "package_files" );
+        REQUIRE( packageFiles.toArray().contains( QJsonValue( "formats/nats_log.json" ) ) );
+    }
+
+    THEN( "plugin.json names it, so LogSquirl 26.12 and later use it without an import" )
+    {
+        // The package is flat: the file sits beside plugin.json.
+        const auto formats = readJson( "plugin.json" ).value( "formats" ).toArray();
+        REQUIRE( formats == QJsonArray{ "nats_log.json" } );
     }
 }
