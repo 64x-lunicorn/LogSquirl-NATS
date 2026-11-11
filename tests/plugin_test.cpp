@@ -25,15 +25,92 @@
  * FakeHost, and clicks the menu entry the plugin registers.
  */
 
+// First: on Windows nats.h includes winsock2.h, which must come before any
+// windows.h.
+#include <nats.h>
+
 #include <catch2/catch.hpp>
 
 #include "fakehost.h"
+#include "natsserver.h"
+#include "sessiontest.h"
+
+#include <QApplication>
+#include <QDialog>
+#include <QDir>
+#include <QElapsedTimer>
+#include <QFileInfo>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
 
 using nats_test::FakeHost;
+using nats_test::NatsServer;
+using nats_test::Publisher;
+using nats_test::readLines;
+using nats_test::waitFor;
 
 extern "C" int logsquirl_plugin_init( const LogSquirlHostApi* api, void* handle );
 extern "C" void logsquirl_plugin_shutdown( void );
 extern "C" void logsquirl_plugin_configure( void* parent_widget );
+
+namespace {
+
+/// The plugin's dialog, if it is open: a top-level QDialog with a subject field.
+QDialog* openDialog()
+{
+    for ( auto* widget : QApplication::topLevelWidgets() ) {
+        auto* dialog = qobject_cast<QDialog*>( widget );
+        if ( dialog && dialog->isVisible() && dialog->findChild<QLineEdit*>( "subject" ) ) {
+            return dialog;
+        }
+    }
+    return nullptr;
+}
+
+QLineEdit* field( QDialog* dialog, const char* name )
+{
+    auto* edit = dialog ? dialog->findChild<QLineEdit*>( name ) : nullptr;
+    REQUIRE( edit );
+    return edit;
+}
+
+QPushButton* button( QDialog* dialog, const char* name )
+{
+    auto* pushButton = dialog ? dialog->findChild<QPushButton*>( name ) : nullptr;
+    REQUIRE( pushButton );
+    return pushButton;
+}
+
+/// Open the dialog from the menu, enter @p url and @p subject and click Start.
+void startFromDialog( FakeHost& host, const QString& url, const QString& subject )
+{
+    host.menuActions.first().trigger();
+    auto* dialog = openDialog();
+    field( dialog, "url" )->setText( url );
+    field( dialog, "subject" )->setText( subject );
+    button( dialog, "start" )->click();
+}
+
+/// Whether the last line of @p path is the stopped marker.
+bool endsStopped( const QString& path )
+{
+    const auto lines = readLines( path );
+    return !lines.isEmpty() && lines.last().endsWith( " $NATS-MONITOR - 7 stopped" );
+}
+
+/// Wait until the file at @p path is subscribed (its "connected" marker).
+bool waitSubscribed( const QString& path )
+{
+    return waitFor(
+        [ & ] {
+            const auto lines = readLines( path );
+            return !lines.isEmpty() && lines.first().contains( " connected to " );
+        },
+        10000 );
+}
+
+} // namespace
 
 SCENARIO( "the plugin adds NATS Monitor to the Plugins menu", "[plugin]" )
 {
@@ -58,11 +135,30 @@ SCENARIO( "the plugin adds NATS Monitor to the Plugins menu", "[plugin]" )
                 REQUIRE( host.menuActions.size() == 1 );
                 host.menuActions.first().trigger();
 
-                THEN( "nothing happens yet, and nothing fails" )
+                THEN( "the dialog opens with the default server and no subject, and nothing "
+                      "is captured yet" )
                 {
+                    auto* dialog = openDialog();
+                    REQUIRE( dialog );
+                    REQUIRE( dialog->isVisible() );
+                    REQUIRE( field( dialog, "url" )->text() == "nats://localhost:4222" );
+                    REQUIRE( field( dialog, "subject" )->text().isEmpty() );
                     REQUIRE( host.openedFiles.isEmpty() );
-                    REQUIRE( host.notifications.isEmpty() );
                     REQUIRE_FALSE( host.logs.join( '\n' ).contains( "failed" ) );
+                }
+
+                AND_WHEN( "Start is clicked without a subject" )
+                {
+                    button( openDialog(), "start" )->click();
+
+                    THEN( "nothing is opened, and the dialog says why" )
+                    {
+                        REQUIRE( host.openedFiles.isEmpty() );
+                        REQUIRE( openDialog()
+                                     ->findChild<QLabel*>( "status" )
+                                     ->text()
+                                     .contains( "subject" ) );
+                    }
                 }
             }
 
@@ -111,6 +207,140 @@ SCENARIO( "configure and shutdown are safe without a running session", "[plugin]
         {
             REQUIRE_NOTHROW( logsquirl_plugin_configure( nullptr ) );
             REQUIRE_NOTHROW( logsquirl_plugin_shutdown() );
+        }
+    }
+}
+
+SCENARIO( "capturing from the dialog: Start, Stop, Start", "[plugin][server]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "an initialised plugin and a server" )
+    {
+        NatsServer server;
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+
+        WHEN( "the user starts a capture from the dialog" )
+        {
+            startFromDialog( host, server.url(), "orders.>" );
+
+            THEN( "the session's file opens in a followed tab, and a published message is "
+                  "a line of it" )
+            {
+                REQUIRE( host.openedFiles.size() == 1 );
+                REQUIRE( host.openedFollow.first() );
+                const auto path = host.openedFiles.first();
+                REQUIRE( waitSubscribed( path ) );
+                {
+                    Publisher publisher( server.url() );
+                    publisher.publish( "orders.eu.created", "first" );
+                }
+                REQUIRE(
+                    waitFor( [ & ] { return readLines( path ).last().endsWith( " first" ); } ) );
+            }
+
+            AND_WHEN( "the user clicks Stop, then Start again" )
+            {
+                REQUIRE( host.openedFiles.size() == 1 );
+                const auto first = host.openedFiles.first();
+                REQUIRE( waitSubscribed( first ) );
+                button( openDialog(), "stop" )->click();
+
+                THEN( "the first file is kept and ends with the stopped marker, and the second "
+                      "capture opens a new tab" )
+                {
+                    REQUIRE( waitFor( [ & ] { return endsStopped( first ); } ) );
+                    button( openDialog(), "start" )->click();
+                    REQUIRE( host.openedFiles.size() == 2 );
+                    const auto second = host.openedFiles.last();
+                    REQUIRE( second != first );
+                    REQUIRE( waitSubscribed( second ) );
+                    {
+                        Publisher publisher( server.url() );
+                        publisher.publish( "orders.us.created", "second" );
+                    }
+                    REQUIRE( waitFor(
+                        [ & ] { return readLines( second ).last().endsWith( " second" ); } ) );
+                    REQUIRE( QFileInfo::exists( first ) );
+                    REQUIRE_FALSE( readLines( first ).join( '\n' ).contains( "second" ) );
+                }
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+}
+
+SCENARIO( "unloading the plugin or quitting LogSquirl while capturing stops cleanly",
+          "[plugin][server]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a capture running from the dialog" )
+    {
+        NatsServer server;
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        startFromDialog( host, server.url(), ">" );
+        REQUIRE( host.openedFiles.size() == 1 );
+        const auto path = host.openedFiles.first();
+        REQUIRE( waitSubscribed( path ) );
+        {
+            Publisher publisher( server.url() );
+            publisher.publish( "a", "captured" );
+        }
+        REQUIRE( waitFor( [ & ] { return readLines( path ).last().endsWith( " captured" ); } ) );
+
+        WHEN( "the plugin is disabled or updated, LogSquirl running on" )
+        {
+            QElapsedTimer timer;
+            timer.start();
+            logsquirl_plugin_shutdown();
+
+            THEN( "the session has stopped quickly, its file is flushed and kept for the tab" )
+            {
+                REQUIRE( timer.elapsed() < 5000 );
+                REQUIRE( endsStopped( path ) );
+                REQUIRE( readLines( path ).join( '\n' ).contains( " a - 8 captured" ) );
+            }
+        }
+
+        WHEN( "LogSquirl quits, which shuts the plugin down" )
+        {
+            QMetaObject::invokeMethod( QCoreApplication::instance(), "aboutToQuit" );
+            logsquirl_plugin_shutdown();
+
+            THEN( "the temporary directory is removed" )
+            {
+                REQUIRE_FALSE( QFileInfo::exists( QFileInfo( path ).path() ) );
+                REQUIRE( QDir( host.tempRoot() ).isEmpty() );
+            }
+        }
+    }
+}
+
+SCENARIO( "initialisation removes the temporary files of LogSquirl processes that ended",
+          "[plugin]" )
+{
+    GIVEN( "a temporary directory of a process that no longer runs" )
+    {
+        FakeHost host;
+        // Above any process ID (2^22 on Linux, 2^32 on Windows; tempdirs.cpp
+        // takes larger ones for ended processes), so no process has it.
+        const QString stale = host.tempRoot() + "/logsquirl-nats-9999999999-AbC123";
+        REQUIRE( QDir().mkpath( stale ) );
+
+        WHEN( "the plugin is initialised" )
+        {
+            REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+
+            THEN( "the directory is removed" )
+            {
+                REQUIRE_FALSE( QFileInfo::exists( stale ) );
+            }
+
+            logsquirl_plugin_shutdown();
         }
     }
 }
