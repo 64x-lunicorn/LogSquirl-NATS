@@ -1,0 +1,51 @@
+LogSquirl Plugin — Third-Party and Component Notices
+====================================================
+
+This plugin as a whole is licensed under the GNU General Public License,
+version 3 or (at your option) any later version.  The complete license
+text is in the LICENSE file.
+
+    SPDX-License-Identifier: GPL-3.0-or-later
+
+Exception: the vendored Plugin SDK header
+-----------------------------------------
+
+The file `include/logsquirl_plugin_api.h` is NOT covered by the GPL.  It
+is vendored from LogSquirl and released under the MIT license, so that
+plugins of any license — proprietary or open source — can be built
+against the LogSquirl Plugin SDK without taking on GPL obligations.
+
+    SPDX-License-Identifier: MIT
+    Copyright (C) 2026 LogSquirl Contributors
+
+The full MIT permission notice is reproduced in the header file itself.
+
+Linked into the plugin library
+------------------------------
+
+The plugin library contains, statically linked, the two libraries below.
+Both are licensed under the Apache License, Version 2.0, which is
+compatible with the GPL version 3.  Their source is downloaded by the
+build at the versions cmake/Dependencies.cmake pins.  A copy of the Apache
+License, Version 2.0 is at https://www.apache.org/licenses/LICENSE-2.0.
+
+### nats.c — the NATS C client
+
+    https://github.com/nats-io/nats.c
+    Copyright 2015-2026 The NATS Authors
+    SPDX-License-Identifier: Apache-2.0
+
+nats.c includes ed25519 code taken from TweetNaCl (public domain) and a
+memory-clearing function derived from libsodium's sodium_memzero()
+(ISC license, Copyright (c) 2013-2025 Frank Denis).
+
+### OpenSSL
+
+    https://www.openssl.org
+    Copyright (c) 1998-2026 The OpenSSL Project Authors
+    Copyright (c) 1995-1998 Eric A. Young, Tim J. Hudson
+    All rights reserved.
+    SPDX-License-Identifier: Apache-2.0
+
+This product includes software developed by the OpenSSL Project for use
+in the OpenSSL Toolkit (https://www.openssl.org/).
