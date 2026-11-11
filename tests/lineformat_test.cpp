@@ -116,6 +116,36 @@ SCENARIO( "a message becomes one line", "[lineformat]" )
         }
     }
 
+    GIVEN( "text that starts with [" )
+    {
+        const auto m = message( "t", "[1] up" );
+
+        THEN( "the [ is a \\x5B escape, so it is not taken for headers" )
+        {
+            REQUIRE( formatLine( m ) == R"(2026-11-11 10:00:00.123456Z t - 6 \x5B1] up)" );
+        }
+    }
+
+    GIVEN( "text that starts with hex:" )
+    {
+        const auto m = message( "t", "hex:00" );
+
+        THEN( "the h is a \\x68 escape, so it is not taken for a binary payload" )
+        {
+            REQUIRE( formatLine( m ) == R"(2026-11-11 10:00:00.123456Z t - 6 \x68ex:00)" );
+        }
+    }
+
+    GIVEN( "text with [ and hex: further on" )
+    {
+        const auto m = message( "t", "a [b] hex:" );
+
+        THEN( "it stays as it is" )
+        {
+            REQUIRE( formatLine( m ) == "2026-11-11 10:00:00.123456Z t - 10 a [b] hex:" );
+        }
+    }
+
     GIVEN( "an empty payload" )
     {
         const auto m = message( "ping", "" );
@@ -152,6 +182,17 @@ SCENARIO( "headers go in brackets before the payload", "[lineformat]" )
             REQUIRE( formatLine( m )
                      == R"(2026-11-11 10:00:00.123456Z h - 1 [A=1\;2; B=x\]y; C=back\\slash; )"
                         R"(D=l1\r\nl2] x)" );
+        }
+    }
+
+    GIVEN( "a header key with =" )
+    {
+        auto m = message( "h", "x" );
+        m.headers = { { "a=b", "c=d" } };
+
+        THEN( "the = in the key is escaped, so the first unescaped = ends the key" )
+        {
+            REQUIRE( formatLine( m ) == R"(2026-11-11 10:00:00.123456Z h - 1 [a\=b=c=d] x)" );
         }
     }
 

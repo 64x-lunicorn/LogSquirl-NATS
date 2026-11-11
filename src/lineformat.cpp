@@ -35,7 +35,10 @@ namespace nats_monitor {
 
 namespace {
 
-constexpr char kHexDigits[] = "0123456789abcdef";
+/// For binary payloads (`hex:`).
+constexpr char kLowerHexDigits[] = "0123456789abcdef";
+/// For `\xNN` escapes in text.
+constexpr char kUpperHexDigits[] = "0123456789ABCDEF";
 
 /// Append `yyyy-MM-dd HH:mm:ss.uuuuuuZ` for @p us microseconds since the epoch.
 void appendTimestamp( QByteArray& out, qint64 us )
@@ -60,10 +63,32 @@ void appendTimestamp( QByteArray& out, qint64 us )
     out.append( buffer, length );
 }
 
-/// Append @p text with `\`, CR and LF escaped, and the other C0 control
-/// characters but tab as `\xNN`.  With @p headerSyntax, also `;` and `]`.
-void appendEscaped( QByteArray& out, QByteArrayView text, bool headerSyntax )
+/// What is escaped beyond what every field escapes.
+enum class Field {
+    HeaderKey,   ///< `;`, `]` and `=`
+    HeaderValue, ///< `;` and `]`
+    Payload,     ///< a leading `[` or `hex:`
+};
+
+/// Append @p byte as `\xNN`.
+void appendHexEscape( QByteArray& out, unsigned char byte )
 {
+    out.append( "\\x" );
+    out.append( kUpperHexDigits[ byte >> 4 ] );
+    out.append( kUpperHexDigits[ byte & 0x0F ] );
+}
+
+/// Append @p text with `\`, CR and LF escaped, the other C0 control
+/// characters but tab as `\xNN`, and what @p field needs escaped.
+void appendEscaped( QByteArray& out, QByteArrayView text, Field field )
+{
+    // A payload must not read as a header block or a binary payload: its
+    // first byte becomes a \xNN escape.
+    if ( field == Field::Payload
+         && ( text.startsWith( '[' ) || text.startsWith( QByteArrayView( "hex:" ) ) ) ) {
+        appendHexEscape( out, static_cast<unsigned char>( text.front() ) );
+        text = text.sliced( 1 );
+    }
     for ( const char c : text ) {
         const auto byte = static_cast<unsigned char>( c );
         switch ( c ) {
@@ -81,7 +106,13 @@ void appendEscaped( QByteArray& out, QByteArrayView text, bool headerSyntax )
             continue;
         case ';':
         case ']':
-            if ( headerSyntax ) {
+            if ( field != Field::Payload ) {
+                out.append( '\\' );
+            }
+            out.append( c );
+            continue;
+        case '=':
+            if ( field == Field::HeaderKey ) {
                 out.append( '\\' );
             }
             out.append( c );
@@ -90,9 +121,7 @@ void appendEscaped( QByteArray& out, QByteArrayView text, bool headerSyntax )
             break;
         }
         if ( byte < 0x20 ) {
-            out.append( "\\x" );
-            out.append( "0123456789ABCDEF"[ byte >> 4 ] );
-            out.append( "0123456789ABCDEF"[ byte & 0x0F ] );
+            appendHexEscape( out, byte );
         }
         else {
             out.append( c );
@@ -107,46 +136,47 @@ void appendHex( QByteArray& out, QByteArrayView data, int maxBytes )
     const auto count = std::min<qsizetype>( data.size(), std::max( maxBytes, 0 ) );
     for ( qsizetype i = 0; i < count; ++i ) {
         const auto byte = static_cast<unsigned char>( data[ i ] );
-        out.append( kHexDigits[ byte >> 4 ] );
-        out.append( kHexDigits[ byte & 0x0F ] );
+        out.append( kLowerHexDigits[ byte >> 4 ] );
+        out.append( kLowerHexDigits[ byte & 0x0F ] );
     }
 }
 
-QByteArray format( qint64 receivedUs, QByteArrayView subject, QByteArrayView reply,
-                   const QList<std::pair<QByteArray, QByteArray>>& headers, QByteArrayView payload,
-                   const FormatOptions& options )
+} // namespace
+
+QByteArray formatLine( const Message& message, const FormatOptions& options )
 {
+    const auto& payload = message.payload;
     const bool text = payload.isValidUtf8();
     QByteArray line;
     line.reserve(
-        64 + subject.size() + reply.size()
+        64 + message.subject.size() + message.reply.size()
         + ( text ? payload.size() + payload.size() / 8
                  : 4 + 2 * std::min<qsizetype>( payload.size(), options.maxBinaryBytes ) ) );
 
-    appendTimestamp( line, receivedUs );
+    appendTimestamp( line, message.receivedUs );
     line.append( ' ' );
-    line.append( subject );
+    line.append( message.subject );
     line.append( ' ' );
-    if ( reply.isEmpty() ) {
+    if ( message.reply.isEmpty() ) {
         line.append( '-' );
     }
     else {
-        line.append( reply );
+        line.append( message.reply );
     }
     line.append( ' ' );
     line.append( QByteArray::number( payload.size() ) );
 
-    if ( !headers.isEmpty() ) {
+    if ( !message.headers.isEmpty() ) {
         line.append( " [" );
         bool first = true;
-        for ( const auto& [ key, value ] : headers ) {
+        for ( const auto& [ key, value ] : message.headers ) {
             if ( !first ) {
                 line.append( "; " );
             }
             first = false;
-            appendEscaped( line, key, true );
+            appendEscaped( line, key, Field::HeaderKey );
             line.append( '=' );
-            appendEscaped( line, value, true );
+            appendEscaped( line, value, Field::HeaderValue );
         }
         line.append( ']' );
     }
@@ -154,7 +184,7 @@ QByteArray format( qint64 receivedUs, QByteArrayView subject, QByteArrayView rep
     if ( !payload.isEmpty() ) {
         line.append( ' ' );
         if ( text ) {
-            appendEscaped( line, payload, false );
+            appendEscaped( line, payload, Field::Payload );
         }
         else {
             appendHex( line, payload, options.maxBinaryBytes );
@@ -163,17 +193,13 @@ QByteArray format( qint64 receivedUs, QByteArrayView subject, QByteArrayView rep
     return line;
 }
 
-} // namespace
-
-QByteArray formatLine( const Message& message, const FormatOptions& options )
-{
-    return format( message.receivedUs, message.subject, message.reply, message.headers,
-                   message.payload, options );
-}
-
 QByteArray formatMarker( qint64 receivedUs, const QByteArray& text )
 {
-    return format( receivedUs, kMarkerSubject, {}, {}, text, {} );
+    Message marker;
+    marker.receivedUs = receivedUs;
+    marker.subject = kMarkerSubject;
+    marker.payload = text;
+    return formatLine( marker );
 }
 
 qint64 nowUs()

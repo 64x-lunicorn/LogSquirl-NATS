@@ -56,21 +56,30 @@ temp file  logsquirl-nats-<pid>-XXXXXX/nats_<name>.log  → open_file(follow=1)
 
 ## Line format
 
-One message per line, fields separated by spaces; NATS subjects and reply
+One message per line, fields separated by one space; NATS subjects and reply
 subjects contain no spaces, so the fixed fields parse with a simple regex:
 
 ```
-<UTC timestamp>                 <subject>          <reply|->  <size> <body>
-2026-11-11 10:00:00.123456Z orders.eu.created _INBOX.ab12 57 {"id":1,"total":9.5}
-2026-11-11 10:00:00.124001Z sensors.t1        -           4  [Nats-Msg-Id=42; Trace=abc] 21.5
+<UTC timestamp>             <subject>         <reply|-> <size> [<headers>] <payload>
+2026-11-11 10:00:00.123456Z orders.eu.created _INBOX.ab12 20 {"id":1,"total":9.5}
+2026-11-11 10:00:00.124001Z sensors.t1 - 4 [Nats-Msg-Id=42; Trace=abc] 21.5
 ```
 
-- **Timestamp**: receive time (nats.c gives no publish time for core NATS;
-  JetStream replay uses the stream's stored timestamp instead).
-- **Headers** (optional): `[k=v; k=v]` before the payload, values escaped.
-- **Payload**: UTF-8 text as is, with `\n`, `\r`, `\\` escaped so one message
-  stays one line; non-UTF-8 / binary as `hex:` + hex (cut at a configurable
-  length, size field still the real size). JSON stays on one line as received.
+- **Timestamp**: receive time in UTC, with microseconds (nats.c gives no
+  publish time for core NATS; JetStream replay uses the stream's stored
+  timestamp instead).
+- **Size**: the payload's real size in bytes, also when it is cut.
+- **Headers** (optional): `[k=v; k=v]` before the payload, sorted by key (a
+  key with several values once per value). `;`, `]`, `\` and line breaks in
+  keys and values are escaped by a backslash, and `=` in keys too.
+- **Payload**: UTF-8 text as is, with `\n`, `\r`, `\\` escaped and the other
+  C0 control characters but tab as `\xNN`, so one message stays one line; a
+  leading `[` or `hex:` is escaped as well (`\x5B`, `\x68ex:`), so it is not
+  taken for headers or a binary payload. Non-UTF-8 / binary as `hex:` + hex,
+  cut at a length set in the dialog (default 256 bytes). JSON stays on one
+  line as received.
+- **Markers**: connection events with the subject `$NATS-MONITOR`, which no
+  client can publish to, in the same format.
 - **Log Format definition** `formats/nats_log.json` (lnav format, shipped via
   `package_files` like tcpdump's) gives the Table View columns *timestamp,
   subject, reply, size, body*, with subject as identifier.

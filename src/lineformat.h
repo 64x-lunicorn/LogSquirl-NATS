@@ -30,13 +30,16 @@
  *
  *   - Timestamp: receive time in UTC, with microseconds.
  *   - Size: the payload's real size in bytes, also when it is cut.
- *   - Headers, when there are any: `[k=v; k=v]`, with `;`, `]`, `\` and
- *     line breaks in keys and values escaped by a backslash.
+ *   - Headers, when there are any: `[k=v; k=v]`, in the order of
+ *     Message::headers, with `;`, `]`, `\` and line breaks in keys and
+ *     values escaped by a backslash, and `=` in keys too.
  *   - Payload, when there is one: valid UTF-8 as it is, with `\n`, `\r` and
  *     `\\` escaped, and the other C0 control characters but tab as `\xNN`
  *     (a NUL would make LogSquirl take the file for UTF-16), so that one
- *     message is always one line.  Anything else is `hex:` and lower-case
- *     hex digits, cut at FormatOptions::maxBinaryBytes.
+ *     message is always one line.  A leading `[` or `hex:` is escaped too
+ *     (`\x5B`, `\x68ex:`), so that text never reads as headers or as a
+ *     binary payload.  Anything else is `hex:` and lower-case hex digits,
+ *     cut at FormatOptions::maxBinaryBytes.
  *
  * Marker lines (connection events, and later drops) use the subject
  * `$NATS-MONITOR`, which no client can publish to, in the same format.
