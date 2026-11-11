@@ -64,6 +64,12 @@ set(_ossl_options
 )
 
 if(WIN32)
+    # Only the x64 MSVC build is set up (VC-WIN64A); the plugin ships no
+    # other Windows build.
+    if(NOT MSVC OR NOT CMAKE_C_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
+        message(FATAL_ERROR "OpenSSL is set up for Windows x64 with MSVC only, not "
+                            "${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_ARCHITECTURE_ID}")
+    endif()
     # no-asm: no NASM needed.
     list(APPEND _ossl_options VC-WIN64A no-asm)
     # Where the default trust store would be; the plugin never relies on it.
@@ -123,11 +129,14 @@ if(NOT _ossl_up_to_date)
     file(REMOVE_RECURSE "${_ossl_build}" "${_ossl_prefix}")
     file(MAKE_DIRECTORY "${_ossl_build}")
 
+    # The same C compiler as the rest of the build, for Configure only (it
+    # writes it into the Makefile); MSVC's is cl from the environment.
+    set(_ossl_env "")
     if(NOT WIN32)
-        # The same C compiler as the rest of the build.
-        set(ENV{CC} "${CMAKE_C_COMPILER}")
+        set(_ossl_env "${CMAKE_COMMAND}" -E env "CC=${CMAKE_C_COMPILER}")
     endif()
-    _openssl_step(configure "${OPENSSL_BUILD_PERL}" "${openssl_source_SOURCE_DIR}/Configure" ${_ossl_options})
+    _openssl_step(configure ${_ossl_env}
+        "${OPENSSL_BUILD_PERL}" "${openssl_source_SOURCE_DIR}/Configure" ${_ossl_options})
     _openssl_step(build ${_ossl_make} build_libs)
     _openssl_step(install ${_ossl_make} install_dev)
 
