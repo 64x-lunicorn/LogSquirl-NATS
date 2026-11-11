@@ -39,6 +39,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QTemporaryDir>
 #include <QRegularExpression>
 
 #include <memory>
@@ -598,6 +599,81 @@ SCENARIO( "under a flood every drop is counted in exactly one marker", "[server]
                 REQUIRE( session.receivedCount()
                          == static_cast<quint64>( t.written + t.queueFull ) );
                 REQUIRE( lines.last().endsWith( " stopped" ) );
+            }
+        }
+    }
+}
+
+SCENARIO( "when the server goes away during a flood, the drops until then are still marked",
+          "[server][session][drops]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session with small pending limits, flooded, whose server then goes away" )
+    {
+        auto server = std::make_unique<NatsServer>();
+        const int port = server->port();
+        const QString url = server->url();
+        auto config = configFor( url, "flood" );
+        config.pendingMessagesLimit = 16;
+        config.queueLimit = 1;
+        NatsSession session( config );
+        int finished = 0;
+        QObject::connect( &session, &NatsSession::finished, [ &finished ] { ++finished; } );
+        startAndWaitConnected( session, url, "flood" );
+        {
+            Publisher publisher( url );
+            flood( publisher, "flood", 50000 );
+        }
+        server.reset(); // while the session is still taking the flood
+
+        // Messages the server had not sent yet are gone with it: what is
+        // checked is that each message nats.c took is written or counted.
+        const auto check = [ & ]( const QString& lastLine ) {
+            const auto lines = readLines( session.filePath() );
+            const auto t = tally( lines, "flood" );
+            REQUIRE( t.unknown == 0 );
+            REQUIRE( t.slowConsumer > 0 );
+            REQUIRE( session.droppedCount() == static_cast<quint64>( t.dropped() ) );
+            REQUIRE( session.receivedCount() == static_cast<quint64>( t.written + t.queueFull ) );
+            REQUIRE( lines.last().endsWith( lastLine ) );
+        };
+
+        WHEN( "the session is stopped while disconnected" )
+        {
+            REQUIRE( waitFor(
+                [ & ] { return anyMatches( readLines( session.filePath() ), " disconnected$" ); },
+                10000 ) );
+            QElapsedTimer timer;
+            timer.start();
+            session.stop();
+
+            THEN( "it stops at once, and every drop is in a marker before the stopped marker" )
+            {
+                REQUIRE( timer.elapsed() < 3000 );
+                check( " stopped" );
+            }
+        }
+
+        WHEN( "the connection is then closed for good (a server on the port refuses it)" )
+        {
+            QTemporaryDir dir;
+            REQUIRE( dir.isValid() );
+            const QString configFile = dir.filePath( "auth.conf" );
+            {
+                QFile file( configFile );
+                REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::Text ) );
+                file.write( "authorization { token: \"not-the-session's\" }\n" );
+            }
+            NatsServerOptions options;
+            options.port = port;
+            options.configFile = configFile;
+            NatsServer refusing( options );
+
+            THEN( "the session ends, and every drop is in a marker before the closed marker" )
+            {
+                REQUIRE( waitFor( [ & ] { return finished == 1; }, 30000 ) );
+                check( " connection closed" );
             }
         }
     }

@@ -184,6 +184,8 @@ struct Shared {
     std::atomic<quint64> dropped{ 0 };   ///< Drops counted: marked, or to be marked.
     std::atomic<int> limitMessages{ 0 }; ///< The subscription's pending limits, read back.
     std::atomic<int> limitBytes{ 0 };
+    /// The subscription, for the disconnected callback; set once subscribed.
+    std::atomic<natsSubscription*> subscription{ nullptr };
     /// nats.c's dropped count of the subscription that the markers cover.
     int64_t slowConsumerMarked = 0;
 
@@ -250,7 +252,14 @@ struct Shared {
     {
         int64_t total = 0;
         if ( natsSubscription_GetDropped( subscription, &total ) != NATS_OK ) {
-            return; // closed: the writer has read the last count
+            // Closed: nats.c no longer says.  It closes the subscription
+            // when the connection closes, before it makes the disconnected
+            // and closed callbacks, and discards what is still pending
+            // (natsSub_close, dispatch.c).  So the count is read while it
+            // still can be: before each message it delivers, at each slow
+            // consumer error, when the connection breaks (still open then,
+            // for the reconnect), and on stop.
+            return;
         }
         {
             std::lock_guard<std::mutex> lock( mutex );
@@ -305,6 +314,14 @@ struct Shared {
             if ( self->stopping ) {
                 return;
             }
+        }
+        // Nothing arrives until reconnected, so nothing is dropped: the
+        // count now is the count of the gap, readable still should the
+        // connection now be closed for good.  The writer destroys the
+        // subscription only after the closed callback, which comes after
+        // this one.
+        if ( auto* subscription = self->subscription.load() ) {
+            self->markSlowConsumer( subscription );
         }
         self->pushMarker( QStringLiteral( "disconnected" ), Event::Status );
     }
@@ -520,6 +537,7 @@ struct NatsSession::Worker {
         status = natsConnection_Subscribe( subscription, *connection, subject.constData(),
                                            &Shared::onMessage, shared );
         if ( status == NATS_OK ) {
+            shared->subscription = *subscription;
             status = natsSubscription_SetOnCompleteCB( *subscription,
                                                        &Shared::onSubscriptionComplete, shared );
         }
