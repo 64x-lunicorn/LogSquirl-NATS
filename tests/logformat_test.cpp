@@ -489,3 +489,25 @@ SCENARIO( "the Log Format reads no line of another log", "[logformat]" )
         }
     }
 }
+
+SCENARIO( "the package carries the Log Format", "[logformat]" )
+{
+    const auto readJson = []( const QString& relativePath ) {
+        QFile file( QStringLiteral( LOGSQUIRL_NATS_SOURCE_DIR "/" ) + relativePath );
+        REQUIRE( file.open( QIODevice::ReadOnly ) );
+        return QJsonDocument::fromJson( file.readAll() ).object();
+    };
+
+    THEN( "CI packages formats/nats_log.json beside the library" )
+    {
+        const auto packageFiles = readJson( ".github/plugin-ci.json" ).value( "package_files" );
+        REQUIRE( packageFiles.toArray().contains( QJsonValue( "formats/nats_log.json" ) ) );
+    }
+
+    THEN( "plugin.json names it, so LogSquirl 26.12 and later use it without an import" )
+    {
+        // The package is flat: the file sits beside plugin.json.
+        const auto formats = readJson( "plugin.json" ).value( "formats" ).toArray();
+        REQUIRE( formats == QJsonArray{ "nats_log.json" } );
+    }
+}

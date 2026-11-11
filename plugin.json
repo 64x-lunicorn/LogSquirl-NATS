@@ -8,5 +8,6 @@
     "description": "Stream NATS messages into a live, searchable LogSquirl tab",
     "author": "LogSquirl Contributors",
     "license": "GPL-3.0-or-later",
-    "icon": "icon.png"
+    "icon": "icon.png",
+    "formats": [ "nats_log.json" ]
 }
