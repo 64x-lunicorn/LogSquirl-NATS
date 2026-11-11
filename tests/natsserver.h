@@ -55,6 +55,10 @@ void markSkipped();
 /// How many tests were skipped in this run.
 int skippedTests();
 
+/// Whether the tests run in CI (the environment variable CI is set and not
+/// 0/false/no/off): there a missing server fails the test, never skips it.
+bool runningInCi();
+
 struct NatsServerOptions {
     bool jetStream = false; ///< Start with JetStream (-js), its store in a temporary directory.
     QString configFile;     ///< A configuration file (-c); empty: none.
@@ -95,10 +99,14 @@ private:
 } // namespace nats_test
 
 /// In a test that needs a nats-server: if there is none, report the test
-/// as skipped, with the reason, and end it here.
+/// as skipped, with the reason, and end it here.  In CI, fail it instead.
 #define SKIP_WITHOUT_NATS_SERVER()                                                                 \
     do {                                                                                           \
         if ( !nats_test::NatsServer::available() ) {                                               \
+            if ( nats_test::runningInCi() ) {                                                      \
+                FAIL( "needs a nats-server, and CI is set: "                                       \
+                      << nats_test::NatsServer::unavailableReason().toStdString() );               \
+            }                                                                                      \
             nats_test::markSkipped();                                                              \
             WARN( "SKIPPED: needs a nats-server: "                                                 \
                   << nats_test::NatsServer::unavailableReason().toStdString() );                   \

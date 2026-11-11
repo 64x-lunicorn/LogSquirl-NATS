@@ -129,6 +129,11 @@ _nats_server_provide()
 
 if(LOGSQUIRL_NATS_TEST_SERVER)
     message(STATUS "nats-server for the tests: ${LOGSQUIRL_NATS_TEST_SERVER}")
+elseif(NOT "$ENV{CI}" STREQUAL "" AND NOT "$ENV{CI}" MATCHES "^(0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff])$")
+    # In CI a skip would pass the build with the server tests (the round
+    # trip, TLS) never run.
+    message(FATAL_ERROR "No nats-server for the tests, and CI is set: "
+                        "${LOGSQUIRL_NATS_TEST_SERVER_UNAVAILABLE}")
 else()
     message(STATUS "No nats-server for the tests: ${LOGSQUIRL_NATS_TEST_SERVER_UNAVAILABLE}")
 endif()

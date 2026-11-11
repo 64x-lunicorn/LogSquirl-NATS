@@ -87,6 +87,12 @@ int skippedTests()
     return g_skipped.load();
 }
 
+bool runningInCi()
+{
+    const QString ci = qEnvironmentVariable( "CI" ).trimmed().toLower();
+    return !ci.isEmpty() && ci != "0" && ci != "false" && ci != "no" && ci != "off";
+}
+
 struct NatsServer::Private {
     QProcess process;
     QTemporaryDir dir; ///< Ports file and JetStream store.
