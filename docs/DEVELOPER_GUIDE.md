@@ -725,7 +725,10 @@ options of one with JetStream.
   a write failure reported once (a `QFile` of the test's that fails,
   through the sink's `FileFactory`), and the writer thread fed from two
   threads. Only the slow-consumer accounting, which comes from nats.c,
-  needs the server tests.
+  needs the server tests; at the session seam, `natssession_test.cpp` checks
+  only that the session announces the files rotated into and reports a
+  failed rotation, and that a session started again goes on in its last
+  file.
 - **Sessions on an in-memory host** (`sessions_test.cpp`, `[sessions]`):
   `Sessions` is given a `nats_test::MemoryHost`
   ([`tests/memoryhost.h`](../tests/memoryhost.h)) instead of the plugin's
@@ -738,8 +741,8 @@ options of one with JetStream.
 - **The replay plan** (`replayplan_test.cpp`): `planReplay()` is a pure
   function from a replay config and a stream's state to a plan, and
   `ReplayStep` one from each message's pending count and stored time to
-  write or skip and caught up; the tests are tables, with no server and no
-  clock.
+  write or skip and caught up, and `describeReplay()` the name of a
+  replay; the tests are tables, with no server and no clock.
 - **The Log Format** (`logformat_test.cpp`) is tested at the same seam: it
   reads the formatter's lines with the regex and timestamp format of
   [`formats/nats_log.json`](../formats/nats_log.json), as LogSquirl does,

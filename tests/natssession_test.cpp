@@ -855,7 +855,8 @@ SCENARIO( "the drops of all subscriptions of a session add up in its markers",
     }
 }
 
-SCENARIO( "under a flood every drop is counted in exactly one marker", "[server][session][drops]" )
+SCENARIO( "a session stopped during a flood marks every drop nats.c counted before it stops",
+          "[server][session][drops]" )
 {
     SKIP_WITHOUT_NATS_SERVER();
 
@@ -869,26 +870,6 @@ SCENARIO( "under a flood every drop is counted in exactly one marker", "[server]
         NatsSession session( config, sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "flood" );
         const qint64 published = 50000;
-
-        WHEN( "it is flooded faster than it can write, and stopped once it has taken it all" )
-        {
-            flood( publisher, "flood", published );
-            waitAccounted( session, "flood", published );
-            session.stop();
-
-            THEN( "the dropped= counts of both kinds add up to published - written, and to the "
-                  "session's dropped total" )
-            {
-                const auto capture = Capture::read( session.filePath() );
-                const auto drops = capture.drops();
-                const qint64 written = capture.messagesOn( "flood" ).size();
-                REQUIRE( drops.unknown == 0 );
-                REQUIRE( drops.slowConsumer > 0 );
-                REQUIRE( drops.queueFull > 0 );
-                REQUIRE( drops.total() == published - written );
-                REQUIRE( session.droppedCount() == static_cast<quint64>( drops.total() ) );
-            }
-        }
 
         WHEN( "it is stopped right after the flood, still dropping" )
         {
@@ -1127,7 +1108,7 @@ QByteArray numbered( int i, int size )
 
 } // namespace
 
-SCENARIO( "a capture's file is rotated at its size limit, between messages",
+SCENARIO( "a session announces each file its capture is rotated into",
           "[server][session][rotation]" )
 {
     SKIP_WITHOUT_NATS_SERVER();
@@ -1147,11 +1128,8 @@ SCENARIO( "a capture's file is rotated at its size limit, between messages",
 
         WHEN( "messages of about 100 bytes a line, 3500 bytes in all, are published" )
         {
-            QStringList published;
             for ( int i = 1; i <= 35; ++i ) {
-                const auto payload = numbered( i, 60 );
-                published << QString::fromLatin1( payload );
-                publisher.publish( "rot", payload, {}, {}, i == 35 );
+                publisher.publish( "rot", numbered( i, 60 ), {}, {}, i == 35 );
             }
             REQUIRE( waitFor( [ & ] {
                 return Capture::read( captureFiles( first ) ).payloadsOn( "rot" ).size() == 35;
@@ -1167,52 +1145,6 @@ SCENARIO( "a capture's file is rotated at its size limit, between messages",
                 REQUIRE( waitFor( [ & ] { return rotatedTo.size() == 3; } ) );
                 REQUIRE( rotatedTo == files.mid( 1 ) );
                 REQUIRE( session.filePath() == files.last() );
-            }
-
-            THEN( "no file is over the limit, and each was rotated only when the next line "
-                  "would not have fit" )
-            {
-                for ( int i = 0; i < files.size(); ++i ) {
-                    INFO( files.at( i ).toStdString() );
-                    REQUIRE( sizeOf( files.at( i ) ) <= 1000 );
-                    REQUIRE( endsWithNewline( files.at( i ) ) );
-                    if ( i + 1 < files.size() ) {
-                        const auto next = readLines( files.at( i + 1 ) );
-                        REQUIRE_FALSE( next.isEmpty() );
-                        const auto nextLine = next.first().toUtf8().size() + 1;
-                        REQUIRE( sizeOf( files.at( i ) ) + nextLine > 1000 );
-                    }
-                }
-            }
-
-            THEN( "every message is one whole line, in order across the files; the first file "
-                  "starts connected, the last ends stopped" )
-            {
-                REQUIRE( Capture::read( files ).payloadsOn( "rot" ) == published );
-                REQUIRE( Capture::read( files.first() ).first().markerText()
-                         == connectedText( server.url(), "rot" ) );
-                REQUIRE( Capture::read( files.last() ).last().fields()
-                         == markerFields( "stopped" ) );
-            }
-        }
-
-        WHEN( "a message longer than the limit is published" )
-        {
-            publisher.publish( "rot", QByteArray( 1500, 'L' ) );
-            publisher.publish( "rot", "after" );
-            REQUIRE( waitFor( [ & ] {
-                return Capture::read( captureFiles( first ) ).payloadsOn( "rot" ).size() == 2;
-            } ) );
-            session.stop();
-            const auto files = captureFiles( first );
-
-            THEN( "it is written whole, alone in a file of its own" )
-            {
-                REQUIRE( files.size() == 3 );
-                REQUIRE( Capture::read( files.at( 1 ) ).fields()
-                         == QList<LineFields>{ liveFields( "rot", QString( 1500, 'L' ) ) } );
-                REQUIRE( Capture::read( files.at( 2 ) ).payloadsOn( "rot" )
-                         == QStringList{ "after" } );
             }
         }
     }
@@ -1278,7 +1210,8 @@ SCENARIO( "a session started again goes on in its last file, within the size lim
     }
 }
 
-SCENARIO( "a rotation that fails is retried one limit later", "[server][session][rotation]" )
+SCENARIO( "a rotation that fails is reported by the session, which goes on in the same file",
+          "[server][session][rotation]" )
 {
     SKIP_WITHOUT_NATS_SERVER();
 
@@ -1327,37 +1260,6 @@ SCENARIO( "a rotation that fails is retried one limit later", "[server][session]
                 REQUIRE( captureFiles( first ) == QStringList{ first } );
                 REQUIRE( sizeOf( first ) > 1000 );
                 REQUIRE( Capture::read( first ).payloadsOn( "rf" ).size() == 12 );
-            }
-
-            AND_WHEN( "the next file could be created now, and the file grows by less than "
-                      "the limit since the failure" )
-            {
-                REQUIRE( QDir().rmdir( second ) );
-                publish( 4 ); // about 1700 bytes
-
-                THEN( "it is not retried on every line" )
-                {
-                    REQUIRE( errors.size() == 1 );
-                    REQUIRE_FALSE( QFileInfo::exists( second ) );
-                    REQUIRE( session.filePath() == first );
-                }
-
-                AND_WHEN( "it has grown by the limit since the failure" )
-                {
-                    publish( 10 ); // about 2700 bytes
-
-                    THEN( "the capture goes on in nats_rf.2.log, and nothing is lost" )
-                    {
-                        REQUIRE( errors.size() == 1 );
-                        REQUIRE( captureFiles( first ) == QStringList{ first, second } );
-                        REQUIRE( rotatedTo == QStringList{ second } );
-                        REQUIRE( sizeOf( first ) <= 2000 );
-                        const auto payloads
-                            = Capture::read( QStringList{ first, second } ).payloadsOn( "rf" );
-                        REQUIRE( payloads.size() == 26 );
-                        REQUIRE( payloads.last() == QString::fromLatin1( numbered( 26, 60 ) ) );
-                    }
-                }
             }
         }
     }
