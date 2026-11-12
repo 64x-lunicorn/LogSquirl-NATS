@@ -33,6 +33,7 @@
 #include <catch2/catch.hpp>
 
 #include "capture.h"
+#include "lineformat.h"
 #include "natsserver.h"
 #include "natssession.h"
 #include "profiles.h"
@@ -51,6 +52,7 @@ using nats_monitor::Subscription;
 using nats_monitor::Transition;
 using nats_test::Capture;
 using nats_test::captureFiles;
+using nats_test::CaptureLine;
 using nats_test::ConfiguredServer;
 using nats_test::endsWithNewline;
 using nats_test::LineFields;
@@ -631,7 +633,11 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
                 REQUIRE( why.startsWith( "connection to " + url + " failed: " ) );
                 REQUIRE( errors.isEmpty() ); // the transition says it, once
                 REQUIRE_FALSE( session.isRunning() );
-                REQUIRE( Capture::read( session.filePath() ).last().markerText() == why );
+                // As written: a system's error text may hold what the file
+                // escapes (as on Windows).
+                const auto written = CaptureLine::read(
+                    QString::fromUtf8( nats_monitor::formatMarker( 0, why.toUtf8() ) ) );
+                REQUIRE( Capture::read( session.filePath() ).last().fields() == written.fields() );
             }
         }
     }
