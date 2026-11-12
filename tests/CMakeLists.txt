@@ -30,6 +30,9 @@ find_package(Qt6 REQUIRED COMPONENTS Network)
 add_executable(logsquirl_nats_tests
     tests_main.cpp
     natsserver.cpp
+    logformat.cpp
+    capture.cpp
+    capture_test.cpp
     plugininfo_test.cpp
     plugin_test.cpp
     library_test.cpp

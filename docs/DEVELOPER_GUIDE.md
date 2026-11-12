@@ -549,19 +549,38 @@ SCENARIO( "…", "[server]" )
 ```
 
 `NatsServerOptions::port` starts it on a given port instead, e.g. to bring
-a stopped server back for a reconnect test.
+a stopped server back for a reconnect test. A server that needs setting up
+(authorization, TLS, operator mode, the users of the permissions test) is a
+`nats_test::ConfiguredServer`: a `NatsServer` started with a configuration
+text, which it writes to its own temporary directory
+(`NatsServerOptions::configText`); `nats_test::withJetStream()` gives the
+options of one with JetStream.
 
 ### The test seams
 
 - **A capture session against a real `nats-server`** (`natssession_test.cpp`,
   `replay_test.cpp` with JetStream,
   and through the tab and the dialog in `plugin_test.cpp`, driven against
-  `FakeHost`): start a `NatsSession`,
-  publish with `nats_test::Publisher`, and assert on the lines of
-  `session.filePath()` (`nats_test::readLines`, `nats_test::waitFor` from
-  [`tests/sessiontest.h`](../tests/sessiontest.h)). A session is subscribed
-  once its first line, the `connected to …` marker, is in the file; from
-  then on every message published is captured.
+  `FakeHost`): start a `NatsSession` with a configuration from
+  `nats_test::sessionConfig( url, subjects )` or
+  `nats_test::replayConfig( url, stream )`, publish with
+  `nats_test::Publisher`, and assert on the lines of `session.filePath()`
+  (`nats_test::waitFor` from [`tests/sessiontest.h`](../tests/sessiontest.h)).
+  A session is subscribed once its first line, the `connected to …`
+  marker, is in the file; from then on every message published is captured.
+- **The line reader** ([`tests/capture.h`](../tests/capture.h)) is the one
+  place the tests know the line format. `nats_test::Capture::read( path )`
+  reads a capture's file (or its rotated files) with the Log Format
+  definition the Table View uses, loaded by
+  [`tests/logformat.h`](../tests/logformat.h): each line is a message line,
+  a marker line or unreadable, with its timestamp, subject, reply, stream
+  sequence, size, header block and payload as fields. A test compares
+  fields, never substrings of a line: `capture.last().fields() ==
+  markerFields( "stopped" )`, `capture.messageFields()` against
+  `liveFields( subject, payload )` or a `LineFields` written out,
+  `capture.sequences()`, `capture.hasMarker( text )`, and `capture.drops()`
+  for the counts of the `dropped=` markers. Its own tests
+  (`capture_test.cpp`, `[capture]`) read the formatter's lines.
 - **The formatter** (`lineformat_test.cpp`): `formatLine()` is a pure
   function from a message to one line.
 - **The Log Format** (`logformat_test.cpp`) is tested at the same seam: it
@@ -578,8 +597,8 @@ own queue (beyond `SessionConfig::queueLimit`) are each counted in one
 marker line, `$NATS-MONITOR - <n> dropped=<count> (slow consumer)` or
 `(queue full)`, and in `NatsSession::droppedCount()`. The stress tests
 (`[drops]`, part of the server tests) flood a session with small limits
-and check that the `dropped=` counts add up to the messages published but
-not written.
+and check that the `dropped=` counts (`Capture::drops()`) add up to the
+messages published but not written.
 
 Whether v1 keeps up with its target, **50k msgs/s at 200 B** without drops,
 is a benchmark, not run by ctest or CI (its tag is hidden). Run it by hand

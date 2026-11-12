@@ -32,6 +32,7 @@
 
 #include <catch2/catch.hpp>
 
+#include "capture.h"
 #include "natsserver.h"
 #include "natssession.h"
 #include "sessiontest.h"
@@ -39,8 +40,6 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
-#include <QRegularExpression>
-#include <QTemporaryDir>
 
 #include <atomic>
 #include <memory>
@@ -48,66 +47,39 @@
 using nats_monitor::NatsSession;
 using nats_monitor::SessionConfig;
 using nats_monitor::Subscription;
+using nats_test::Capture;
+using nats_test::ConfiguredServer;
+using nats_test::LineFields;
+using nats_test::liveFields;
+using nats_test::markerFields;
 using nats_test::NatsServer;
 using nats_test::NatsServerOptions;
 using nats_test::Publisher;
 using nats_test::readLines;
+using nats_test::sessionConfig;
 using nats_test::sessionTempRoot;
 using nats_test::settle;
 using nats_test::waitFor;
 
 namespace {
 
-SessionConfig configFor( const QString& url, const QString& subject )
+/// The text of the marker a session writes once it is subscribed to
+/// @p subjects (as describeSubscriptions() names them) on @p url.
+QString connectedText( const QString& url, const QString& subjects )
 {
-    SessionConfig config;
-    config.url = url;
-    config.subscriptions = { { subject, {} } };
-    return config;
-}
-
-SessionConfig configWith( const QString& url, const QList<Subscription>& subscriptions )
-{
-    SessionConfig config;
-    config.url = url;
-    config.subscriptions = subscriptions;
-    return config;
-}
-
-/// The marker line a session writes once it is subscribed.
-QString connectedMarker( const QString& url, const QString& subject )
-{
-    return QStringLiteral( " \\$NATS-MONITOR - \\d+" )
-           + QRegularExpression::escape(
-               QStringLiteral( " connected to %1, subscribed to %2" ).arg( url, subject ) )
-           + "$";
-}
-
-/// Whether some line of @p lines matches @p pattern.
-bool anyMatches( const QStringList& lines, const QString& pattern )
-{
-    const QRegularExpression re( pattern );
-    for ( const auto& line : lines ) {
-        if ( re.match( line ).hasMatch() ) {
-            return true;
-        }
-    }
-    return false;
+    return QStringLiteral( "connected to %1, subscribed to %2" ).arg( url, subjects );
 }
 
 /// Start @p session and wait until it is subscribed.
-void startAndWaitConnected( NatsSession& session, const QString& url, const QString& subject )
+void startAndWaitConnected( NatsSession& session, const QString& url, const QString& subjects )
 {
     REQUIRE( session.start() );
     REQUIRE( waitFor(
         [ & ] {
-            return anyMatches( readLines( session.filePath() ), connectedMarker( url, subject ) );
+            return Capture::read( session.filePath() ).hasMarker( connectedText( url, subjects ) );
         },
         10000 ) );
 }
-
-const QString kTimestamp
-    = QStringLiteral( "^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d{6}Z " );
 
 } // namespace
 
@@ -118,7 +90,8 @@ SCENARIO( "a published message shows up as a line in the session's file", "[serv
     GIVEN( "a session subscribed to a subject with a wildcard" )
     {
         NatsServer server;
-        NatsSession session( configFor( server.url(), "orders.*.created" ), sessionTempRoot() );
+        NatsSession session( sessionConfig( server.url(), { "orders.*.created" } ),
+                             sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "orders.*.created" );
 
         THEN( "the file is in a logsquirl-nats temporary directory" )
@@ -137,13 +110,13 @@ SCENARIO( "a published message shows up as a line in the session's file", "[serv
 
             THEN( "it is a line of the file within a second" )
             {
-                const QString expected
-                    = kTimestamp
-                      + QRegularExpression::escape(
-                          R"(orders.eu.created _INBOX.ab12 20 [Trace=abc] {"id":1,"total":9.5})" )
-                      + "$";
+                const LineFields expected{ "orders.eu.created", "_INBOX.ab12", 0, 20, "Trace=abc",
+                                           R"({"id":1,"total":9.5})" };
                 REQUIRE( waitFor(
-                    [ & ] { return anyMatches( readLines( session.filePath() ), expected ); },
+                    [ & ] {
+                        return Capture::read( session.filePath() ).messageFields().contains(
+                            expected );
+                    },
                     1000 ) );
                 REQUIRE( timer.elapsed() < 1000 );
             }
@@ -159,12 +132,15 @@ SCENARIO( "a published message shows up as a line in the session's file", "[serv
             {
                 REQUIRE( waitFor(
                     [ & ] {
-                        return anyMatches( readLines( session.filePath() ),
-                                           kTimestamp + "orders\\.us\\.created - 3 yes$" );
+                        return Capture::read( session.filePath() )
+                            .messageFields()
+                            .contains( liveFields( "orders.us.created", "yes" ) );
                     },
                     1000 ) );
-                REQUIRE_FALSE(
-                    anyMatches( readLines( session.filePath() ), "orders\\.eu\\.cancelled" ) );
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.messageFields()
+                         == QList<LineFields>{ liveFields( "orders.us.created", "yes" ) } );
+                REQUIRE( capture.unreadable().isEmpty() );
             }
         }
 
@@ -179,9 +155,10 @@ SCENARIO( "a published message shows up as a line in the session's file", "[serv
             {
                 REQUIRE( waitFor( [ & ] { return readLines( session.filePath() ).size() == 1001; },
                                   5000 ) );
-                const auto lines = readLines( session.filePath() );
+                const auto capture = Capture::read( session.filePath() );
                 for ( int i = 0; i < 1000; ++i ) {
-                    REQUIRE( lines.at( i + 1 ).endsWith( QStringLiteral( " %1" ).arg( i ) ) );
+                    REQUIRE( capture.at( i + 1 ).fields()
+                             == liveFields( "orders.eu.created", QString::number( i ) ) );
                 }
             }
         }
@@ -196,9 +173,8 @@ SCENARIO( "a session subscribed to several subjects writes them all into one fil
     GIVEN( "a session subscribed to orders.eu.* and billing.>" )
     {
         NatsServer server;
-        NatsSession session(
-            configWith( server.url(), { { "orders.eu.*", {} }, { "billing.>", {} } } ),
-            sessionTempRoot() );
+        NatsSession session( sessionConfig( server.url(), { "orders.eu.*", "billing.>" } ),
+                             sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "orders.eu.*, billing.>" );
 
         WHEN( "messages are published on each subject and on another" )
@@ -212,14 +188,15 @@ SCENARIO( "a session subscribed to several subjects writes them all into one fil
             THEN( "the messages of both subjects are lines of the one file, in order" )
             {
                 REQUIRE( waitFor( [ & ] {
-                    return anyMatches( readLines( session.filePath() ),
-                                       " orders\\.eu\\.paid - 5 three$" );
+                    return Capture::read( session.filePath() )
+                        .messageFields()
+                        .contains( liveFields( "orders.eu.paid", "three" ) );
                 } ) );
-                const auto lines = readLines( session.filePath() );
-                REQUIRE( lines.size() == 4 );
-                REQUIRE( lines.at( 1 ).endsWith( " orders.eu.created - 3 one" ) );
-                REQUIRE( lines.at( 2 ).endsWith( " billing.invoice.sent - 3 two" ) );
-                REQUIRE( lines.at( 3 ).endsWith( " orders.eu.paid - 5 three" ) );
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.size() == 4 );
+                REQUIRE( capture.at( 1 ).fields() == liveFields( "orders.eu.created", "one" ) );
+                REQUIRE( capture.at( 2 ).fields() == liveFields( "billing.invoice.sent", "two" ) );
+                REQUIRE( capture.at( 3 ).fields() == liveFields( "orders.eu.paid", "three" ) );
             }
         }
     }
@@ -233,9 +210,8 @@ SCENARIO( "overlapping subjects write a message once for each subscription",
     GIVEN( "a session subscribed to orders.> and orders.eu.*" )
     {
         NatsServer server;
-        NatsSession session(
-            configWith( server.url(), { { "orders.>", {} }, { "orders.eu.*", {} } } ),
-            sessionTempRoot() );
+        NatsSession session( sessionConfig( server.url(), { "orders.>", "orders.eu.*" } ),
+                             sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "orders.>, orders.eu.*" );
 
         WHEN( "a message matching both and one matching only orders.> are published" )
@@ -249,15 +225,16 @@ SCENARIO( "overlapping subjects write a message once for each subscription",
             THEN( "the first is written twice, as the server delivered it, the second once" )
             {
                 REQUIRE( waitFor( [ & ] {
-                    return readLines( session.filePath() )
-                               .filter( " orders.eu.last - 4 last" )
-                               .size()
+                    return Capture::read( session.filePath() )
+                               .messageFields()
+                               .count( liveFields( "orders.eu.last", "last" ) )
                            == 2;
                 } ) );
-                const auto lines = readLines( session.filePath() );
-                REQUIRE( lines.filter( " orders.eu.created - 4 both" ).size() == 2 );
-                REQUIRE( lines.filter( " orders.us.created - 4 wide" ).size() == 1 );
-                REQUIRE( lines.size() == 1 + 2 + 1 + 2 );
+                const auto capture = Capture::read( session.filePath() );
+                const auto messages = capture.messageFields();
+                REQUIRE( messages.count( liveFields( "orders.eu.created", "both" ) ) == 2 );
+                REQUIRE( messages.count( liveFields( "orders.us.created", "wide" ) ) == 1 );
+                REQUIRE( capture.size() == 1 + 2 + 1 + 2 );
             }
         }
 
@@ -267,9 +244,9 @@ SCENARIO( "overlapping subjects write a message once for each subscription",
 
             THEN( "it ends with one stopped marker" )
             {
-                const auto lines = readLines( session.filePath() );
-                REQUIRE( lines.filter( "$NATS-MONITOR - 7 stopped" ).size() == 1 );
-                REQUIRE( lines.last().endsWith( " $NATS-MONITOR - 7 stopped" ) );
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.fields().count( markerFields( "stopped" ) ) == 1 );
+                REQUIRE( capture.last().fields() == markerFields( "stopped" ) );
             }
         }
     }
@@ -330,8 +307,9 @@ SCENARIO( "a subject may be subscribed in a queue group", "[server][session][sub
     GIVEN( "a session subscribed to jobs.> in the queue group workers, and another member" )
     {
         NatsServer server;
-        NatsSession session( configWith( server.url(), { { "jobs.>", "workers" } } ),
-                             sessionTempRoot() );
+        auto config = sessionConfig( server.url() );
+        config.subscriptions = { { "jobs.>", "workers" } };
+        NatsSession session( config, sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "jobs.> (queue workers)" );
         QueueMember other( server.url(), "jobs.>", "workers" );
 
@@ -345,7 +323,7 @@ SCENARIO( "a subject may be subscribed in a queue group", "[server][session][sub
             THEN( "the group shares them: each goes to the session or to the other member" )
             {
                 const auto written = [ & ] {
-                    return readLines( session.filePath() ).filter( " jobs.run - " ).size();
+                    return Capture::read( session.filePath() ).messagesOn( "jobs.run" ).size();
                 };
                 REQUIRE( waitFor( [ & ] { return written() + other.received() == 200; } ) );
                 REQUIRE( written() > 0 );
@@ -357,7 +335,7 @@ SCENARIO( "a subject may be subscribed in a queue group", "[server][session][sub
     GIVEN( "a session subscribed to jobs.> without a queue group, and a member of a group" )
     {
         NatsServer server;
-        NatsSession session( configFor( server.url(), "jobs.>" ), sessionTempRoot() );
+        NatsSession session( sessionConfig( server.url(), { "jobs.>" } ), sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "jobs.>" );
         QueueMember other( server.url(), "jobs.>", "workers" );
 
@@ -371,7 +349,7 @@ SCENARIO( "a subject may be subscribed in a queue group", "[server][session][sub
             THEN( "the session takes nothing away from the group: both get every one" )
             {
                 REQUIRE( waitFor( [ & ] {
-                    return readLines( session.filePath() ).filter( " jobs.run - " ).size() == 20
+                    return Capture::read( session.filePath() ).messagesOn( "jobs.run" ).size() == 20
                            && other.received() == 20;
                 } ) );
             }
@@ -384,7 +362,7 @@ SCENARIO( "a session without a subject does not start", "[session][subjects]" )
     GIVEN( "a session with no subscription, or only a blank subject" )
     {
         const auto config = GENERATE( SessionConfig{},
-                                      configFor( "nats://127.0.0.1:1", QStringLiteral( "  " ) ) );
+                                      sessionConfig( "nats://127.0.0.1:1", { "  " } ) );
         NatsSession session( config, sessionTempRoot() );
         QStringList errors;
         QObject::connect( &session, &NatsSession::errorOccurred,
@@ -414,8 +392,9 @@ SCENARIO( "a session's file is named after its subjects, wildcards spelled out",
 
         WHEN( "a session is started" )
         {
-            NatsSession session( configWith( "nats://127.0.0.1:1", subscriptions ),
-                                 sessionTempRoot() );
+            auto config = sessionConfig( "nats://127.0.0.1:1" );
+            config.subscriptions = subscriptions;
+            NatsSession session( config, sessionTempRoot() );
             REQUIRE( session.start() );
             const auto name = QFileInfo( session.filePath() ).fileName();
             session.stop();
@@ -436,12 +415,14 @@ SCENARIO( "stopping a session closes the connection and keeps the file", "[serve
     {
         NatsServer server;
         Publisher publisher( server.url() );
-        auto session
-            = std::make_unique<NatsSession>( configFor( server.url(), ">" ), sessionTempRoot() );
+        auto session = std::make_unique<NatsSession>( sessionConfig( server.url(), { ">" } ),
+                                                      sessionTempRoot() );
         startAndWaitConnected( *session, server.url(), ">" );
         const QString path = session->filePath();
         publisher.publish( "a", "before" );
-        REQUIRE( waitFor( [ & ] { return anyMatches( readLines( path ), " a - 6 before$" ); } ) );
+        REQUIRE( waitFor( [ & ] {
+            return Capture::read( path ).messageFields().contains( liveFields( "a", "before" ) );
+        } ) );
 
         WHEN( "it is stopped" )
         {
@@ -450,7 +431,7 @@ SCENARIO( "stopping a session closes the connection and keeps the file", "[serve
             THEN( "it no longer runs, and the file ends with a stopped marker" )
             {
                 REQUIRE_FALSE( session->isRunning() );
-                REQUIRE( readLines( path ).last().endsWith( " $NATS-MONITOR - 7 stopped" ) );
+                REQUIRE( Capture::read( path ).last().fields() == markerFields( "stopped" ) );
             }
 
             AND_WHEN( "a message is published afterwards" )
@@ -460,7 +441,8 @@ SCENARIO( "stopping a session closes the connection and keeps the file", "[serve
 
                 THEN( "it is not captured" )
                 {
-                    REQUIRE_FALSE( anyMatches( readLines( path ), "after" ) );
+                    REQUIRE( Capture::read( path ).messageFields()
+                             == QList<LineFields>{ liveFields( "a", "before" ) } );
                 }
             }
 
@@ -471,7 +453,8 @@ SCENARIO( "stopping a session closes the connection and keeps the file", "[serve
 
                 THEN( "the file is still there, for the tab that shows it" )
                 {
-                    REQUIRE( anyMatches( readLines( path ), " a - 6 before$" ) );
+                    REQUIRE( Capture::read( path ).messageFields().contains(
+                        liveFields( "a", "before" ) ) );
                     QDir( QFileInfo( path ).path() ).removeRecursively();
                 }
             }
@@ -502,12 +485,14 @@ SCENARIO( "a session can be started and stopped repeatedly", "[server][session]"
         {
             QStringList paths;
             for ( int round = 0; round < 3; ++round ) {
-                NatsSession session( configFor( server.url(), "round" ), sessionTempRoot() );
+                NatsSession session( sessionConfig( server.url(), { "round" } ),
+                                     sessionTempRoot() );
                 startAndWaitConnected( session, server.url(), "round" );
                 publisher.publish( "round", QByteArray::number( round ) );
                 REQUIRE( waitFor( [ & ] {
-                    return anyMatches( readLines( session.filePath() ),
-                                       QStringLiteral( " round - 1 %1$" ).arg( round ) );
+                    return Capture::read( session.filePath() )
+                        .messageFields()
+                        .contains( liveFields( "round", QString::number( round ) ) );
                 } ) );
                 session.stop();
                 REQUIRE_FALSE( session.isRunning() );
@@ -529,7 +514,7 @@ SCENARIO( "destroying a running session stops it cleanly", "[server][session]" )
         QString path;
         QElapsedTimer timer;
         {
-            NatsSession session( configFor( server.url(), "stream" ), sessionTempRoot() );
+            NatsSession session( sessionConfig( server.url(), { "stream" } ), sessionTempRoot() );
             startAndWaitConnected( session, server.url(), "stream" );
             session.preserveFile();
             path = session.filePath();
@@ -542,10 +527,11 @@ SCENARIO( "destroying a running session stops it cleanly", "[server][session]" )
         THEN( "it ends quickly, and the file ends with the stopped marker after whole lines" )
         {
             REQUIRE( timer.elapsed() < 5000 );
-            const auto lines = readLines( path );
-            REQUIRE( lines.last().endsWith( " $NATS-MONITOR - 7 stopped" ) );
-            for ( const auto& line : lines ) {
-                REQUIRE( QRegularExpression( kTimestamp ).match( line ).hasMatch() );
+            const auto capture = Capture::read( path );
+            REQUIRE( capture.last().fields() == markerFields( "stopped" ) );
+            REQUIRE( capture.unreadable().isEmpty() );
+            for ( const auto& line : capture.messages() ) {
+                REQUIRE( line.fields() == liveFields( "stream", QString( 100, 'x' ) ) );
             }
             QDir( QFileInfo( path ).path() ).removeRecursively();
         }
@@ -564,7 +550,7 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
             port = server.port();
         }
         const QString url = QStringLiteral( "nats://127.0.0.1:%1" ).arg( port );
-        NatsSession session( configFor( url, "x" ), sessionTempRoot() );
+        NatsSession session( sessionConfig( url, { "x" } ), sessionTempRoot() );
         QStringList errors;
         QObject::connect( &session, &NatsSession::errorOccurred,
                           [ &errors ]( const QString& message ) { errors << message; } );
@@ -581,9 +567,8 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
                 REQUIRE( errors.size() == 1 );
                 REQUIRE( errors.first().contains( url ) );
                 REQUIRE_FALSE( session.isRunning() );
-                REQUIRE( anyMatches( readLines( session.filePath() ),
-                                     kTimestamp + "\\$NATS-MONITOR - \\d+ connection to "
-                                         + QRegularExpression::escape( url ) + " failed: " ) );
+                REQUIRE( Capture::read( session.filePath() )
+                             .hasMarkerStartingWith( "connection to " + url + " failed: " ) );
             }
         }
     }
@@ -593,7 +578,7 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
         auto server = std::make_unique<NatsServer>();
         const int port = server->port();
         const QString url = server->url();
-        NatsSession session( configFor( url, "back" ), sessionTempRoot() );
+        NatsSession session( sessionConfig( url, { "back" } ), sessionTempRoot() );
         QStringList status;
         QObject::connect( &session, &NatsSession::statusChanged,
                           [ &status ]( const QString& text ) { status << text; } );
@@ -610,8 +595,9 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
             {
                 REQUIRE( waitFor(
                     [ & ] {
-                        return anyMatches( readLines( session.filePath() ),
-                                           kTimestamp + "\\$NATS-MONITOR - 12 disconnected$" );
+                        return Capture::read( session.filePath() )
+                            .fields()
+                            .contains( markerFields( "disconnected" ) );
                     },
                     10000 ) );
                 REQUIRE( session.isRunning() );
@@ -627,15 +613,16 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
                 {
                     REQUIRE( waitFor(
                         [ & ] {
-                            return anyMatches( readLines( session.filePath() ),
-                                               kTimestamp + "\\$NATS-MONITOR - \\d+ reconnected to "
-                                                   + QRegularExpression::escape( url ) + "$" );
+                            return Capture::read( session.filePath() )
+                                .hasMarker( "reconnected to " + url );
                         },
                         15000 ) );
                     Publisher publisher( url );
                     publisher.publish( "back", "again" );
                     REQUIRE( waitFor( [ & ] {
-                        return anyMatches( readLines( session.filePath() ), " back - 5 again$" );
+                        return Capture::read( session.filePath() )
+                            .messageFields()
+                            .contains( liveFields( "back", "again" ) );
                     } ) );
                     // The dialog shows them too.
                     REQUIRE( waitFor( [ & ] { return status.size() >= 3; } ) );
@@ -653,45 +640,6 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
 // ── Dropped messages ─────────────────────────────────────────────────────
 
 namespace {
-
-/// What a capture's file says about its messages and drops.
-struct Tally {
-    qint64 written = 0;      ///< Message lines on the subject.
-    qint64 slowConsumer = 0; ///< The sum of dropped= of the slow-consumer markers.
-    qint64 queueFull = 0;    ///< The sum of dropped= of the queue-full markers.
-    int markers = 0;         ///< dropped= markers.
-    int unknown = 0;         ///< Lines that say dropped= in another shape.
-
-    qint64 dropped() const
-    {
-        return slowConsumer + queueFull;
-    }
-};
-
-Tally tally( const QStringList& lines, const QString& subject )
-{
-    static const QRegularExpression marker(
-        kTimestamp + "\\$NATS-MONITOR - \\d+ dropped=(\\d+) \\((slow consumer|queue full)\\)$" );
-    const QRegularExpression message( kTimestamp + QRegularExpression::escape( subject ) + " " );
-    Tally t;
-    for ( const auto& line : lines ) {
-        if ( message.match( line ).hasMatch() ) {
-            ++t.written;
-            continue;
-        }
-        const auto m = marker.match( line );
-        if ( m.hasMatch() ) {
-            REQUIRE( m.captured( 1 ).toLongLong() > 0 );
-            ++t.markers;
-            ( m.captured( 2 ) == "slow consumer" ? t.slowConsumer : t.queueFull )
-                += m.captured( 1 ).toLongLong();
-        }
-        else if ( line.contains( "dropped=" ) ) {
-            ++t.unknown;
-        }
-    }
-    return t;
-}
 
 /// Publish @p count messages of 200 bytes on @p subject as fast as the
 /// connection takes them, then wait until the server has them all.
@@ -713,8 +661,9 @@ void waitAccounted( const NatsSession& session, const char* subject, qint64 publ
 {
     REQUIRE( waitFor(
         [ & ] {
-            const auto written = tally( readLines( session.filePath() ), subject ).written;
-            return written + static_cast<qint64>( session.droppedCount() ) >= published;
+            return Capture::read( session.filePath() ).messagesOn( subject ).size()
+                       + static_cast<qint64>( session.droppedCount() )
+                   >= published;
         },
         30000 ) );
 }
@@ -731,7 +680,7 @@ SCENARIO( "the subscription gets the session's pending limits", "[server][sessio
 
         WHEN( "a session is started with the default configuration" )
         {
-            NatsSession session( configFor( server.url(), "limits" ), sessionTempRoot() );
+            NatsSession session( sessionConfig( server.url(), { "limits" } ), sessionTempRoot() );
             startAndWaitConnected( session, server.url(), "limits" );
 
             THEN( "the subscription holds up to 1,000,000 messages and 512 MiB" )
@@ -743,7 +692,7 @@ SCENARIO( "the subscription gets the session's pending limits", "[server][sessio
 
         WHEN( "a session is started with limits of its own" )
         {
-            auto config = configFor( server.url(), "limits" );
+            auto config = sessionConfig( server.url(), { "limits" } );
             config.pendingLimits = { 1234, 5678 * 1024 };
             NatsSession session( config, sessionTempRoot() );
             startAndWaitConnected( session, server.url(), "limits" );
@@ -766,7 +715,7 @@ SCENARIO( "a slow consumer's drops are counted and marked where they happen",
     {
         NatsServer server;
         Publisher publisher( server.url() );
-        auto config = configFor( server.url(), "flood" );
+        auto config = sessionConfig( server.url(), { "flood" } );
         config.pendingLimits.messages = 1;
         NatsSession session( config, sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "flood" );
@@ -784,13 +733,15 @@ SCENARIO( "a slow consumer's drops are counted and marked where they happen",
 
             THEN( "the slow-consumer markers add up to the messages not written" )
             {
-                const auto t = tally( readLines( session.filePath() ), "flood" );
-                REQUIRE( t.unknown == 0 );
-                REQUIRE( t.slowConsumer > 0 );
-                REQUIRE( t.queueFull == 0 );
-                REQUIRE( t.dropped() == published - t.written );
-                REQUIRE( session.droppedCount() == static_cast<quint64>( t.dropped() ) );
-                REQUIRE( readLines( session.filePath() ).last().endsWith( " stopped" ) );
+                const auto capture = Capture::read( session.filePath() );
+                const auto drops = capture.drops();
+                const qint64 written = capture.messagesOn( "flood" ).size();
+                REQUIRE( drops.unknown == 0 );
+                REQUIRE( drops.slowConsumer > 0 );
+                REQUIRE( drops.queueFull == 0 );
+                REQUIRE( drops.total() == published - written );
+                REQUIRE( session.droppedCount() == static_cast<quint64>( drops.total() ) );
+                REQUIRE( capture.last().fields() == markerFields( "stopped" ) );
             }
         }
     }
@@ -805,7 +756,7 @@ SCENARIO( "the drops of all subscriptions of a session add up in its markers",
     {
         NatsServer server;
         Publisher publisher( server.url() );
-        auto config = configWith( server.url(), { { "a.flood", {} }, { "b.flood", {} } } );
+        auto config = sessionConfig( server.url(), { "a.flood", "b.flood" } );
         config.pendingLimits.messages = 1;
         NatsSession session( config, sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "a.flood, b.flood" );
@@ -821,8 +772,9 @@ SCENARIO( "the drops of all subscriptions of a session add up in its markers",
             }
             REQUIRE( waitFor(
                 [ & ] {
-                    const auto lines = readLines( session.filePath() );
-                    return tally( lines, "a.flood" ).written + tally( lines, "b.flood" ).written
+                    const auto capture = Capture::read( session.filePath() );
+                    return capture.messagesOn( "a.flood" ).size()
+                               + capture.messagesOn( "b.flood" ).size()
                                + static_cast<qint64>( session.droppedCount() )
                            >= published;
                 },
@@ -832,14 +784,15 @@ SCENARIO( "the drops of all subscriptions of a session add up in its markers",
             THEN( "the session's slow-consumer markers add up to the messages of both not "
                   "written" )
             {
-                const auto lines = readLines( session.filePath() );
-                const auto a = tally( lines, "a.flood" );
-                const auto b = tally( lines, "b.flood" );
-                REQUIRE( a.unknown == 0 );
-                REQUIRE( a.slowConsumer > 0 );
-                REQUIRE( a.dropped() == published - a.written - b.written );
-                REQUIRE( session.droppedCount() == static_cast<quint64>( a.dropped() ) );
-                REQUIRE( lines.last().endsWith( " stopped" ) );
+                const auto capture = Capture::read( session.filePath() );
+                const auto drops = capture.drops();
+                const qint64 a = capture.messagesOn( "a.flood" ).size();
+                const qint64 b = capture.messagesOn( "b.flood" ).size();
+                REQUIRE( drops.unknown == 0 );
+                REQUIRE( drops.slowConsumer > 0 );
+                REQUIRE( drops.total() == published - a - b );
+                REQUIRE( session.droppedCount() == static_cast<quint64>( drops.total() ) );
+                REQUIRE( capture.last().fields() == markerFields( "stopped" ) );
             }
         }
     }
@@ -853,7 +806,7 @@ SCENARIO( "under a flood every drop is counted in exactly one marker", "[server]
     {
         NatsServer server;
         Publisher publisher( server.url() );
-        auto config = configFor( server.url(), "flood" );
+        auto config = sessionConfig( server.url(), { "flood" } );
         config.pendingLimits.messages = 16;
         config.queueLimit = 1;
         NatsSession session( config, sessionTempRoot() );
@@ -869,12 +822,14 @@ SCENARIO( "under a flood every drop is counted in exactly one marker", "[server]
             THEN( "the dropped= counts of both kinds add up to published - written, and to the "
                   "session's dropped total" )
             {
-                const auto t = tally( readLines( session.filePath() ), "flood" );
-                REQUIRE( t.unknown == 0 );
-                REQUIRE( t.slowConsumer > 0 );
-                REQUIRE( t.queueFull > 0 );
-                REQUIRE( t.dropped() == published - t.written );
-                REQUIRE( session.droppedCount() == static_cast<quint64>( t.dropped() ) );
+                const auto capture = Capture::read( session.filePath() );
+                const auto drops = capture.drops();
+                const qint64 written = capture.messagesOn( "flood" ).size();
+                REQUIRE( drops.unknown == 0 );
+                REQUIRE( drops.slowConsumer > 0 );
+                REQUIRE( drops.queueFull > 0 );
+                REQUIRE( drops.total() == published - written );
+                REQUIRE( session.droppedCount() == static_cast<quint64>( drops.total() ) );
             }
         }
 
@@ -886,16 +841,17 @@ SCENARIO( "under a flood every drop is counted in exactly one marker", "[server]
             THEN( "every message published is written or counted in a marker before the stopped "
                   "marker, none lost" )
             {
-                const auto lines = readLines( session.filePath() );
-                const auto t = tally( lines, "flood" );
-                REQUIRE( t.unknown == 0 );
-                REQUIRE( t.dropped() > 0 );
-                REQUIRE( t.dropped() == published - t.written );
-                REQUIRE( session.droppedCount() == static_cast<quint64>( t.dropped() ) );
+                const auto capture = Capture::read( session.filePath() );
+                const auto drops = capture.drops();
+                const qint64 written = capture.messagesOn( "flood" ).size();
+                REQUIRE( drops.unknown == 0 );
+                REQUIRE( drops.total() > 0 );
+                REQUIRE( drops.total() == published - written );
+                REQUIRE( session.droppedCount() == static_cast<quint64>( drops.total() ) );
                 // What reached the session was written or dropped from its queue.
                 REQUIRE( session.receivedCount()
-                         == static_cast<quint64>( t.written + t.queueFull ) );
-                REQUIRE( lines.last().endsWith( " stopped" ) );
+                         == static_cast<quint64>( written + drops.queueFull ) );
+                REQUIRE( capture.last().fields() == markerFields( "stopped" ) );
             }
         }
     }
@@ -911,7 +867,7 @@ SCENARIO( "when the server goes away during a flood, the drops until then are st
         auto server = std::make_unique<NatsServer>();
         const int port = server->port();
         const QString url = server->url();
-        auto config = configFor( url, "flood" );
+        auto config = sessionConfig( url, { "flood" } );
         config.pendingLimits.messages = 16;
         config.queueLimit = 1;
         NatsSession session( config, sessionTempRoot() );
@@ -926,20 +882,22 @@ SCENARIO( "when the server goes away during a flood, the drops until then are st
 
         // Messages the server had not sent yet are gone with it: what is
         // checked is that each message nats.c took is written or counted.
-        const auto check = [ & ]( const QString& lastLine ) {
-            const auto lines = readLines( session.filePath() );
-            const auto t = tally( lines, "flood" );
-            REQUIRE( t.unknown == 0 );
-            REQUIRE( t.slowConsumer > 0 );
-            REQUIRE( session.droppedCount() == static_cast<quint64>( t.dropped() ) );
-            REQUIRE( session.receivedCount() == static_cast<quint64>( t.written + t.queueFull ) );
-            REQUIRE( lines.last().endsWith( lastLine ) );
+        const auto check = [ & ]( const QString& lastMarker ) {
+            const auto capture = Capture::read( session.filePath() );
+            const auto drops = capture.drops();
+            const qint64 written = capture.messagesOn( "flood" ).size();
+            REQUIRE( drops.unknown == 0 );
+            REQUIRE( drops.slowConsumer > 0 );
+            REQUIRE( session.droppedCount() == static_cast<quint64>( drops.total() ) );
+            REQUIRE( session.receivedCount()
+                     == static_cast<quint64>( written + drops.queueFull ) );
+            REQUIRE( capture.last().fields() == markerFields( lastMarker ) );
         };
 
         WHEN( "the session is stopped while disconnected" )
         {
             REQUIRE( waitFor(
-                [ & ] { return anyMatches( readLines( session.filePath() ), " disconnected$" ); },
+                [ & ] { return Capture::read( session.filePath() ).hasMarker( "disconnected" ); },
                 10000 ) );
             QElapsedTimer timer;
             timer.start();
@@ -948,29 +906,21 @@ SCENARIO( "when the server goes away during a flood, the drops until then are st
             THEN( "it stops at once, and every drop is in a marker before the stopped marker" )
             {
                 REQUIRE( timer.elapsed() < 3000 );
-                check( " stopped" );
+                check( "stopped" );
             }
         }
 
         WHEN( "the connection is then closed for good (a server on the port refuses it)" )
         {
-            QTemporaryDir dir;
-            REQUIRE( dir.isValid() );
-            const QString configFile = dir.filePath( "auth.conf" );
-            {
-                QFile file( configFile );
-                REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::Text ) );
-                file.write( "authorization { token: \"not-the-session's\" }\n" );
-            }
             NatsServerOptions options;
             options.port = port;
-            options.configFile = configFile;
-            NatsServer refusing( options );
+            ConfiguredServer refusing( "authorization { token: \"not-the-session's\" }\n",
+                                       options );
 
             THEN( "the session ends, and every drop is in a marker before the closed marker" )
             {
                 REQUIRE( waitFor( [ & ] { return finished == 1; }, 30000 ) );
-                check( " connection closed" );
+                check( "connection closed" );
             }
         }
     }
@@ -991,7 +941,7 @@ SCENARIO( "a session sustains 50k msgs/s at 200 B without drops", "[.benchmark]"
     {
         NatsServer server;
         Publisher publisher( server.url() );
-        NatsSession session( configFor( server.url(), "bench" ), sessionTempRoot() );
+        NatsSession session( sessionConfig( server.url(), { "bench" } ), sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "bench" );
 
         WHEN( "50k msgs/s of 200 B are published for 10 seconds" )
@@ -1018,15 +968,17 @@ SCENARIO( "a session sustains 50k msgs/s at 200 B without drops", "[.benchmark]"
 
             THEN( "every message is written, nothing is dropped, and no dropped= marker" )
             {
-                const auto t = tally( readLines( session.filePath() ), "bench" );
+                const auto capture = Capture::read( session.filePath() );
+                const auto drops = capture.drops();
+                const qint64 written = capture.messagesOn( "bench" ).size();
                 WARN( "published " << sent << " messages of " << kPayload << " B in "
                                    << publishSeconds << " s (" << qRound( sent / publishSeconds )
                                    << " msgs/s); received in " << takenSeconds << " s; written "
-                                   << t.written << ", dropped " << session.droppedCount() );
-                REQUIRE( t.markers == 0 );
-                REQUIRE( t.unknown == 0 );
+                                   << written << ", dropped " << session.droppedCount() );
+                REQUIRE( drops.markers == 0 );
+                REQUIRE( drops.unknown == 0 );
                 REQUIRE( session.droppedCount() == 0 );
-                REQUIRE( t.written == sent );
+                REQUIRE( written == sent );
             }
         }
     }
@@ -1041,7 +993,7 @@ SCENARIO( "when the session's own queue is full, its drops are counted and marke
     {
         NatsServer server;
         Publisher publisher( server.url() );
-        auto config = configFor( server.url(), "flood" );
+        auto config = sessionConfig( server.url(), { "flood" } );
         config.queueLimit = 1;
         NatsSession session( config, sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "flood" );
@@ -1060,19 +1012,21 @@ SCENARIO( "when the session's own queue is full, its drops are counted and marke
             THEN( "the queue-full markers add up to the messages not written, each before the "
                   "next message written" )
             {
-                const auto lines = readLines( session.filePath() );
-                const auto t = tally( lines, "flood" );
-                REQUIRE( t.unknown == 0 );
-                REQUIRE( t.queueFull > 0 );
-                REQUIRE( t.slowConsumer == 0 );
-                REQUIRE( t.dropped() == published - t.written );
-                REQUIRE( session.droppedCount() == static_cast<quint64>( t.dropped() ) );
+                const auto capture = Capture::read( session.filePath() );
+                const auto drops = capture.drops();
+                const qint64 written = capture.messagesOn( "flood" ).size();
+                REQUIRE( drops.unknown == 0 );
+                REQUIRE( drops.queueFull > 0 );
+                REQUIRE( drops.slowConsumer == 0 );
+                REQUIRE( drops.total() == published - written );
+                REQUIRE( session.droppedCount() == static_cast<quint64>( drops.total() ) );
                 REQUIRE( session.receivedCount() == static_cast<quint64>( published ) );
-                for ( int i = 0; i + 1 < lines.size(); ++i ) {
-                    if ( lines.at( i ).contains( "(queue full)" ) ) {
-                        INFO( lines.at( i + 1 ).toStdString() );
-                        REQUIRE( ( lines.at( i + 1 ).contains( " flood - 200 " )
-                                   || lines.at( i + 1 ).endsWith( " stopped" ) ) );
+                const auto flooded = liveFields( "flood", QString( 200, 'x' ) );
+                for ( int i = 0; i + 1 < capture.size(); ++i ) {
+                    if ( capture.at( i ).markerText().endsWith( " (queue full)" ) ) {
+                        const auto next = capture.at( i + 1 ).fields();
+                        INFO( capture.at( i + 1 ).text().toStdString() );
+                        REQUIRE( ( next == flooded || next == markerFields( "stopped" ) ) );
                     }
                 }
             }
@@ -1089,7 +1043,7 @@ SCENARIO( "without drops no dropped marker is written, and the session counts wh
     {
         NatsServer server;
         Publisher publisher( server.url() );
-        NatsSession session( configFor( server.url(), "calm" ), sessionTempRoot() );
+        NatsSession session( sessionConfig( server.url(), { "calm" } ), sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "calm" );
 
         WHEN( "a burst it can keep up with is published, and the session stopped" )
@@ -1103,9 +1057,11 @@ SCENARIO( "without drops no dropped marker is written, and the session counts wh
 
             THEN( "every message is a line, no line says dropped=, and the counts say so" )
             {
-                const auto lines = readLines( session.filePath() );
-                REQUIRE( lines.size() == 1002 ); // connected, 1000 messages, stopped
-                REQUIRE_FALSE( anyMatches( lines, "dropped=" ) );
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.size() == 1002 ); // connected, 1000 messages, stopped
+                REQUIRE( capture.messagesOn( "calm" ).size() == 1000 );
+                REQUIRE( capture.drops().markers == 0 );
+                REQUIRE( capture.drops().unknown == 0 );
                 REQUIRE( session.receivedCount() == 1000 );
                 REQUIRE( session.droppedCount() == 0 );
             }
@@ -1153,23 +1109,6 @@ bool endsWithNewline( const QString& path )
     return content.isEmpty() || content.endsWith( '\n' );
 }
 
-/// The payloads of the lines on @p subject in @p files, in order.
-QStringList payloadsOn( const QStringList& files, const QString& subject )
-{
-    const QRegularExpression re( kTimestamp + QRegularExpression::escape( subject )
-                                 + " - \\d+ (.*)$" );
-    QStringList payloads;
-    for ( const auto& file : files ) {
-        for ( const auto& line : readLines( file ) ) {
-            const auto match = re.match( line );
-            if ( match.hasMatch() ) {
-                payloads << match.captured( 1 );
-            }
-        }
-    }
-    return payloads;
-}
-
 /// "m0001", "m0002", …, padded with x to @p size bytes.
 QByteArray numbered( int i, int size )
 {
@@ -1190,7 +1129,7 @@ SCENARIO( "a capture's file is rotated at its size limit, between messages",
     {
         NatsServer server;
         Publisher publisher( server.url() );
-        auto config = configFor( server.url(), "rot" );
+        auto config = sessionConfig( server.url(), { "rot" } );
         config.maxFileBytes = 1000;
         NatsSession session( config, sessionTempRoot() );
         QStringList rotatedTo;
@@ -1207,8 +1146,9 @@ SCENARIO( "a capture's file is rotated at its size limit, between messages",
                 published << QString::fromLatin1( payload );
                 publisher.publish( "rot", payload, {}, {}, i == 35 );
             }
-            REQUIRE( waitFor(
-                [ & ] { return payloadsOn( captureFiles( first ), "rot" ).size() == 35; } ) );
+            REQUIRE( waitFor( [ & ] {
+                return Capture::read( captureFiles( first ) ).payloadsOn( "rot" ).size() == 35;
+            } ) );
             session.stop();
             const auto files = captureFiles( first );
 
@@ -1241,11 +1181,11 @@ SCENARIO( "a capture's file is rotated at its size limit, between messages",
             THEN( "every message is one whole line, in order across the files; the first file "
                   "starts connected, the last ends stopped" )
             {
-                REQUIRE( payloadsOn( files, "rot" ) == published );
-                REQUIRE( anyMatches( readLines( files.first() ).mid( 0, 1 ),
-                                     connectedMarker( server.url(), "rot" ) ) );
-                REQUIRE(
-                    readLines( files.last() ).last().endsWith( " $NATS-MONITOR - 7 stopped" ) );
+                REQUIRE( Capture::read( files ).payloadsOn( "rot" ) == published );
+                REQUIRE( Capture::read( files.first() ).first().markerText()
+                         == connectedText( server.url(), "rot" ) );
+                REQUIRE( Capture::read( files.last() ).last().fields()
+                         == markerFields( "stopped" ) );
             }
         }
 
@@ -1253,18 +1193,19 @@ SCENARIO( "a capture's file is rotated at its size limit, between messages",
         {
             publisher.publish( "rot", QByteArray( 1500, 'L' ) );
             publisher.publish( "rot", "after" );
-            REQUIRE( waitFor(
-                [ & ] { return payloadsOn( captureFiles( first ), "rot" ).size() == 2; } ) );
+            REQUIRE( waitFor( [ & ] {
+                return Capture::read( captureFiles( first ) ).payloadsOn( "rot" ).size() == 2;
+            } ) );
             session.stop();
             const auto files = captureFiles( first );
 
             THEN( "it is written whole, alone in a file of its own" )
             {
                 REQUIRE( files.size() == 3 );
-                REQUIRE( readLines( files.at( 1 ) ).size() == 1 );
-                REQUIRE( payloadsOn( { files.at( 1 ) }, "rot" )
-                         == QStringList{ QString( 1500, 'L' ) } );
-                REQUIRE( payloadsOn( { files.at( 2 ) }, "rot" ) == QStringList{ "after" } );
+                REQUIRE( Capture::read( files.at( 1 ) ).fields()
+                         == QList<LineFields>{ liveFields( "rot", QString( 1500, 'L' ) ) } );
+                REQUIRE( Capture::read( files.at( 2 ) ).payloadsOn( "rot" )
+                         == QStringList{ "after" } );
             }
         }
     }
@@ -1279,7 +1220,7 @@ SCENARIO( "a session started again goes on in its last file, within the size lim
     {
         NatsServer server;
         Publisher publisher( server.url() );
-        auto config = configFor( server.url(), "again" );
+        auto config = sessionConfig( server.url(), { "again" } );
         config.maxFileBytes = 1000;
         NatsSession session( config, sessionTempRoot() );
         int connections = 0;
@@ -1294,7 +1235,8 @@ SCENARIO( "a session started again goes on in its last file, within the size lim
                 publisher.publish( "again", numbered( published, 60 ), {}, {}, i == count - 1 );
             }
             REQUIRE( waitFor( [ & ] {
-                return payloadsOn( captureFiles( first ), "again" ).size() == published;
+                return Capture::read( captureFiles( first ) ).payloadsOn( "again" ).size()
+                       == published;
             } ) );
         };
         publish( 15 ); // about 1500 bytes
@@ -1324,7 +1266,7 @@ SCENARIO( "a session started again goes on in its last file, within the size lim
                 for ( int i = 1; i <= 30; ++i ) {
                     expected << QString::fromLatin1( numbered( i, 60 ) );
                 }
-                REQUIRE( payloadsOn( files, "again" ) == expected );
+                REQUIRE( Capture::read( files ).payloadsOn( "again" ) == expected );
             }
         }
     }
@@ -1338,7 +1280,7 @@ SCENARIO( "a rotation that fails is retried one limit later", "[server][session]
     {
         NatsServer server;
         Publisher publisher( server.url() );
-        auto config = configFor( server.url(), "rf" );
+        auto config = sessionConfig( server.url(), { "rf" } );
         config.maxFileBytes = 1000;
         NatsSession session( config, sessionTempRoot() );
         QStringList errors;
@@ -1360,8 +1302,10 @@ SCENARIO( "a rotation that fails is retried one limit later", "[server][session]
                 ++published;
                 publisher.publish( "rf", numbered( published, 60 ), {}, {}, i == count - 1 );
             }
-            REQUIRE( waitFor(
-                [ & ] { return payloadsOn( captureFiles( first ), "rf" ).size() == published; } ) );
+            REQUIRE( waitFor( [ & ] {
+                return Capture::read( captureFiles( first ) ).payloadsOn( "rf" ).size()
+                       == published;
+            } ) );
             settle( 50 ); // for the signals
         };
 
@@ -1376,7 +1320,7 @@ SCENARIO( "a rotation that fails is retried one limit later", "[server][session]
                 REQUIRE( rotatedTo.isEmpty() );
                 REQUIRE( captureFiles( first ) == QStringList{ first } );
                 REQUIRE( sizeOf( first ) > 1000 );
-                REQUIRE( payloadsOn( { first }, "rf" ).size() == 12 );
+                REQUIRE( Capture::read( first ).payloadsOn( "rf" ).size() == 12 );
             }
 
             AND_WHEN( "the next file could be created now, and the file grows by less than "
@@ -1402,9 +1346,10 @@ SCENARIO( "a rotation that fails is retried one limit later", "[server][session]
                         REQUIRE( captureFiles( first ) == QStringList{ first, second } );
                         REQUIRE( rotatedTo == QStringList{ second } );
                         REQUIRE( sizeOf( first ) <= 2000 );
-                        REQUIRE( payloadsOn( { first, second }, "rf" ).size() == 26 );
-                        REQUIRE( payloadsOn( { first, second }, "rf" ).last()
-                                 == QString::fromLatin1( numbered( 26, 60 ) ) );
+                        const auto payloads
+                            = Capture::read( QStringList{ first, second } ).payloadsOn( "rf" );
+                        REQUIRE( payloads.size() == 26 );
+                        REQUIRE( payloads.last() == QString::fromLatin1( numbered( 26, 60 ) ) );
                     }
                 }
             }
@@ -1420,7 +1365,7 @@ SCENARIO( "a size limit of 0 means no limit", "[server][session][rotation]" )
     {
         NatsServer server;
         Publisher publisher( server.url() );
-        auto config = configFor( server.url(), "nolimit" );
+        auto config = sessionConfig( server.url(), { "nolimit" } );
         config.maxFileBytes = 0;
         NatsSession session( config, sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "nolimit" );
@@ -1431,8 +1376,8 @@ SCENARIO( "a size limit of 0 means no limit", "[server][session][rotation]" )
             for ( int i = 1; i <= 100; ++i ) {
                 publisher.publish( "nolimit", numbered( i, 1000 ), {}, {}, i == 100 );
             }
-            REQUIRE(
-                waitFor( [ & ] { return payloadsOn( { first }, "nolimit" ).size() == 100; } ) );
+            REQUIRE( waitFor(
+                [ & ] { return Capture::read( first ).payloadsOn( "nolimit" ).size() == 100; } ) );
             session.stop();
 
             THEN( "they all stay in the one file" )

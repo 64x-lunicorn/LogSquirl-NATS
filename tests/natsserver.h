@@ -23,8 +23,9 @@
  *
  * The test build provides the binary (cmake/NatsServer.cmake).  A
  * NatsServer starts it on a free port of 127.0.0.1, optionally with
- * JetStream and a configuration file, waits until it accepts connections,
- * and stops it when it goes out of scope:
+ * JetStream and a configuration (a file, or a text: ConfiguredServer),
+ * waits until it accepts connections, and stops it when it goes out of
+ * scope:
  *
  *     SCENARIO( "...", "[server]" )
  *     {
@@ -42,6 +43,7 @@
 #include <QString>
 
 #include <memory>
+#include <utility>
 
 namespace nats_test {
 
@@ -62,8 +64,19 @@ bool runningInCi();
 struct NatsServerOptions {
     bool jetStream = false; ///< Start with JetStream (-js), its store in a temporary directory.
     QString configFile;     ///< A configuration file (-c); empty: none.
-    int port = 0;           ///< The port to listen on; 0: a free one.
+    /// A configuration, written to a file in the server's temporary
+    /// directory, instead of configFile; empty: none.
+    QString configText;
+    int port = 0; ///< The port to listen on; 0: a free one.
 };
+
+/// The options of a server with JetStream, the others the defaults.
+inline NatsServerOptions withJetStream()
+{
+    NatsServerOptions options;
+    options.jetStream = true;
+    return options;
+}
 
 class NatsServer {
 public:
@@ -95,6 +108,24 @@ public:
 private:
     struct Private;
     std::unique_ptr<Private> d;
+};
+
+/// A server started with the configuration @p configText (authorization,
+/// TLS, operator mode…) and otherwise @p options: the fixture of the tests
+/// that need a server set up.
+class ConfiguredServer : public NatsServer {
+public:
+    explicit ConfiguredServer( const QString& configText, NatsServerOptions options = {} )
+        : NatsServer( withText( std::move( options ), configText ) )
+    {
+    }
+
+private:
+    static NatsServerOptions withText( NatsServerOptions options, const QString& configText )
+    {
+        options.configText = configText;
+        return options;
+    }
 };
 
 } // namespace nats_test

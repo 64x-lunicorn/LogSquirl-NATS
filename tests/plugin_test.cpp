@@ -32,6 +32,7 @@
 
 #include <catch2/catch.hpp>
 
+#include "capture.h"
 #include "fakehost.h"
 #include "natsserver.h"
 #include "sessiontest.h"
@@ -55,17 +56,19 @@
 #include <QRegularExpression>
 #include <QSpinBox>
 #include <QTcpServer>
-#include <QTemporaryDir>
 #include <QTimer>
 
 #include <functional>
 #include <optional>
 
+using nats_test::Capture;
+using nats_test::ConfiguredServer;
 using nats_test::FakeHost;
+using nats_test::LineFields;
+using nats_test::liveFields;
+using nats_test::markerFields;
 using nats_test::NatsServer;
-using nats_test::NatsServerOptions;
 using nats_test::Publisher;
-using nats_test::readLines;
 using nats_test::waitFor;
 
 extern "C" int logsquirl_plugin_init( const LogSquirlHostApi* api, void* handle );
@@ -174,24 +177,6 @@ bool anyFileContains( const QString& dir, const QByteArray& text )
     }
     return false;
 }
-
-/// A nats-server started with the configuration @p text.
-struct ConfiguredServer {
-    explicit ConfiguredServer( const QString& text )
-    {
-        REQUIRE( dir.isValid() );
-        NatsServerOptions options;
-        options.configFile = dir.filePath( "server.conf" );
-        QFile file( options.configFile );
-        REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::Text ) );
-        file.write( text.toUtf8() );
-        file.close();
-        server = std::make_unique<NatsServer>( options );
-    }
-
-    QTemporaryDir dir;
-    std::unique_ptr<NatsServer> server;
-};
 
 /// The plugin's sidebar tab.
 QWidget* sidebar( const FakeHost& host )
@@ -326,20 +311,29 @@ void startFromDialog( FakeHost& host, const QString& url, const QString& subject
     startTile( host, name, secret );
 }
 
-/// Whether the last line of @p path is the stopped marker.
-bool endsStopped( const QString& path )
+/// The fields of the last line of the capture at @p path; none if it is empty.
+LineFields lastFields( const QString& path )
 {
-    const auto lines = readLines( path );
-    return !lines.isEmpty() && lines.last().endsWith( " $NATS-MONITOR - 7 stopped" );
+    const auto capture = Capture::read( path );
+    return capture.isEmpty() ? LineFields{} : capture.last().fields();
 }
 
-/// Wait until the file at @p path is subscribed (its "connected" marker).
+/// Whether the last line of the capture at @p path is the stopped marker.
+bool endsStopped( const QString& path )
+{
+    const auto capture = Capture::read( path );
+    return !capture.isEmpty() && capture.last().fields() == markerFields( "stopped" );
+}
+
+/// Wait until the capture at @p path is subscribed: its first line is the
+/// connected marker.
 bool waitSubscribed( const QString& path )
 {
     return waitFor(
         [ & ] {
-            const auto lines = readLines( path );
-            return !lines.isEmpty() && lines.first().contains( " connected to " );
+            const auto capture = Capture::read( path );
+            return !capture.isEmpty()
+                   && capture.first().markerText().startsWith( QLatin1String( "connected to " ) );
         },
         10000 );
 }
@@ -469,8 +463,9 @@ SCENARIO( "capturing from a tile: Start, Stop, Start", "[plugin][server]" )
                     Publisher publisher( server.url() );
                     publisher.publish( "orders.eu.created", "first" );
                 }
-                REQUIRE(
-                    waitFor( [ & ] { return readLines( path ).last().endsWith( " first" ); } ) );
+                REQUIRE( waitFor( [ & ] {
+                    return lastFields( path ) == liveFields( "orders.eu.created", "first" );
+                } ) );
             }
 
             AND_WHEN( "the user clicks Stop, then Start again" )
@@ -495,10 +490,13 @@ SCENARIO( "capturing from a tile: Start, Stop, Start", "[plugin][server]" )
                         Publisher publisher( server.url() );
                         publisher.publish( "orders.us.created", "second" );
                     }
-                    REQUIRE( waitFor(
-                        [ & ] { return readLines( second ).last().endsWith( " second" ); } ) );
+                    REQUIRE( waitFor( [ & ] {
+                        return lastFields( second ) == liveFields( "orders.us.created", "second" );
+                    } ) );
                     REQUIRE( QFileInfo::exists( first ) );
-                    REQUIRE_FALSE( readLines( first ).join( '\n' ).contains( "second" ) );
+                    REQUIRE_FALSE( Capture::read( first ).payloadsOn( "orders.us.created" )
+                                       .contains( "second" ) );
+                    REQUIRE( Capture::read( first ).unreadable().isEmpty() );
                 }
             }
         }
@@ -533,7 +531,7 @@ SCENARIO( "the cut length of binary payloads is set in the dialog", "[plugin][se
                     publisher.publish( "bin", QByteArray( "\x00\x01\x02\x03\xff", 5 ) );
                 }
                 REQUIRE( waitFor( [ & ] {
-                    return readLines( path ).last().endsWith( " bin - 5 hex:000102" );
+                    return lastFields( path ) == LineFields{ "bin", "-", 0, 5, {}, "hex:000102" };
                 } ) );
             }
         }
@@ -577,7 +575,9 @@ SCENARIO( "the pending limits are set in the dialog", "[plugin][server]" )
 
             THEN( "the capture drops as a slow consumer, and says so in the file" )
             {
-                REQUIRE( readLines( path ).join( '\n' ).contains( " (slow consumer)" ) );
+                const auto drops = Capture::read( path ).drops();
+                REQUIRE( drops.slowConsumer > 0 );
+                REQUIRE( drops.unknown == 0 );
             }
         }
 
@@ -727,7 +727,7 @@ SCENARIO( "unloading the plugin or quitting LogSquirl while capturing stops clea
             Publisher publisher( server.url() );
             publisher.publish( "a", "captured" );
         }
-        REQUIRE( waitFor( [ & ] { return readLines( path ).last().endsWith( " captured" ); } ) );
+        REQUIRE( waitFor( [ & ] { return lastFields( path ) == liveFields( "a", "captured" ); } ) );
 
         WHEN( "the plugin is disabled or updated, LogSquirl running on" )
         {
@@ -739,7 +739,8 @@ SCENARIO( "unloading the plugin or quitting LogSquirl while capturing stops clea
             {
                 REQUIRE( timer.elapsed() < 5000 );
                 REQUIRE( endsStopped( path ) );
-                REQUIRE( readLines( path ).join( '\n' ).contains( " a - 8 captured" ) );
+                REQUIRE( Capture::read( path ).messageFields().contains(
+                    liveFields( "a", "captured" ) ) );
             }
         }
 
@@ -773,7 +774,7 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
 
         WHEN( "the user starts a capture and enters a wrong password" )
         {
-            startFromDialog( host, server.server->url(), "x", QStringLiteral( "wrong" ) );
+            startFromDialog( host, server.url(), "x", QStringLiteral( "wrong" ) );
 
             THEN( "the tile says the server refused the user name or password" )
             {
@@ -790,7 +791,7 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
 
         WHEN( "the user starts a capture and enters the right password" )
         {
-            startFromDialog( host, server.server->url(), "x", QStringLiteral( "s3cret" ) );
+            startFromDialog( host, server.url(), "x", QStringLiteral( "s3cret" ) );
 
             THEN( "the capture runs, and the password is in no file of the configuration" )
             {
@@ -803,7 +804,7 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
         WHEN( "the user starts a capture and cancels the password prompt" )
         {
             answerSecret( std::nullopt );
-            startFromDialog( host, server.server->url(), "x" );
+            startFromDialog( host, server.url(), "x" );
 
             THEN( "nothing is started" )
             {
@@ -838,7 +839,7 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
         {
             checkBox( dialog, "tls" )->setChecked( true );
             field( dialog, "caFile" )->setText( certs + "/other-ca-cert.pem" );
-            startFromDialog( host, server.server->url(), "x" );
+            startFromDialog( host, server.url(), "x" );
 
             THEN( "the tile says the server's certificate is not trusted" )
             {
@@ -855,7 +856,7 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
         {
             checkBox( dialog, "tls" )->setChecked( true );
             field( dialog, "caFile" )->setText( certs + "/ca-cert.pem" );
-            startFromDialog( host, server.server->url(), "x" );
+            startFromDialog( host, server.url(), "x" );
 
             THEN( "the capture runs, and the tile says to which server" )
             {
@@ -871,7 +872,7 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
         {
             checkBox( dialog, "tls" )->setChecked( true );
             checkBox( dialog, "skipVerify" )->setChecked( true );
-            startFromDialog( host, server.server->url(), "x" );
+            startFromDialog( host, server.url(), "x" );
 
             THEN( "the capture runs, and the host log says the certificate is not verified" )
             {
@@ -884,7 +885,7 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
         WHEN( "the user starts a capture with a tls:// URL, Use TLS unchecked, trusting the test "
               "CA" )
         {
-            const auto url = server.server->url().replace( "nats://", "tls://" );
+            const auto url = server.url().replace( "nats://", "tls://" );
             field( dialog, "url" )->setText( url );
             REQUIRE_FALSE( checkBox( dialog, "tls" )->isChecked() );
 
@@ -951,7 +952,7 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained on the
         {
             THEN( "the tile says the server refused the token" )
             {
-                requireStatusAfterStart( host, server.server->url(), "the server refused the token",
+                requireStatusAfterStart( host, server.url(), "the server refused the token",
                                          QStringLiteral( "wrong" ) );
             }
         }
@@ -975,7 +976,7 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained on the
 
             THEN( "the tile says the server refused the NKey in that file" )
             {
-                requireStatusAfterStart( host, server.server->url(),
+                requireStatusAfterStart( host, server.url(),
                                          "the server refused the NKey in " + auth + "/other.seed" );
             }
         }
@@ -998,7 +999,7 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained on the
 
             THEN( "the tile says the server refused the credentials in that file" )
             {
-                requireStatusAfterStart( host, server.server->url(),
+                requireStatusAfterStart( host, server.url(),
                                          "the server refused the credentials in " + auth
                                              + "/other.creds" );
             }
@@ -1030,7 +1031,7 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained on the
             THEN( "the tile says the server requires (or may require) one" )
             {
                 // "may": with TLS 1.3 the server closes without saying why.
-                requireStatusAfterStart( host, server.server->url(),
+                requireStatusAfterStart( host, server.url(),
                                          "a client certificate, and none is set" );
             }
         }
@@ -1042,7 +1043,7 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained on the
 
             THEN( "the tile says the server does not (or may not) accept it" )
             {
-                requireStatusAfterStart( host, server.server->url(),
+                requireStatusAfterStart( host, server.url(),
                                          "accept the client certificate " + certs
                                              + "/other-client-cert.pem" );
             }
@@ -1403,8 +1404,9 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
             {
                 REQUIRE( first != second );
                 REQUIRE( host.openedFollow == QList<bool>{ true, true } );
-                REQUIRE( readLines( first ).first().contains(
-                    "subscribed to orders.>, billing.* (queue auditors)" ) );
+                REQUIRE( Capture::read( first ).first().markerText()
+                         == "connected to " + server.url()
+                                + ", subscribed to orders.>, billing.* (queue auditors)" );
                 for ( const auto* name : { "orders", "metrics" } ) {
                     REQUIRE( waitFor(
                         [ & ] { return tileDetails( host, name ).startsWith( "running" ); } ) );
@@ -1427,12 +1429,18 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
                     publisher.publish( "metrics.cpu", "m" );
                 }
                 REQUIRE( waitFor( [ & ] {
-                    return readLines( first ).join( '\n' ).contains( " billing.eu - 1 b" )
-                           && readLines( second ).join( '\n' ).contains( " metrics.cpu - 1 m" );
+                    return Capture::read( first ).messageFields().contains(
+                               liveFields( "billing.eu", "b" ) )
+                           && Capture::read( second ).messageFields().contains(
+                               liveFields( "metrics.cpu", "m" ) );
                 } ) );
-                REQUIRE( readLines( first ).join( '\n' ).contains( " orders.eu - 1 o" ) );
-                REQUIRE_FALSE( readLines( first ).join( '\n' ).contains( "metrics" ) );
-                REQUIRE_FALSE( readLines( second ).join( '\n' ).contains( "orders" ) );
+                REQUIRE( Capture::read( first ).messageFields()
+                         == QList<LineFields>{ liveFields( "orders.eu", "o" ),
+                                               liveFields( "billing.eu", "b" ) } );
+                REQUIRE( Capture::read( second ).messageFields()
+                         == QList<LineFields>{ liveFields( "metrics.cpu", "m" ) } );
+                REQUIRE( Capture::read( first ).unreadable().isEmpty() );
+                REQUIRE( Capture::read( second ).unreadable().isEmpty() );
             }
 
             AND_WHEN( "messages arrive steadily" )
@@ -1480,9 +1488,10 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
                         publisher.publish( "orders.us", "late" );
                     }
                     REQUIRE( waitFor( [ & ] {
-                        return readLines( second ).last().endsWith( " metrics.mem - 5 still" );
+                        return lastFields( second ) == liveFields( "metrics.mem", "still" );
                     } ) );
-                    REQUIRE_FALSE( readLines( first ).join( '\n' ).contains( "late" ) );
+                    REQUIRE( Capture::read( first ).messagesOn( "orders.us" ).isEmpty() );
+                    REQUIRE( Capture::read( first ).unreadable().isEmpty() );
                 }
             }
 
@@ -1737,9 +1746,7 @@ SCENARIO( "a connection replays a JetStream stream from its tile", "[plugin][ser
 
     GIVEN( "an initialised plugin and a server with the streams ORDERS (five messages) and AUDIT" )
     {
-        NatsServerOptions options;
-        options.jetStream = true;
-        NatsServer server( options );
+        NatsServer server( nats_test::withJetStream() );
         Publisher publisher( server.url() );
         nats_test::JetStream js( publisher );
         js.addStream( "ORDERS", { "orders.>" } );
@@ -1813,10 +1820,12 @@ SCENARIO( "a connection replays a JetStream stream from its tile", "[plugin][ser
                             return tileDetails( host, "orders" ).contains( "replay complete" );
                         },
                         10000 ) );
-                    const auto lines = readLines( path );
-                    REQUIRE( lines.size() == 4 );
-                    REQUIRE( lines.at( 1 ).endsWith( " orders.eu - #3 1 3" ) );
-                    REQUIRE( lines.at( 2 ).endsWith( " orders.eu - #5 1 5" ) );
+                    const auto capture = Capture::read( path );
+                    REQUIRE( capture.size() == 4 );
+                    REQUIRE( capture.at( 1 ).fields()
+                             == LineFields{ "orders.eu", "-", 3, 1, {}, "3" } );
+                    REQUIRE( capture.at( 2 ).fields()
+                             == LineFields{ "orders.eu", "-", 5, 1, {}, "5" } );
                     REQUIRE(
                         tileButton( host, "orders", "startStop" )->text().contains( "Start" ) );
                     REQUIRE( js.messageCount( "ORDERS" ) == 5 );
@@ -1885,9 +1894,7 @@ SCENARIO( "unloading the plugin or quitting LogSquirl during a replay leaves no 
     GIVEN( "a replay of ORDERS, which has a durable consumer of its own, that follows live, "
            "started from its tile" )
     {
-        NatsServerOptions options;
-        options.jetStream = true;
-        NatsServer server( options );
+        NatsServer server( nats_test::withJetStream() );
         Publisher publisher( server.url() );
         nats_test::JetStream js( publisher );
         js.addStream( "ORDERS", { "orders.>" } );
@@ -1909,7 +1916,7 @@ SCENARIO( "unloading the plugin or quitting LogSquirl during a replay leaves no 
         const auto path = host.openedFiles.first();
         REQUIRE( waitFor(
             [ & ] {
-                return readLines( path ).join( '\n' ).contains( "caught up, following live" );
+                return Capture::read( path ).hasMarker( "caught up, following live" );
             },
             10000 ) );
         REQUIRE( js.consumers( "ORDERS" ).size() == before.size() + 1 );

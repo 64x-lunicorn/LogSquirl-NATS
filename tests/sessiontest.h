@@ -19,8 +19,10 @@
 
 /**
  * @file sessiontest.h
- * @brief What tests of a capture session use: waiting, reading the
- *        session's file, and publishing with nats.c.
+ * @brief What tests of a capture session use: its configuration, waiting,
+ *        reading the session's file, and publishing with nats.c.
+ *
+ * The lines read here are read into fields by the line reader, capture.h.
  */
 
 #pragma once
@@ -30,6 +32,8 @@
 #include <nats.h>
 
 #include <catch2/catch.hpp>
+
+#include "sessionconfig.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -50,6 +54,29 @@ namespace nats_test {
 inline QString sessionTempRoot()
 {
     return QDir::tempPath();
+}
+
+/// The configuration of a session on @p url that subscribes to each of
+/// @p subjects, in no queue group, the other settings the defaults; with no
+/// subject, it is to be given its subscriptions or a replay.
+inline nats_monitor::SessionConfig sessionConfig( const QString& url,
+                                                  const QStringList& subjects = {} )
+{
+    nats_monitor::SessionConfig config;
+    config.url = url;
+    for ( const auto& subject : subjects ) {
+        config.subscriptions << nats_monitor::Subscription{ subject, {} };
+    }
+    return config;
+}
+
+/// The configuration of a session on @p url that replays @p stream from its
+/// start (ReplayConfig's defaults).
+inline nats_monitor::SessionConfig replayConfig( const QString& url, const QString& stream )
+{
+    auto config = sessionConfig( url );
+    config.replay.stream = stream;
+    return config;
 }
 
 /// Run the event loop until @p condition holds or @p timeoutMs passed;

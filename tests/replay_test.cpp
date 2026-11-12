@@ -34,6 +34,7 @@
 
 #include <catch2/catch.hpp>
 
+#include "capture.h"
 #include "lineformat.h"
 #include "natsserver.h"
 #include "natssession.h"
@@ -46,7 +47,6 @@
 #include <QElapsedTimer>
 #include <QProcess>
 #include <QProcessEnvironment>
-#include <QRegularExpression>
 
 #include <chrono>
 #include <iostream>
@@ -54,88 +54,22 @@
 
 using nats_monitor::NatsSession;
 using nats_monitor::ReplayStart;
-using nats_monitor::SessionConfig;
+using nats_test::Capture;
+using nats_test::CaptureLine;
 using nats_test::JetStream;
+using nats_test::LineFields;
 using nats_test::NatsServer;
 using nats_test::NatsServerOptions;
 using nats_test::Publisher;
 using nats_test::readLines;
+using nats_test::replayConfig;
+using nats_test::sessionConfig;
 using nats_test::sessionTempRoot;
 using nats_test::TcpProxy;
 using nats_test::waitFor;
+using nats_test::withJetStream;
 
 namespace {
-
-NatsServerOptions withJetStream()
-{
-    NatsServerOptions options;
-    options.jetStream = true;
-    return options;
-}
-
-/// A session replaying @p stream from @p url, from its start.
-SessionConfig replayOf( const QString& url, const QString& stream )
-{
-    SessionConfig config;
-    config.url = url;
-    config.replay.stream = stream;
-    return config;
-}
-
-/// The line the session writes for the message @p sequence of @p stream,
-/// with @p subject and @p payload: its stored time from the server.
-QString replayedLine( JetStream& js, const char* stream, quint64 sequence, const char* subject,
-                      const QByteArray& payload,
-                      const QList<std::pair<QByteArray, QByteArray>>& headers = {} )
-{
-    nats_monitor::Message message;
-    message.headers = headers;
-    message.receivedUs = js.storedUs( stream, sequence );
-    message.streamSequence = sequence;
-    message.subject = subject;
-    message.payload = payload;
-    return QString::fromUtf8( nats_monitor::formatLine( message ) );
-}
-
-/// The lines of @p lines that are not markers.
-QStringList messageLines( const QStringList& lines )
-{
-    QStringList messages;
-    for ( const auto& line : lines ) {
-        if ( !line.contains( QLatin1String( " $NATS-MONITOR " ) ) ) {
-            messages << line;
-        }
-    }
-    return messages;
-}
-
-/// The text of the marker line @p line, or empty if it is none.
-QString markerText( const QString& line )
-{
-    static const QRegularExpression re(
-        QStringLiteral( "^\\S+ \\S+ \\$NATS-MONITOR - \\d+ (.*)$" ) );
-    return re.match( line ).captured( 1 );
-}
-
-/// Whether some line of @p lines contains @p text.
-bool anyOf( const QStringList& lines, const QString& text )
-{
-    return std::any_of( lines.begin(), lines.end(),
-                        [ &text ]( const QString& line ) { return line.contains( text ); } );
-}
-
-/// The stream sequences of the message lines of @p lines, in order.
-QList<quint64> sequences( const QStringList& lines )
-{
-    static const QRegularExpression re( QStringLiteral( "^\\S+ \\S+ \\S+ - #(\\d+) " ) );
-    QList<quint64> result;
-    for ( const auto& line : messageLines( lines ) ) {
-        const auto match = re.match( line );
-        REQUIRE( match.hasMatch() );
-        result << match.captured( 1 ).toULongLong();
-    }
-    return result;
-}
 
 /// The sequences @p first to @p last.
 QList<quint64> range( quint64 first, quint64 last )
@@ -163,10 +97,7 @@ void startAndCatchUp( NatsSession& session )
     REQUIRE( session.start() );
     REQUIRE( waitFor(
         [ & ] {
-            const auto lines = readLines( session.filePath() );
-            return std::any_of( lines.begin(), lines.end(), []( const QString& line ) {
-                return markerText( line ) == "caught up, following live";
-            } );
+            return Capture::read( session.filePath() ).hasMarker( "caught up, following live" );
         },
         10000 ) );
 }
@@ -189,27 +120,32 @@ SCENARIO( "a stream is replayed into the session's file", "[server][replay]" )
 
         WHEN( "a session replays it from its start" )
         {
-            NatsSession session( replayOf( server.url(), "ORDERS" ), sessionTempRoot() );
+            NatsSession session( replayConfig( server.url(), "ORDERS" ), sessionTempRoot() );
             replayToTheEnd( session );
-            const auto lines = readLines( session.filePath() );
+            const auto capture = Capture::read( session.filePath() );
 
             THEN( "each message is a line with its stored time and its stream sequence, in order" )
             {
-                REQUIRE(
-                    messageLines( lines )
-                    == QStringList{
-                        replayedLine( js, "ORDERS", 1, "orders.eu.created", R"({"id":1})" ),
-                        replayedLine( js, "ORDERS", 2, "orders.us.created", R"({"id":2})",
-                                      { { "Trace", "abc" } } ),
-                        replayedLine( js, "ORDERS", 3, "orders.eu.cancelled", R"({"id":1})" ) } );
+                REQUIRE( capture.messageFields()
+                         == QList<LineFields>{
+                             { "orders.eu.created", "-", 1, 8, {}, R"({"id":1})" },
+                             { "orders.us.created", "-", 2, 8, "Trace=abc", R"({"id":2})" },
+                             { "orders.eu.cancelled", "-", 3, 8, {}, R"({"id":1})" } } );
+                REQUIRE( capture.unreadable().isEmpty() );
+                const auto messages = capture.messages();
+                for ( int i = 0; i < messages.size(); ++i ) {
+                    REQUIRE( messages.at( i ).timestamp()
+                             == QString::fromLatin1( nats_monitor::formatTimestamp(
+                                 js.storedUs( "ORDERS", static_cast<quint64>( i + 1 ) ) ) ) );
+                }
             }
 
             THEN( "the first line says what is replayed, the last that the replay is complete" )
             {
-                REQUIRE( markerText( lines.first() )
+                REQUIRE( capture.first().markerText()
                          == QStringLiteral( "connected to %1, replaying stream ORDERS" )
                                 .arg( server.url() ) );
-                REQUIRE( markerText( lines.last() ) == "replay complete" );
+                REQUIRE( capture.last().markerText() == "replay complete" );
             }
 
             THEN( "the stream still holds its three messages" )
@@ -236,7 +172,7 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
             }
             js.publish( i % 2 ? "orders.eu" : "orders.us", QByteArray::number( i ) );
         }
-        auto config = replayOf( server.url(), "ORDERS" );
+        auto config = replayConfig( server.url(), "ORDERS" );
 
         WHEN( "it replays the last 3 messages" )
         {
@@ -247,10 +183,10 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
 
             THEN( "it writes 8, 9 and 10, and says so first" )
             {
-                const auto lines = readLines( session.filePath() );
-                REQUIRE( sequences( lines ) == range( 8, 10 ) );
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.sequences() == range( 8, 10 ) );
                 REQUIRE(
-                    markerText( lines.first() ).endsWith( "stream ORDERS, the last 3 messages" ) );
+                    capture.first().markerText().endsWith( "stream ORDERS, the last 3 messages" ) );
             }
         }
 
@@ -263,7 +199,7 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
 
             THEN( "it writes all ten" )
             {
-                REQUIRE( sequences( readLines( session.filePath() ) ) == range( 1, 10 ) );
+                REQUIRE( Capture::read( session.filePath() ).sequences() == range( 1, 10 ) );
             }
         }
 
@@ -276,9 +212,10 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
 
             THEN( "it writes 7 to 10" )
             {
-                const auto lines = readLines( session.filePath() );
-                REQUIRE( sequences( lines ) == range( 7, 10 ) );
-                REQUIRE( markerText( lines.first() ).endsWith( "stream ORDERS, from sequence 7" ) );
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.sequences() == range( 7, 10 ) );
+                REQUIRE(
+                    capture.first().markerText().endsWith( "stream ORDERS, from sequence 7" ) );
             }
         }
 
@@ -291,10 +228,10 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
 
             THEN( "it writes 6 to 10, and names the time as the lines do" )
             {
-                const auto lines = readLines( session.filePath() );
-                REQUIRE( sequences( lines ) == range( 6, 10 ) );
-                REQUIRE( markerText( lines.first() )
-                             .endsWith( ", from " + messageLines( lines ).first().left( 27 ) ) );
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.sequences() == range( 6, 10 ) );
+                REQUIRE( capture.first().markerText().endsWith(
+                    ", from " + capture.messages().first().timestamp() ) );
             }
         }
 
@@ -306,10 +243,10 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
 
             THEN( "it writes the even ones" )
             {
-                const auto lines = readLines( session.filePath() );
-                REQUIRE( sequences( lines ) == QList<quint64>{ 2, 4, 6, 8, 10 } );
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.sequences() == QList<quint64>{ 2, 4, 6, 8, 10 } );
                 REQUIRE(
-                    markerText( lines.first() ).endsWith( "stream ORDERS, subject orders.us" ) );
+                    capture.first().markerText().endsWith( "stream ORDERS, subject orders.us" ) );
             }
         }
 
@@ -323,7 +260,8 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
 
             THEN( "it writes the last two odd ones, 7 and 9" )
             {
-                REQUIRE( sequences( readLines( session.filePath() ) ) == QList<quint64>{ 7, 9 } );
+                REQUIRE( Capture::read( session.filePath() ).sequences()
+                         == QList<quint64>{ 7, 9 } );
             }
         }
 
@@ -336,9 +274,9 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
 
             THEN( "it writes no message and is complete at once" )
             {
-                const auto lines = readLines( session.filePath() );
-                REQUIRE( sequences( lines ).isEmpty() );
-                REQUIRE( markerText( lines.last() ) == "replay complete" );
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.sequences().isEmpty() );
+                REQUIRE( capture.last().markerText() == "replay complete" );
             }
         }
 
@@ -363,9 +301,11 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
 
         THEN( "its replay is complete at once, with no message" )
         {
-            NatsSession session( replayOf( server.url(), "EMPTY" ), sessionTempRoot() );
+            NatsSession session( replayConfig( server.url(), "EMPTY" ), sessionTempRoot() );
             replayToTheEnd( session );
-            REQUIRE( messageLines( readLines( session.filePath() ) ).isEmpty() );
+            const auto capture = Capture::read( session.filePath() );
+            REQUIRE( capture.messages().isEmpty() );
+            REQUIRE( capture.unreadable().isEmpty() );
         }
     }
 }
@@ -430,7 +370,7 @@ SCENARIO( "a replay from a time early in its second starts at that time", "[serv
 
         WHEN( "it replays from the time message k was stored" )
         {
-            auto config = replayOf( server.url(), QString::fromLatin1( stream ) );
+            auto config = replayConfig( server.url(), QString::fromLatin1( stream ) );
             config.replay.start = ReplayStart::Time;
             config.replay.timeUs = kUs;
             NatsSession session( config, sessionTempRoot() );
@@ -438,7 +378,7 @@ SCENARIO( "a replay from a time early in its second starts at that time", "[serv
 
             THEN( "it writes k to 5, none before" )
             {
-                REQUIRE( sequences( readLines( session.filePath() ) ) == range( k, 5 ) );
+                REQUIRE( Capture::read( session.filePath() ).sequences() == range( k, 5 ) );
             }
         }
     }
@@ -457,26 +397,23 @@ SCENARIO( "a replay may go on live once it has caught up", "[server][replay]" )
         for ( int i = 1; i <= 3; ++i ) {
             js.publish( "orders.eu", QByteArray::number( i ) );
         }
-        auto config = replayOf( server.url(), "ORDERS" );
+        auto config = replayConfig( server.url(), "ORDERS" );
         config.replay.followLive = true;
         NatsSession session( config, sessionTempRoot() );
         int completed = 0;
         QObject::connect( &session, &NatsSession::completed, [ &completed ] { ++completed; } );
         REQUIRE( session.start() );
         const auto caughtUp = [ & ] {
-            const auto lines = readLines( session.filePath() );
-            return std::any_of( lines.begin(), lines.end(), []( const QString& line ) {
-                return markerText( line ) == "caught up, following live";
-            } );
+            return Capture::read( session.filePath() ).hasMarker( "caught up, following live" );
         };
         REQUIRE( waitFor( caughtUp, 10000 ) );
 
         THEN( "it says so after the three, and still runs" )
         {
-            const auto lines = readLines( session.filePath() );
-            REQUIRE( markerText( lines.first() ).endsWith( "stream ORDERS, then live" ) );
-            REQUIRE( sequences( lines ) == range( 1, 3 ) );
-            REQUIRE( markerText( lines.last() ) == "caught up, following live" );
+            const auto capture = Capture::read( session.filePath() );
+            REQUIRE( capture.first().markerText().endsWith( "stream ORDERS, then live" ) );
+            REQUIRE( capture.sequences() == range( 1, 3 ) );
+            REQUIRE( capture.last().markerText() == "caught up, following live" );
             REQUIRE( session.isRunning() );
             REQUIRE( completed == 0 );
         }
@@ -489,13 +426,14 @@ SCENARIO( "a replay may go on live once it has caught up", "[server][replay]" )
             THEN( "they are written after the marker, until stopped" )
             {
                 REQUIRE( waitFor(
-                    [ & ] { return sequences( readLines( session.filePath() ) ).size() == 5; },
+                    [ & ] { return Capture::read( session.filePath() ).sequences().size() == 5; },
                     5000 ) );
                 session.stop();
-                const auto lines = readLines( session.filePath() );
-                REQUIRE( sequences( lines ) == range( 1, 5 ) );
-                REQUIRE( lines.at( lines.size() - 3 ).endsWith( " orders.us - #4 1 4" ) );
-                REQUIRE( markerText( lines.last() ) == "stopped" );
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.sequences() == range( 1, 5 ) );
+                REQUIRE( capture.at( capture.size() - 3 ).fields()
+                         == LineFields{ "orders.us", "-", 4, 1, {}, "4" } );
+                REQUIRE( capture.last().markerText() == "stopped" );
                 REQUIRE( js.messageCount( "ORDERS" ) == 5 );
             }
         }
@@ -509,7 +447,7 @@ SCENARIO( "a replay of a stream that does not exist fails, saying why", "[server
     GIVEN( "a server with JetStream but no stream NOPE" )
     {
         NatsServer server( withJetStream() );
-        NatsSession session( replayOf( server.url(), "NOPE" ), sessionTempRoot() );
+        NatsSession session( replayConfig( server.url(), "NOPE" ), sessionTempRoot() );
         int finished = 0;
         QObject::connect( &session, &NatsSession::finished, [ &finished ] { ++finished; } );
 
@@ -517,8 +455,8 @@ SCENARIO( "a replay of a stream that does not exist fails, saying why", "[server
         {
             REQUIRE( session.start() );
             REQUIRE( waitFor( [ & ] { return finished == 1; }, 10000 ) );
-            const auto lines = readLines( session.filePath() );
-            REQUIRE( anyOf( lines, "replaying stream NOPE failed: " ) );
+            const auto capture = Capture::read( session.filePath() );
+            REQUIRE( capture.hasMarkerStartingWith( "replaying stream NOPE failed: " ) );
         }
     }
 }
@@ -536,16 +474,17 @@ SCENARIO( "a stream of a million messages is replayed whole, or stopped at any p
         JetStream js( publisher );
         js.addStream( "BIG", { "big.>" } );
         js.publishMany( "BIG", "big.data", kCount );
-        auto config = replayOf( server.url(), "BIG" );
+        auto config = replayConfig( server.url(), "BIG" );
         config.maxFileBytes = 0; // one file to read
 
         /// Message line i (from 0) is the stream's message i + 1, payload i + 1.
-        const auto requireInOrder = []( const QStringList& messages ) {
+        const auto requireInOrder = []( const QList<CaptureLine>& messages ) {
             for ( int i = 0; i < messages.size(); ++i ) {
                 const auto n = QString::number( i + 1 );
-                if ( !messages.at( i ).endsWith( " big.data - #" + n + ' '
-                                                 + QString::number( n.size() ) + ' ' + n ) ) {
-                    FAIL( "message line " << i << ": " << messages.at( i ).toStdString() );
+                if ( messages.at( i ).fields()
+                     != LineFields{ "big.data", "-", static_cast<quint64>( i + 1 ), n.size(), {},
+                                    n } ) {
+                    FAIL( "message line " << i << ": " << messages.at( i ).text().toStdString() );
                 }
             }
         };
@@ -554,16 +493,19 @@ SCENARIO( "a stream of a million messages is replayed whole, or stopped at any p
         {
             NatsSession session( config, sessionTempRoot() );
             replayToTheEnd( session, 120000 );
-            const auto lines = readLines( session.filePath() );
+            const auto capture = Capture::read( session.filePath() );
 
             THEN( "every message is a line, in order, none dropped" )
             {
-                const auto messages = messageLines( lines );
+                const auto messages = capture.messages();
                 REQUIRE( messages.size() == kCount );
                 requireInOrder( messages );
-                REQUIRE_FALSE( anyOf( lines, "dropped=" ) );
+                REQUIRE( capture.unreadable().isEmpty() );
+                const auto drops = capture.drops();
+                REQUIRE( drops.markers == 0 );
+                REQUIRE( drops.unknown == 0 );
                 REQUIRE( session.droppedCount() == 0 );
-                REQUIRE( markerText( lines.last() ) == "replay complete" );
+                REQUIRE( capture.last().markerText() == "replay complete" );
                 REQUIRE( js.messageCount( "BIG" ) == kCount );
             }
         }
@@ -585,13 +527,16 @@ SCENARIO( "a stream of a million messages is replayed whole, or stopped at any p
             timer.start();
             session.stop();
             const auto stopMs = timer.elapsed();
-            const auto written = readLines( session.filePath() );
+            const auto capture = Capture::read( session.filePath() );
             REQUIRE( stopMs < 3000 );
-            REQUIRE( markerText( written.last() ) == "stopped" );
-            const auto messages = messageLines( written );
+            REQUIRE( capture.last().markerText() == "stopped" );
+            const auto messages = capture.messages();
             REQUIRE( messages.size() < kCount );
             requireInOrder( messages );
-            REQUIRE_FALSE( anyOf( written, "dropped=" ) );
+            REQUIRE( capture.unreadable().isEmpty() );
+            const auto drops = capture.drops();
+            REQUIRE( drops.markers == 0 );
+            REQUIRE( drops.unknown == 0 );
             REQUIRE( js.messageCount( "BIG" ) == kCount );
         };
 
@@ -636,21 +581,24 @@ SCENARIO( "a replay whose writer cannot keep up is still written whole", "[serve
         JetStream js( publisher );
         js.addStream( "BIG", { "big.>" } );
         js.publishMany( "BIG", "big.data", kCount );
-        auto config = replayOf( server.url(), "BIG" );
+        auto config = replayConfig( server.url(), "BIG" );
         config.queueLimit = 1;
 
         WHEN( "it is replayed to its end" )
         {
             NatsSession session( config, sessionTempRoot() );
             replayToTheEnd( session, 120000 );
-            const auto lines = readLines( session.filePath() );
+            const auto capture = Capture::read( session.filePath() );
 
             THEN( "every message is a line, once and in order, none dropped" )
             {
-                REQUIRE( sequences( lines ) == range( 1, kCount ) );
-                REQUIRE_FALSE( anyOf( lines, "dropped=" ) );
+                REQUIRE( capture.sequences() == range( 1, kCount ) );
+                REQUIRE( capture.unreadable().isEmpty() );
+                const auto drops = capture.drops();
+                REQUIRE( drops.markers == 0 );
+                REQUIRE( drops.unknown == 0 );
                 REQUIRE( session.droppedCount() == 0 );
-                REQUIRE( markerText( lines.last() ) == "replay complete" );
+                REQUIRE( capture.last().markerText() == "replay complete" );
             }
         }
 
@@ -667,16 +615,19 @@ SCENARIO( "a replay whose writer cannot keep up is still written whole", "[serve
             timer.start();
             session.stop();
             const auto stopMs = timer.elapsed();
-            const auto lines = readLines( session.filePath() );
+            const auto capture = Capture::read( session.filePath() );
 
             THEN( "it stops at once, what it wrote until then in order, none dropped" )
             {
                 REQUIRE( stopMs < 3000 );
-                REQUIRE( markerText( lines.last() ) == "stopped" );
-                const auto written = sequences( lines );
+                REQUIRE( capture.last().markerText() == "stopped" );
+                const auto written = capture.sequences();
                 REQUIRE( written.size() < kCount );
                 REQUIRE( written == range( 1, written.size() ) );
-                REQUIRE_FALSE( anyOf( lines, "dropped=" ) );
+                REQUIRE( capture.unreadable().isEmpty() );
+                const auto drops = capture.drops();
+                REQUIRE( drops.markers == 0 );
+                REQUIRE( drops.unknown == 0 );
                 REQUIRE( session.droppedCount() == 0 );
                 REQUIRE( js.messageCount( "BIG" ) == kCount );
             }
@@ -695,8 +646,7 @@ SCENARIO( "the streams to replay are listed from the server", "[server][replay]"
         JetStream js( publisher );
         js.addStream( "ORDERS", { "orders.>" } );
         js.addStream( "AUDIT", { "audit.>" } );
-        SessionConfig config;
-        config.url = server.url();
+        const auto config = sessionConfig( server.url() );
 
         THEN( "both are listed, by name" )
         {
@@ -710,8 +660,7 @@ SCENARIO( "the streams to replay are listed from the server", "[server][replay]"
     GIVEN( "a server without JetStream" )
     {
         NatsServer server;
-        SessionConfig config;
-        config.url = server.url();
+        const auto config = sessionConfig( server.url() );
 
         THEN( "no stream is listed, and the error says why" )
         {
@@ -723,8 +672,7 @@ SCENARIO( "the streams to replay are listed from the server", "[server][replay]"
 
     GIVEN( "no server" )
     {
-        SessionConfig config;
-        config.url = "nats://127.0.0.1:1";
+        const auto config = sessionConfig( "nats://127.0.0.1:1" );
 
         THEN( "no stream is listed, and the error says why" )
         {
@@ -741,7 +689,7 @@ SCENARIO( "a replay without a stream name does not start", "[replay]" )
     {
         THEN( "start() fails" )
         {
-            NatsSession session( replayOf( "nats://127.0.0.1:1", " " ), sessionTempRoot() );
+            NatsSession session( replayConfig( "nats://127.0.0.1:1", " " ), sessionTempRoot() );
             REQUIRE_FALSE( session.start() );
         }
     }
@@ -766,7 +714,7 @@ SCENARIO( "a replay leaves no consumer behind", "[server][replay][cleanup]" )
 
         WHEN( "a replay that follows live runs" )
         {
-            auto config = replayOf( server.url(), "ORDERS" );
+            auto config = replayConfig( server.url(), "ORDERS" );
             config.replay.followLive = true;
             NatsSession session( config, sessionTempRoot() );
             startAndCatchUp( session );
@@ -782,7 +730,7 @@ SCENARIO( "a replay leaves no consumer behind", "[server][replay][cleanup]" )
 
         WHEN( "a replay ends by itself, complete" )
         {
-            NatsSession session( replayOf( server.url(), "ORDERS" ), sessionTempRoot() );
+            NatsSession session( replayConfig( server.url(), "ORDERS" ), sessionTempRoot() );
             replayToTheEnd( session );
 
             THEN( "the stream has the same consumers as before" )
@@ -807,7 +755,7 @@ constexpr const char* kKilledReplay = "a replay runs in a process of its own unt
 TEST_CASE( "a replay runs in a process of its own until it is killed", "[.][child]" )
 {
     const auto env = QProcessEnvironment::systemEnvironment();
-    auto config = replayOf( env.value( "LOGSQUIRL_NATS_REPLAY_URL" ),
+    auto config = replayConfig( env.value( "LOGSQUIRL_NATS_REPLAY_URL" ),
                             env.value( "LOGSQUIRL_NATS_REPLAY_STREAM" ) );
     config.replay.followLive = true;
     config.replay.inactiveThresholdMs = env.value( "LOGSQUIRL_NATS_REPLAY_INACTIVE_MS" ).toInt();
@@ -880,7 +828,7 @@ SCENARIO( "a replay that loses its connection leaves no consumer behind",
         js.publish( "orders.eu", "1" );
         const auto before = js.consumers( "ORDERS" );
         TcpProxy proxy( server.port() );
-        auto config = replayOf( proxy.url(), "ORDERS" );
+        auto config = replayConfig( proxy.url(), "ORDERS" );
         config.replay.followLive = true;
         config.replay.inactiveThresholdMs = 500;
         NatsSession session( config, sessionTempRoot() );
@@ -891,7 +839,10 @@ SCENARIO( "a replay that loses its connection leaves no consumer behind",
         {
             proxy.cut();
             REQUIRE( waitFor(
-                [ & ] { return anyOf( readLines( session.filePath() ), "reconnected to " ); },
+                [ & ] {
+                    return Capture::read( session.filePath() )
+                        .hasMarkerStartingWith( "reconnected to " );
+                },
                 15000 ) );
 
             THEN( "the replay goes on, with one consumer more, and the stream has the same "
@@ -899,7 +850,7 @@ SCENARIO( "a replay that loses its connection leaves no consumer behind",
             {
                 js.publish( "orders.eu", "2" );
                 REQUIRE( waitFor(
-                    [ & ] { return sequences( readLines( session.filePath() ) ).contains( 2 ); },
+                    [ & ] { return Capture::read( session.filePath() ).sequences().contains( 2 ); },
                     20000 ) );
                 REQUIRE( waitFor(
                     [ & ] { return js.consumers( "ORDERS" ).size() == before.size() + 1; } ) );
@@ -912,9 +863,9 @@ SCENARIO( "a replay that loses its connection leaves no consumer behind",
         {
             proxy.refuse();
             proxy.cut();
-            REQUIRE(
-                waitFor( [ & ] { return anyOf( readLines( session.filePath() ), "disconnected" ); },
-                         10000 ) );
+            REQUIRE( waitFor(
+                [ & ] { return Capture::read( session.filePath() ).hasMarker( "disconnected" ); },
+                10000 ) );
             session.stop();
 
             THEN( "its consumer is gone after the inactive threshold, the stream's own kept" )
@@ -943,7 +894,7 @@ SCENARIO( "a stream that removes what its consumers took is refused or replayed 
 
         WHEN( "a session replays it" )
         {
-            NatsSession session( replayOf( server.url(), "JOBS" ), sessionTempRoot() );
+            NatsSession session( replayConfig( server.url(), "JOBS" ), sessionTempRoot() );
             int finished = 0;
             QObject::connect( &session, &NatsSession::finished, [ &finished ] { ++finished; } );
             REQUIRE( session.start() );
@@ -951,9 +902,11 @@ SCENARIO( "a stream that removes what its consumers took is refused or replayed 
 
             THEN( "it refuses, saying why, and the jobs are still there, with no consumer" )
             {
-                const auto lines = readLines( session.filePath() );
-                REQUIRE( messageLines( lines ).isEmpty() );
-                REQUIRE( anyOf( lines, "replaying stream JOBS failed: it is a work queue" ) );
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.messages().isEmpty() );
+                REQUIRE( capture.unreadable().isEmpty() );
+                REQUIRE( capture.hasMarkerStartingWith(
+                    "replaying stream JOBS failed: it is a work queue" ) );
                 REQUIRE( js.messageCount( "JOBS" ) == 3 );
                 REQUIRE( js.consumers( "JOBS" ).isEmpty() );
             }
@@ -970,17 +923,17 @@ SCENARIO( "a stream that removes what its consumers took is refused or replayed 
 
         WHEN( "a session replays it" )
         {
-            NatsSession session( replayOf( server.url(), "EVENTS" ), sessionTempRoot() );
+            NatsSession session( replayConfig( server.url(), "EVENTS" ), sessionTempRoot() );
             replayToTheEnd( session );
-            const auto lines = readLines( session.filePath() );
+            const auto capture = Capture::read( session.filePath() );
 
             THEN( "it warns before the messages, then writes them" )
             {
-                REQUIRE( lines.size() >= 2 );
-                REQUIRE( markerText( lines.at( 1 ) )
+                REQUIRE( capture.size() >= 2 );
+                REQUIRE( capture.at( 1 ).markerText()
                              .startsWith( "warning: stream EVENTS has "
                                           "interest retention" ) );
-                REQUIRE( sequences( lines ) == range( 1, 3 ) );
+                REQUIRE( capture.sequences() == range( 1, 3 ) );
             }
 
             THEN( "the stream still holds them for EVENTS_READER, its only consumer" )
