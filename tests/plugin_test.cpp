@@ -1827,6 +1827,63 @@ SCENARIO( "a connection replays a JetStream stream from its tile", "[plugin][ser
     }
 }
 
+SCENARIO( "unloading the plugin or quitting LogSquirl during a replay leaves no consumer behind",
+          "[plugin][server][replay][cleanup]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a replay of ORDERS that follows live, started from its tile" )
+    {
+        NatsServerOptions options;
+        options.jetStream = true;
+        NatsServer server( options );
+        Publisher publisher( server.url() );
+        nats_test::JetStream js( publisher );
+        js.addStream( "ORDERS", { "orders.>" } );
+        js.publish( "orders.eu", "1" );
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        sidebarButton( host, "newConnection" )->click();
+        auto* dialog = openDialog();
+        field( dialog, "url" )->setText( server.url() );
+        checkBox( dialog, "replay" )->setChecked( true );
+        comboBox( dialog, "replayStream" )->setEditText( "ORDERS" );
+        checkBox( dialog, "replayFollow" )->setChecked( true );
+        saveAs( dialog, "orders" );
+        dialog->hide();
+        startTile( host, "orders" );
+        REQUIRE( host.openedFiles.size() == 1 );
+        const auto path = host.openedFiles.first();
+        REQUIRE( waitFor(
+            [ & ] {
+                return readLines( path ).join( '\n' ).contains( "caught up, following live" );
+            },
+            10000 ) );
+        REQUIRE( js.consumers( "ORDERS" ).size() == 1 );
+
+        WHEN( "the plugin is disabled or updated, LogSquirl running on" )
+        {
+            logsquirl_plugin_shutdown();
+
+            THEN( "the stream has no consumer" )
+            {
+                REQUIRE( js.consumers( "ORDERS" ).isEmpty() );
+            }
+        }
+
+        WHEN( "LogSquirl quits, which shuts the plugin down" )
+        {
+            QMetaObject::invokeMethod( QCoreApplication::instance(), "aboutToQuit" );
+            logsquirl_plugin_shutdown();
+
+            THEN( "the stream has no consumer" )
+            {
+                REQUIRE( js.consumers( "ORDERS" ).isEmpty() );
+            }
+        }
+    }
+}
+
 SCENARIO( "initialisation removes the temporary files of LogSquirl processes that ended",
           "[plugin]" )
 {

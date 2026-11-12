@@ -38,6 +38,7 @@
 #include "natsserver.h"
 #include "natssession.h"
 #include "sessiontest.h"
+#include "tcpproxy.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -55,6 +56,7 @@ using nats_test::NatsServer;
 using nats_test::NatsServerOptions;
 using nats_test::Publisher;
 using nats_test::readLines;
+using nats_test::TcpProxy;
 using nats_test::waitFor;
 
 namespace {
@@ -683,6 +685,62 @@ SCENARIO( "the consumer of a replay that is killed disappears after its inactive
                 timer.start();
                 REQUIRE( waitFor( [ & ] { return js.consumers( "ORDERS" ).isEmpty(); }, 3000 ) );
                 INFO( "gone after " << timer.elapsed() << " ms" );
+            }
+        }
+    }
+}
+
+SCENARIO( "a replay that loses its connection leaves no consumer behind",
+          "[server][replay][cleanup]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a replay that follows live through a connection that can be cut" )
+    {
+        NatsServer server( withJetStream() );
+        Publisher publisher( server.url() );
+        JetStream js( publisher );
+        js.addStream( "ORDERS", { "orders.>" } );
+        js.publish( "orders.eu", "1" );
+        TcpProxy proxy( server.port() );
+        auto config = replayOf( proxy.url(), "ORDERS" );
+        config.replay.followLive = true;
+        config.replay.inactiveThresholdMs = 500;
+        NatsSession session( config );
+        startAndCatchUp( session );
+        REQUIRE( js.consumers( "ORDERS" ).size() == 1 );
+
+        WHEN( "the connection is cut and comes back" )
+        {
+            proxy.cut();
+            REQUIRE( waitFor(
+                [ & ] { return anyOf( readLines( session.filePath() ), "reconnected to " ); },
+                15000 ) );
+
+            THEN( "the replay goes on, with one consumer, and none once it is stopped" )
+            {
+                js.publish( "orders.eu", "2" );
+                REQUIRE( waitFor(
+                    [ & ] { return sequences( readLines( session.filePath() ) ).contains( 2 ); },
+                    20000 ) );
+                REQUIRE( waitFor( [ & ] { return js.consumers( "ORDERS" ).size() == 1; } ) );
+                session.stop();
+                REQUIRE( waitFor( [ & ] { return js.consumers( "ORDERS" ).isEmpty(); } ) );
+            }
+        }
+
+        WHEN( "the connection is cut for good and the replay is stopped while disconnected" )
+        {
+            proxy.refuse();
+            proxy.cut();
+            REQUIRE(
+                waitFor( [ & ] { return anyOf( readLines( session.filePath() ), "disconnected" ); },
+                         10000 ) );
+            session.stop();
+
+            THEN( "its consumer is gone after the inactive threshold" )
+            {
+                REQUIRE( waitFor( [ & ] { return js.consumers( "ORDERS" ).isEmpty(); }, 3000 ) );
             }
         }
     }
