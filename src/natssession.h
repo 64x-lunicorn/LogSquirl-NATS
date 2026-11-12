@@ -230,6 +230,19 @@ struct ReplayConfig {
 /// subject orders.eu.>, the last 100 messages, then live".
 QString describeReplay( const ReplayConfig& replay );
 
+struct SessionConfig;
+
+/**
+ * The names of the JetStream streams on the server of @p config, sorted
+ * ($JS.API.STREAM.NAMES), to choose the one to replay.  Connects with the
+ * config's URL, auth and TLS, and waits for the answer: call it off the
+ * GUI thread.
+ *
+ * @return the names; empty, with @p error set (for the user), if they
+ *         could not be listed.  An empty list without error: no stream.
+ */
+QStringList listStreams( const SessionConfig& config, QString* error );
+
 struct SessionConfig {
     /// One or more URLs, comma-separated: the seeds of a cluster.
     QString url = QString::fromLatin1( kDefaultUrl );

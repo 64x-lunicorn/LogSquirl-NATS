@@ -494,6 +494,57 @@ SCENARIO( "a stream of a million messages is replayed whole, or stopped at any p
     }
 }
 
+SCENARIO( "the streams to replay are listed from the server", "[server][replay]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a server with the streams ORDERS and AUDIT" )
+    {
+        NatsServer server( withJetStream() );
+        Publisher publisher( server.url() );
+        JetStream js( publisher );
+        js.addStream( "ORDERS", { "orders.>" } );
+        js.addStream( "AUDIT", { "audit.>" } );
+        SessionConfig config;
+        config.url = server.url();
+
+        THEN( "both are listed, by name" )
+        {
+            QString error;
+            REQUIRE( nats_monitor::listStreams( config, &error )
+                     == QStringList{ "AUDIT", "ORDERS" } );
+            REQUIRE( error.isEmpty() );
+        }
+    }
+
+    GIVEN( "a server without JetStream" )
+    {
+        NatsServer server;
+        SessionConfig config;
+        config.url = server.url();
+
+        THEN( "no stream is listed, and the error says why" )
+        {
+            QString error;
+            REQUIRE( nats_monitor::listStreams( config, &error ).isEmpty() );
+            REQUIRE_FALSE( error.isEmpty() );
+        }
+    }
+
+    GIVEN( "no server" )
+    {
+        SessionConfig config;
+        config.url = "nats://127.0.0.1:1";
+
+        THEN( "no stream is listed, and the error says why" )
+        {
+            QString error;
+            REQUIRE( nats_monitor::listStreams( config, &error ).isEmpty() );
+            REQUIRE( error.contains( "127.0.0.1:1" ) );
+        }
+    }
+}
+
 SCENARIO( "a replay without a stream name does not start", "[replay]" )
 {
     GIVEN( "a replay of the stream \" \"" )

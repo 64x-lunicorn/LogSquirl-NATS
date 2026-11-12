@@ -1241,6 +1241,60 @@ QString describeSubscriptions( const QList<Subscription>& subscriptions )
     return names.join( QStringLiteral( ", " ) );
 }
 
+QStringList listStreams( const SessionConfig& config, QString* error )
+{
+    natsOptions* options = nullptr;
+    natsConnection* connection = nullptr;
+    jsCtx* js = nullptr;
+    jsStreamNamesList* list = nullptr;
+    QStringList names;
+    QString problem;
+
+    natsStatus status = natsOptions_Create( &options );
+    if ( status != NATS_OK ) {
+        problem = lastError( status );
+    }
+    if ( problem.isEmpty() ) {
+        problem = configureConnection( options, config );
+    }
+    if ( problem.isEmpty() ) {
+        status = natsConnection_Connect( &connection, options );
+        if ( status != NATS_OK ) {
+            problem = QStringLiteral( "connection to %1 failed: %2" )
+                          .arg( redactUrls( config.url ),
+                                explainConnectFailure( config, status, lastError( status ) ) );
+        }
+    }
+    if ( problem.isEmpty() ) {
+        status = natsConnection_JetStream( &js, connection, nullptr );
+        jsErrCode code = static_cast<jsErrCode>( 0 );
+        if ( status == NATS_OK ) {
+            status = js_StreamNames( &list, js, nullptr, &code );
+        }
+        if ( status == NATS_NOT_FOUND ) {
+            status = NATS_OK; // no stream
+        }
+        if ( status != NATS_OK ) {
+            problem = QStringLiteral( "listing the streams failed: %1" ).arg( lastError( status ) );
+        }
+    }
+    if ( list ) {
+        for ( int i = 0; i < list->Count; ++i ) {
+            names << QString::fromUtf8( list->List[ i ] );
+        }
+        jsStreamNamesList_Destroy( list );
+    }
+    jsCtx_Destroy( js );
+    natsConnection_Destroy( connection );
+    natsOptions_Destroy( options );
+
+    names.sort();
+    if ( error ) {
+        *error = problem;
+    }
+    return problem.isEmpty() ? names : QStringList{};
+}
+
 QString describeReplay( const ReplayConfig& replay )
 {
     QString text = QStringLiteral( "stream %1" ).arg( replay.stream );
