@@ -239,9 +239,9 @@ permissions: {
 }
 ```
 
-**Replay** is read-only: it may read the stream, and create, read and
-delete its own consumer, but not change the stream (no purge, no
-publishing into it). For the stream `ORDERS`:
+**Replay** cannot change the stream's messages: it may read the stream,
+and create, read and delete a consumer (its own, while it runs), but
+neither purge the stream nor publish into it. For the stream `ORDERS`:
 
 ```text
 permissions: {

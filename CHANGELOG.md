@@ -25,8 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deletes it 5 seconds after its reader went away (inactive threshold). A
   stream with work-queue retention is not replayed, saying why; one with
   interest retention is replayed after a warning line. The README lists
-  the least NATS permissions for live capture and for replay, which is
-  read-only (#10).
+  the least NATS permissions for live capture and for replay, which
+  cannot change the stream's messages (#10).
 
 ## [0.1.0]
 

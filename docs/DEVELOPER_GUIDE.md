@@ -182,8 +182,9 @@ with flow control and heartbeats, which nats.c recreates from the last
 stream sequence after a gap or a reconnect. The filter subject is the
 `ReplayConfig::filterSubject`, or `>` for all of the stream's.
 
-- **Start.** *All*: `js_DeliverAll`. *Sequence*: `OptStartSeq`. *Time*:
-  `OptStartTime` (nanoseconds). *Last N* without a filter: `OptStartSeq` =
+- **Start.** *All*: `js_DeliverAll`. *Sequence*: `js_DeliverByStartSequence`
+  with `OptStartSeq`. *Time*: `js_DeliverByStartTime` with `OptStartTime`
+  (nanoseconds). *Last N* without a filter: by start sequence, `OptStartSeq` =
   the stream's last sequence − N + 1, from `js_GetStreamInfo`. *Last N* with
   a filter: which messages match is the server's to know, so it delivers
   all and the callback skips while the message's `NumPending` (metadata)
@@ -204,7 +205,12 @@ stream sequence after a gap or a reconnect. The filter subject is the
   writer takes the queue, and not while stopping): the stream holds the
   messages, and while nats.c's delivery thread waits it answers no flow
   control, so the server holds back. A stream of a million messages is
-  written whole in about two seconds; stop ends it at once.
+  written whole in about two seconds; stop ends it at once. A writer that
+  cannot keep up misses no heartbeat: nats.c marks the ordered consumer
+  active from its reader thread, on each message and heartbeat that
+  arrives (`jsSub_trackSequences`, conn.c), not from the delivery thread
+  that waits, so the consumer is not reset; a test replays 20,000 messages
+  through a queue of one.
 - **Retention.** Before subscribing, `js_GetStreamInfo` gives the stream's
   retention (and its first and last sequence, for *Last N*). A work queue
   (`js_WorkQueuePolicy`) is refused: the replay fails with `replaying
@@ -213,7 +219,10 @@ stream sequence after a gap or a reconnect. The filter subject is the
   has interest retention …` marker (a status event) and is replayed.
 - **Stop** drains the subscription like a live one; for a consumer
   nats.c created, the drain (or unsubscribe) also deletes it on the server.
-  Unload and quit stop the same way (`Sessions::stopAll()`).
+  Unload and quit stop the same way (`Sessions::stopAll()`). A lost
+  connection keeps the consumer, so the replay resumes on reconnect; a
+  Stop while disconnected leaves it to the inactive threshold (PLAN.md,
+  Decisions).
 - **Inactive threshold.** When the delete request cannot reach the server
   (a crash, the connection down at Stop) the consumer's
   `InactiveThreshold` (`ReplayConfig::inactiveThresholdMs`, 5 s by
@@ -222,16 +231,18 @@ stream sequence after a gap or a reconnect. The filter subject is the
   consumer, and the consumer it replaces goes the same way.
 
 The streams the dialog offers come from `listStreams()`
-(`js_StreamNames`, `$JS.API.STREAM.NAMES`), run on a thread of the dialog,
-which the dialog joins when it goes. The tests (`[replay]`) are at the main
+(`js_StreamNames`, `$JS.API.STREAM.NAMES`), run on a thread of the dialog;
+List is disabled until it answers. The dialog joins it when it goes (at
+shutdown, before the library may be unloaded), so the listing bounds
+itself: 2 s to connect to each server URL and 2 s for each answer. The tests (`[replay]`) are at the main
 seam, `replay_test.cpp`, against a server started with `-js`
 (`NatsServerOptions::jetStream`); `nats_test::JetStream`
 ([`tests/sessiontest.h`](../tests/sessiontest.h)) adds memory streams,
 publishes into them and reads their message count, stored times and
 consumers. The million-message test (`[large]`) takes about ten seconds.
 
-The cleanup tests (`[cleanup]`) compare the stream's consumer list before
-and after Stop, a completed replay, unload and quit (`plugin_test.cpp`), a
+The cleanup tests (`[cleanup]`) start from a stream with a durable consumer
+of its own and compare the stream's consumer list before and after Stop, a completed replay, unload and quit (`plugin_test.cpp`), a
 connection cut and restored, and a Stop while the connection is down. The
 connection is cut by `nats_test::TcpProxy`
 ([`tests/tcpproxy.h`](../tests/tcpproxy.h)), a proxy in its own thread in
