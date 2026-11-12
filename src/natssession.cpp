@@ -927,6 +927,7 @@ struct NatsSession::Worker {
         case ReplayStart::Last:
             if ( replay.filterSubject.isEmpty() ) {
                 if ( last >= replay.lastMessages && last - replay.lastMessages + 1 > first ) {
+                    options.Config.DeliverPolicy = js_DeliverByStartSequence;
                     options.Config.OptStartSeq = last - replay.lastMessages + 1;
                 }
             }
@@ -937,9 +938,11 @@ struct NatsSession::Worker {
             }
             break;
         case ReplayStart::Sequence:
+            options.Config.DeliverPolicy = js_DeliverByStartSequence;
             options.Config.OptStartSeq = replay.sequence;
             break;
         case ReplayStart::Time:
+            options.Config.DeliverPolicy = js_DeliverByStartTime;
             options.Config.OptStartTime = replay.timeUs * 1000;
             break;
         }
@@ -1019,7 +1022,13 @@ struct NatsSession::Worker {
             }
             int messages = 0;
             int bytes = 0;
-            natsSubscription_GetPendingLimits( subscriptions.front(), &messages, &bytes );
+            status = natsSubscription_GetPendingLimits( subscriptions.front(), &messages, &bytes );
+            if ( status != NATS_OK ) {
+                shared->pushMarker( QStringLiteral( "replaying %1 failed: %2" )
+                                        .arg( what, lastError( status ) ),
+                                    Event::Error );
+                return false;
+            }
             shared->limitMessages = messages;
             shared->limitBytes = bytes;
             return true;
