@@ -45,10 +45,13 @@
 
 using nats_monitor::CaptureSink;
 using nats_test::Capture;
+using nats_test::captureFiles;
+using nats_test::endsWithNewline;
 using nats_test::LineFields;
 using nats_test::liveFields;
 using nats_test::markerFields;
 using nats_test::readLines;
+using nats_test::sizeOf;
 using nats_test::waitFor;
 using Kind = CaptureSink::Event::Kind;
 
@@ -114,40 +117,6 @@ CaptureSink::Config configIn( const QTemporaryDir& dir, int queueLimit,
     config.queueLimit = queueLimit;
     config.mode = mode;
     return config;
-}
-
-/// The files of the capture whose first file is @p first, in order.
-QStringList captureFiles( const QString& first )
-{
-    QStringList files;
-    if ( !QFileInfo( first ).isFile() ) {
-        return files;
-    }
-    files << first;
-    auto stem = first;
-    stem.chop( 4 ); // ".log"
-    for ( int n = 2;; ++n ) {
-        const auto next = QStringLiteral( "%1.%2.log" ).arg( stem ).arg( n );
-        if ( !QFileInfo( next ).isFile() ) {
-            return files;
-        }
-        files << next;
-    }
-}
-
-qint64 sizeOf( const QString& path )
-{
-    return QFileInfo( path ).size();
-}
-
-bool endsWithNewline( const QString& path )
-{
-    QFile file( path );
-    if ( !file.open( QIODevice::ReadOnly ) ) {
-        return false;
-    }
-    const auto content = file.readAll();
-    return content.isEmpty() || content.endsWith( '\n' );
 }
 
 /// "m0001", "m0002", …, padded with x to @p size bytes.

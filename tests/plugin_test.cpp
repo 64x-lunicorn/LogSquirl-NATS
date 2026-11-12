@@ -56,7 +56,6 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
-#include <QRegularExpression>
 #include <QSpinBox>
 #include <QTcpServer>
 #include <QTimer>

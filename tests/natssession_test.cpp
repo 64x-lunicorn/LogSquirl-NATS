@@ -50,7 +50,9 @@ using nats_monitor::SessionConfig;
 using nats_monitor::Subscription;
 using nats_monitor::Transition;
 using nats_test::Capture;
+using nats_test::captureFiles;
 using nats_test::ConfiguredServer;
+using nats_test::endsWithNewline;
 using nats_test::LineFields;
 using nats_test::liveFields;
 using nats_test::markerFields;
@@ -61,6 +63,7 @@ using nats_test::readLines;
 using nats_test::sessionConfig;
 using nats_test::sessionTempRoot;
 using nats_test::settle;
+using nats_test::sizeOf;
 using nats_test::Transitions;
 using nats_test::waitFor;
 using Kind = nats_monitor::Transition::Kind;
@@ -1060,42 +1063,6 @@ SCENARIO( "without drops no dropped marker is written, and the session counts wh
 // ── Rotation at the size limit ──────────────────────────────────────────
 
 namespace {
-
-/// The files of the capture whose first file is @p first, in order:
-/// nats_<name>.log, nats_<name>.2.log, nats_<name>.3.log, …
-QStringList captureFiles( const QString& first )
-{
-    QStringList files;
-    if ( !QFileInfo( first ).isFile() ) {
-        return files;
-    }
-    files << first;
-    auto stem = first;
-    stem.chop( 4 ); // ".log"
-    for ( int n = 2;; ++n ) {
-        const auto next = QStringLiteral( "%1.%2.log" ).arg( stem ).arg( n );
-        if ( !QFileInfo( next ).isFile() ) {
-            return files;
-        }
-        files << next;
-    }
-}
-
-qint64 sizeOf( const QString& path )
-{
-    return QFileInfo( path ).size();
-}
-
-/// Whether the file at @p path is empty or ends with a line terminator.
-bool endsWithNewline( const QString& path )
-{
-    QFile file( path );
-    if ( !file.open( QIODevice::ReadOnly ) ) {
-        return false;
-    }
-    const auto content = file.readAll();
-    return content.isEmpty() || content.endsWith( '\n' );
-}
 
 /// "m0001", "m0002", …, padded with x to @p size bytes.
 QByteArray numbered( int i, int size )

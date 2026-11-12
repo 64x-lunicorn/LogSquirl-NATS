@@ -50,7 +50,6 @@
 using nats_monitor::ConnectionProfile;
 using nats_monitor::Sessions;
 using nats_monitor::SessionState;
-using nats_monitor::SessionStatus;
 using nats_test::MemoryHost;
 using nats_test::NatsServer;
 using nats_test::Publisher;

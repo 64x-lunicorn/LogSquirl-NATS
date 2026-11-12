@@ -31,7 +31,6 @@
 #include "profiles.h"
 #include "replay.h"
 #include "sessions.h"
-#include "subjects.h"
 
 #include <QFileInfo>
 #include <QHBoxLayout>

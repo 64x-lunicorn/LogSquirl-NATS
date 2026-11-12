@@ -41,6 +41,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QString>
 #include <QStringList>
 #include <QThread>
@@ -173,6 +174,43 @@ inline QStringList readLines( const QString& path )
         lines << QString::fromUtf8( line );
     }
     return lines;
+}
+
+/// The files of the capture whose first file is @p first, in order:
+/// nats_<name>.log, nats_<name>.2.log, nats_<name>.3.log, …
+inline QStringList captureFiles( const QString& first )
+{
+    QStringList files;
+    if ( !QFileInfo( first ).isFile() ) {
+        return files;
+    }
+    files << first;
+    auto stem = first;
+    stem.chop( 4 ); // ".log"
+    for ( int n = 2;; ++n ) {
+        const auto next = QStringLiteral( "%1.%2.log" ).arg( stem ).arg( n );
+        if ( !QFileInfo( next ).isFile() ) {
+            return files;
+        }
+        files << next;
+    }
+}
+
+/// The size of the file at @p path in bytes; 0 if there is none.
+inline qint64 sizeOf( const QString& path )
+{
+    return QFileInfo( path ).size();
+}
+
+/// Whether the file at @p path is empty or ends with a line terminator.
+inline bool endsWithNewline( const QString& path )
+{
+    QFile file( path );
+    if ( !file.open( QIODevice::ReadOnly ) ) {
+        return false;
+    }
+    const auto content = file.readAll();
+    return content.isEmpty() || content.endsWith( '\n' );
 }
 
 /// A nats.c connection that publishes test messages.

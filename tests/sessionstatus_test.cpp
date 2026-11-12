@@ -32,7 +32,6 @@
 
 using nats_monitor::ConnectionStatus;
 using nats_monitor::SessionState;
-using nats_monitor::Transition;
 using Kind = nats_monitor::Transition::Kind;
 
 namespace {
