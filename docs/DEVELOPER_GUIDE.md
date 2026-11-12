@@ -170,6 +170,53 @@ in `natssession_test.cpp` (and a queue group shared with another member);
 several connections and the overlap warning through the tab and the dialog
 in `plugin_test.cpp`.
 
+### JetStream replay
+
+With `SessionConfig::replay` set (a `ReplayConfig` with a stream name), a
+session replays the stream instead of subscribing to its subjects
+([`src/natssession.h`](../src/natssession.h), REPLAY). The writer thread
+connects, writes `connected to …, replaying stream ORDERS, …`
+(`describeReplay()`) and subscribes with `js_Subscribe` and
+`jsSubOptions::Ordered`: nats.c's ordered push consumer, ephemeral, AckNone,
+with flow control and heartbeats, which nats.c recreates from the last
+stream sequence after a gap or a reconnect. The filter subject is the
+`ReplayConfig::filterSubject`, or `>` for all of the stream's.
+
+- **Start.** *All*: `js_DeliverAll`. *Sequence*: `OptStartSeq`. *Time*:
+  `OptStartTime` (nanoseconds). *Last N* without a filter: `OptStartSeq` =
+  the stream's last sequence − N + 1, from `js_GetStreamInfo`. *Last N* with
+  a filter: which messages match is the server's to know, so it delivers
+  all and the callback skips while the message's `NumPending` (metadata)
+  is N or more, until the first one written.
+- **The line.** `onReplayMessage` reads `natsMsg_GetMetaData`: the stored
+  time (`Timestamp`) and the stream sequence go into `Message`, and the
+  reply is cleared (nats.c's is the consumer's; the stream keeps none).
+- **Caught up.** A message with `NumPending` 0 is the last one there was:
+  with `followLive` the writer writes `caught up, following live` and goes
+  on; otherwise the writer ends as on stop, writes `replay complete` and
+  the session emits `completed()` (not `finished()`, which is a failure),
+  on which `Sessions` sets the tile to stopped with *replay complete*. With
+  nothing to replay no message comes, so after subscribing the consumer's
+  info (`natsSubscription_GetConsumerInfo`: nothing pending, nothing
+  delivered) says it.
+- **No drops by the plugin.** A replay's message callback waits for room in
+  the queue instead of dropping (`Shared::waitForRoom`, woken when the
+  writer takes the queue, and not while stopping): the stream holds the
+  messages, and while nats.c's delivery thread waits it answers no flow
+  control, so the server holds back. A stream of a million messages is
+  written whole in about two seconds; stop ends it at once.
+- **Stop** drains the subscription like a live one; for a consumer
+  nats.c created, the drain (or unsubscribe) also deletes it on the server.
+
+The streams the dialog offers come from `listStreams()`
+(`js_StreamNames`, `$JS.API.STREAM.NAMES`), run on a thread of the dialog,
+which the dialog joins when it goes. The tests (`[replay]`) are at the main
+seam, `replay_test.cpp`, against a server started with `-js`
+(`NatsServerOptions::jetStream`); `nats_test::JetStream`
+([`tests/sessiontest.h`](../tests/sessiontest.h)) adds memory streams,
+publishes into them and reads their message count and stored times. The
+million-message test (`[large]`) takes about ten seconds.
+
 ### The sidebar tab and its tiles
 
 The tab "NATS" ([`src/sidebarwidget.h`](../src/sidebarwidget.h)) is
@@ -210,7 +257,8 @@ question by finding the modal dialog from a timer (`onNextModal()` in
 ### The Log Format
 
 `formats/nats_log.json` gives LogSquirl's Table View the columns
-*timestamp, subject, reply, size, body* (the body being the headers and
+*timestamp, subject, reply, seq, size, body* (seq the stream sequence of a
+replayed message, the body being the headers and
 the payload). CI packages it beside the library (`package_files` in
 `.github/plugin-ci.json`, flat), the install rule does the same, and
 `plugin.json`'s `formats` names it, so LogSquirl 26.12 and later read it
@@ -426,6 +474,7 @@ a stopped server back for a reconnect test.
 ### The test seams
 
 - **A capture session against a real `nats-server`** (`natssession_test.cpp`,
+  `replay_test.cpp` with JetStream,
   and through the tab and the dialog in `plugin_test.cpp`, driven against
   `FakeHost`): start a `NatsSession`,
   publish with `nats_test::Publisher`, and assert on the lines of

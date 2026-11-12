@@ -5,7 +5,8 @@ one line to a growing file that LogSquirl follows, so live traffic can be
 searched, filtered and highlighted like any log — also at high message rates.
 
 Status: 0.1.0, live capture (#1–#8, #20), is implemented and not yet released;
-JetStream replay (0.2.0) is next. How the code works:
+of JetStream replay (0.2.0), the replay itself (#9) is implemented, consumer
+cleanup and permissions (#10) are next. How the code works:
 [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md#architecture). Tickets: see
 [Tickets](#tickets).
 
@@ -22,6 +23,10 @@ JetStream replay (0.2.0) is next. How the code works:
 | Queue groups | **Off by default**, per subject (#7) | A session in a queue group takes messages away from the group's other members. |
 | Where the plugin lives in LogSquirl | **A sidebar tab "NATS" with one tile (card) per saved connection**; the connection settings stay in a **dialog**, opened from the tab (*New connection…*, a tile's *Edit*) and from *Plugins → NATS Monitor…*; no status bar widget (#20) | The maintainer chose it after trying the status bar widget in the 26.12 beta. A tile shows what a connection is and, while it runs, what it does (state, msgs/s, received, dropped, server, file), so one glance covers every connection; Start / Stop is on the tile, several run at a time, one session each. The settings (profile, URLs, auth, TLS, subjects, limits) are too many for a sidebar's width, so they stay a dialog, as tcpdump's *Start live capture…* opens one; Serial's few settings fit into its tab. Both Serial and tcpdump keep a menu entry next to their tab, so the plugin does too. The tile widget (`ConnectionTile`) knows nothing of NATS, so that Serial and tcpdump can take the same pattern later. |
 | What a connection saves | **Everything but the secret**: URLs, auth method, user, file paths, TLS, subjects and limits (#20) | A tile starts from its saved connection alone; the password or token is asked for at Start. |
+| Where replay lives in the UI | **A section *JetStream replay* in the connection dialog**: a connection either captures its subjects or replays a stream (stream, optional subject, start, follow live), saved with it and started from its tile like a capture; **List** fetches the server's streams (#9) | No second kind of tile or dialog: the server, auth, TLS and limits are the same, and a tile already shows a session's state and counts. A replay that does not follow live ends by itself; its tile says *replay complete* (state stopped, not failed). |
+| Stream sequence in the line | **An optional field `#<seq>` between the reply field and the size**, only on replayed lines; the Log Format's column `seq`, empty for live lines (#9) | A live line has the size, a number, there, so the regex tells them apart without any new escaping of payloads, and live lines stay as they were. The reply field is `-` on a replayed line: a stream keeps no reply subject. |
+| A replay's full queue | **The delivery waits for the writer** instead of dropping (#9) | The messages are in the stream: dropping them would only make a replay incomplete. While nats.c's delivery thread waits it answers no flow control, so the server holds back; a million messages are written whole in about two seconds. Live capture still drops and counts, since a live publisher cannot be held back. |
+| Last N with a subject filter | **Read the stream from its start and write the last N that match** (the message metadata's pending count); without a filter, start at the sequence N before the end (#9) | Which messages match is the server's to know; a consumer has no "last N" start. Correct, at the price of reading the whole stream when filtered. |
 
 ## Architecture
 
@@ -94,14 +99,17 @@ One message per line, fields separated by one space; NATS subjects and reply
 subjects contain no spaces, so the fixed fields parse with a simple regex:
 
 ```
-<UTC timestamp>             <subject>         <reply|-> <size> [<headers>] <payload>
+<UTC timestamp>             <subject>         <reply|-> [#<seq>] <size> [<headers>] <payload>
 2026-11-11 10:00:00.123456Z orders.eu.created _INBOX.ab12 20 {"id":1,"total":9.5}
 2026-11-11 10:00:00.124001Z sensors.t1 - 4 [Nats-Msg-Id=42; Trace=abc] 21.5
+2026-11-11 09:58:12.000301Z orders.eu.created - #1042 20 {"id":1,"total":9.5}
 ```
 
 - **Timestamp**: receive time in UTC, with microseconds (nats.c gives no
   publish time for core NATS; JetStream replay uses the stream's stored
   timestamp instead).
+- **Stream sequence** (replay only): `#` and the message's sequence in its
+  stream, before the size (#9).
 - **Size**: the payload's real size in bytes, also when it is cut.
 - **Headers** (optional): `[k=v; k=v]` before the payload, sorted by key (a
   key with several values once per value). `;`, `]`, `\` and line breaks in
@@ -116,7 +124,7 @@ subjects contain no spaces, so the fixed fields parse with a simple regex:
   client can publish to, in the same format.
 - **Log Format definition** `formats/nats_log.json` (lnav format, shipped via
   `package_files` like tcpdump's) gives the Table View columns *timestamp,
-  subject, reply, size, body*, with subject as identifier.
+  subject, reply, seq, size, body*, with subject as identifier.
 
 ## Tickets
 

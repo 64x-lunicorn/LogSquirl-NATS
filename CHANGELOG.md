@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Replay a JetStream stream into a tab.** A connection can replay a
+  stream instead of capturing subjects: chosen from the server's streams
+  (*List*), optionally only one subject, from its start, the last N
+  messages, a sequence or a time, and optionally following live once
+  caught up. It reads through an ordered ephemeral consumer that never
+  acknowledges, so the stream is left as it is. A replayed line has the
+  time the stream stored the message and its stream sequence (`#1042`,
+  before the size); the Log Format gets the column *seq*. A replay that
+  does not follow live ends with `replay complete`, and its tile says so.
+  A stream of any size is written whole, and Stop ends a replay at any
+  point (#9).
+
 ## [0.1.0]
 
 ### Added
