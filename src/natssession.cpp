@@ -362,6 +362,11 @@ struct Shared {
     /// pending, until the first one written: the last N with a filter.
     /// 0: none.  Read and written by nats.c's delivery thread only.
     Count skipWhilePending = 0;
+    /// Skip messages stored before this time (nanoseconds since the
+    /// epoch, UTC), until the first one written: a start time the
+    /// consumer had to be given rounded down (subscribeReplay).  0: none.
+    /// Read and written by nats.c's delivery thread only.
+    int64_t skipStoredBeforeNs = 0;
     bool caughtUp = false;   ///< Under the mutex.
     bool replayDone = false; ///< Caught up, not following: the writer ends; under the mutex.
 
@@ -582,7 +587,16 @@ struct Shared {
             natsMsg_Destroy( msg ); // before the last N
             return;
         }
+        if ( meta->Timestamp < self->skipStoredBeforeNs ) {
+            jsMsgMetaData_Destroy( meta );
+            natsMsg_Destroy( msg ); // before the start time
+            if ( pending == 0 ) {
+                self->markCaughtUp();
+            }
+            return;
+        }
         self->skipWhilePending = 0; // from the first written on, all are
+        self->skipStoredBeforeNs = 0;
 
         const auto storedUs = meta->Timestamp / 1000;
         const auto sequence = meta->Sequence.Stream;
@@ -963,10 +977,27 @@ struct NatsSession::Worker {
             options.Config.DeliverPolicy = js_DeliverByStartSequence;
             options.Config.OptStartSeq = replay.sequence;
             break;
-        case ReplayStart::Time:
+        case ReplayStart::Time: {
             options.Config.DeliverPolicy = js_DeliverByStartTime;
-            options.Config.OptStartTime = replay.timeUs * 1000;
+            // nats.c (3.14) writes the fraction of a second without its
+            // leading zeros, so 12:00:00.025 would reach the server as
+            // 12:00:00.25, past what was stored in between.  Such a time
+            // starts the consumer at its whole second, and what the
+            // consumer has from before the time is skipped.  nats.c's main
+            // has the fix (974c232), after 3.14.0; with a release of it
+            // this can go.
+            constexpr int64_t kNsPerSecond = 1000000000;
+            const int64_t startNs = replay.timeUs * 1000;
+            const int64_t fractionNs = ( ( startNs % kNsPerSecond ) + kNsPerSecond ) % kNsPerSecond;
+            if ( fractionNs > 0 && fractionNs < kNsPerSecond / 10 ) {
+                options.Config.OptStartTime = startNs - fractionNs;
+                shared->skipStoredBeforeNs = startNs;
+            }
+            else {
+                options.Config.OptStartTime = startNs;
+            }
             break;
+        }
         }
 
         auto& state = *shared->subscriptions.front();

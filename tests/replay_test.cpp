@@ -42,6 +42,7 @@
 #include "tcpproxy.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QProcess>
 #include <QProcessEnvironment>
@@ -362,6 +363,55 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
             NatsSession session( replayOf( server.url(), "EMPTY" ) );
             replayToTheEnd( session );
             REQUIRE( messageLines( readLines( session.filePath() ) ).isEmpty() );
+        }
+    }
+}
+
+SCENARIO( "a replay from a time early in its second starts at that time", "[server][replay]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    // nats.c 3.14 writes a start time's fraction of a second without its
+    // leading zeros: 12:00:00.025 goes to the server as 12:00:00.25, past
+    // messages stored in that quarter of a second.
+    GIVEN( "messages 1 and 2 at 5 ms into a second, 3 to 5 at 25 ms" )
+    {
+        NatsServer server( withJetStream() );
+        Publisher publisher( server.url() );
+        JetStream js( publisher );
+        js.addStream( "ORDERS", { "orders.>" } );
+        // Until the clock is @p ms milliseconds into a second, or up to 10 more.
+        const auto waitUntilInSecond = []( int ms ) {
+            REQUIRE( waitFor(
+                [ ms ] {
+                    const auto into = QDateTime::currentMSecsSinceEpoch() % 1000;
+                    return into >= ms && into < ms + 10;
+                },
+                3000 ) );
+        };
+        waitUntilInSecond( 5 );
+        js.publish( "orders.eu", "1" );
+        js.publish( "orders.eu", "2" );
+        waitUntilInSecond( 25 );
+        for ( int i = 3; i <= 5; ++i ) {
+            js.publish( "orders.eu", QByteArray::number( i ) );
+        }
+        const auto third = js.storedUs( "ORDERS", 3 );
+        REQUIRE( third / 1000000 == js.storedUs( "ORDERS", 1 ) / 1000000 ); // the same second
+        REQUIRE( third % 1000000 < 100000 ); // a leading zero in its fraction
+
+        WHEN( "it replays from the time message 3 was stored" )
+        {
+            auto config = replayOf( server.url(), "ORDERS" );
+            config.replay.start = ReplayStart::Time;
+            config.replay.timeUs = third;
+            NatsSession session( config );
+            replayToTheEnd( session );
+
+            THEN( "it writes 3 to 5" )
+            {
+                REQUIRE( sequences( readLines( session.filePath() ) ) == range( 3, 5 ) );
+            }
         }
     }
 }

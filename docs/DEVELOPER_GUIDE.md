@@ -186,8 +186,14 @@ stream sequence after a gap or a reconnect. The filter subject is the
 
 - **Start.** *All*: `js_DeliverAll`. *Sequence*: `js_DeliverByStartSequence`
   with `OptStartSeq`. *Time*: `js_DeliverByStartTime` with `OptStartTime`
-  (nanoseconds). *Last N* without a filter: by start sequence, `OptStartSeq` =
-  the stream's last sequence − N + 1, from `js_GetStreamInfo`. *Last N* with
+  (nanoseconds). nats.c (3.14) writes that time's fraction of a second
+  without its leading zeros (`nats_EncodeTimeUTC`: 12:00:00.025 goes out as
+  12:00:00.25), so a time less than 0.1 s into its second starts the
+  consumer at the whole second instead, and the callback skips what was
+  stored before the time, until the first one written (fixed in nats.c's
+  main, 974c232, after 3.14.0: with a release of it this can go).
+  *Last N* without a filter: by start sequence, `OptStartSeq` = the
+  stream's last sequence − N + 1, from `js_GetStreamInfo`. *Last N* with
   a filter: which messages match is the server's to know, so it delivers
   all and the callback skips while the message's `NumPending` (metadata)
   is N or more, until the first one written.
