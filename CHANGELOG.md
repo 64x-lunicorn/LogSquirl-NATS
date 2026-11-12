@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not follow live ends with `replay complete`, and its tile says so.
   A stream of any size is written whole, and Stop ends a replay at any
   point (#9).
+- **A replay leaves no consumer behind.** Stop, a completed replay,
+  unloading the plugin and quitting LogSquirl delete the replay's
+  consumer; after a crash or a connection lost for good, the server
+  deletes it 5 seconds after its reader went away (inactive threshold). A
+  stream with work-queue retention is not replayed, saying why; one with
+  interest retention is replayed after a warning line. The README lists
+  the least NATS permissions for live capture and for replay, which is
+  read-only (#10).
 
 ## [0.1.0]
 

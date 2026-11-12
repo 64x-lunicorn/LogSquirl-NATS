@@ -224,7 +224,8 @@ struct ReplayConfig {
     /// on, instead of ending.
     bool followLive = false;
     /// How long the server keeps the replay's consumer once nobody reads
-    /// it: after a crash, or a connection lost for good.
+    /// it: after a crash, or a connection lost for good.  0 leaves it to
+    /// the server.
     int inactiveThresholdMs = kDefaultInactiveThresholdMs;
 
     bool enabled() const

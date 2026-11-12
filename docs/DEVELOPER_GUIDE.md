@@ -205,8 +205,21 @@ stream sequence after a gap or a reconnect. The filter subject is the
   messages, and while nats.c's delivery thread waits it answers no flow
   control, so the server holds back. A stream of a million messages is
   written whole in about two seconds; stop ends it at once.
+- **Retention.** Before subscribing, `js_GetStreamInfo` gives the stream's
+  retention (and its first and last sequence, for *Last N*). A work queue
+  (`js_WorkQueuePolicy`) is refused: the replay fails with `replaying
+  stream JOBS failed: it is a work queue …`, before any consumer exists.
+  An interest stream (`js_InterestPolicy`) gets a `warning: stream EVENTS
+  has interest retention …` marker (a status event) and is replayed.
 - **Stop** drains the subscription like a live one; for a consumer
   nats.c created, the drain (or unsubscribe) also deletes it on the server.
+  Unload and quit stop the same way (`Sessions::stopAll()`).
+- **Inactive threshold.** When the delete request cannot reach the server
+  (a crash, the connection down at Stop) the consumer's
+  `InactiveThreshold` (`ReplayConfig::inactiveThresholdMs`, 5 s by
+  default; 0 leaves it to the server) removes it once nobody reads its
+  deliver subject. nats.c copies the config when it recreates the ordered
+  consumer, and the consumer it replaces goes the same way.
 
 The streams the dialog offers come from `listStreams()`
 (`js_StreamNames`, `$JS.API.STREAM.NAMES`), run on a thread of the dialog,
@@ -214,8 +227,21 @@ which the dialog joins when it goes. The tests (`[replay]`) are at the main
 seam, `replay_test.cpp`, against a server started with `-js`
 (`NatsServerOptions::jetStream`); `nats_test::JetStream`
 ([`tests/sessiontest.h`](../tests/sessiontest.h)) adds memory streams,
-publishes into them and reads their message count and stored times. The
-million-message test (`[large]`) takes about ten seconds.
+publishes into them and reads their message count, stored times and
+consumers. The million-message test (`[large]`) takes about ten seconds.
+
+The cleanup tests (`[cleanup]`) compare the stream's consumer list before
+and after Stop, a completed replay, unload and quit (`plugin_test.cpp`), a
+connection cut and restored, and a Stop while the connection is down. The
+connection is cut by `nats_test::TcpProxy`
+([`tests/tcpproxy.h`](../tests/tcpproxy.h)), a proxy in its own thread in
+front of the server: `cut()` closes the connections, `refuse()` accepts no
+new ones. A crash is a real one: the test program starts itself as a child
+process running the hidden test *a replay runs in a process of its own
+until it is killed* (`[.][child]`, set up through environment variables),
+kills it and waits for the consumer to go, with a threshold of 500 ms. The
+permissions the README lists are checked by `permissions_test.cpp`
+(`[permissions]`) against a server configured with exactly those.
 
 ### The sidebar tab and its tiles
 
