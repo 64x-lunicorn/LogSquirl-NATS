@@ -56,7 +56,7 @@ struct ConnectionProfile;
 
 /// Where a connection's session is.
 enum class SessionState {
-    Stopped,    ///< Never started, or stopped by the user.
+    Stopped,    ///< Never started, stopped by the user, or a replay complete.
     Connecting, ///< Started and not connected yet, or reconnecting.
     Running,    ///< Connected and subscribed.
     Failed,     ///< Ended on its own: it could not start or connect, or was closed for good.
@@ -117,8 +117,9 @@ private:
     };
 
     /// Let go of the session of @p name, which was stopped or ended on its
-    /// own: keep its file and counts, delete it later, and set @p state.
-    void release( const QString& name, SessionState state );
+    /// own: keep its file and counts, delete it later, and set @p state and,
+    /// unless empty, @p detail.
+    void release( const QString& name, SessionState state, const QString& detail = {} );
 
     QHash<QString, Entry> entries_;
 };

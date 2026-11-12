@@ -41,6 +41,16 @@ void openFollowed( const QString& path )
     }
 }
 
+/// What a session of @p config does, for the notifications: "capture of
+/// orders.>" or "replay of stream ORDERS, the last 10 messages".
+QString describeCapture( const SessionConfig& config )
+{
+    return config.replay.enabled()
+               ? QStringLiteral( "replay of %1" ).arg( describeReplay( config.replay ) )
+               : QStringLiteral( "capture of %1" )
+                     .arg( describeSubscriptions( config.subscriptions ) );
+}
+
 /// The capture of @p config reached its size limit and goes on in @p path:
 /// open it in a new followed tab, and log why.  Not notified, as in
 /// LogSquirl-Serial: a busy capture rotates often.
@@ -48,9 +58,9 @@ void openRotatedFile( const SessionConfig& config, const QString& path )
 {
     openFollowed( path );
     hostLog( LOGSQUIRL_LOG_INFO,
-             QStringLiteral( "NATS Monitor: the capture of %1 reached its size limit of %2 MiB; "
+             QStringLiteral( "NATS Monitor: the %1 reached its size limit of %2 MiB; "
                              "it goes on in %3." )
-                 .arg( describeSubscriptions( config.subscriptions ) )
+                 .arg( describeCapture( config ) )
                  .arg( config.maxFileBytes / kBytesPerMiB )
                  .arg( path ) );
 }
@@ -92,7 +102,7 @@ bool Sessions::start( const ConnectionProfile& profile )
                      .arg( redactUrls( config.url ) ) );
     }
 
-    const auto subjects = describeSubscriptions( config.subscriptions );
+    const auto subjects = describeCapture( config );
     auto* session = new NatsSession( config, this );
     // The session's signals come through the host's event loop: nothing
     // may throw into it.
@@ -127,6 +137,12 @@ bool Sessions::start( const ConnectionProfile& profile )
     connect( session, &NatsSession::finished, this, [ this, name ] {
         guarded( "ending a capture", [ this, &name ] { release( name, SessionState::Failed ); } );
     } );
+    connect( session, &NatsSession::completed, this, [ this, name, subjects ] {
+        guarded( "ending a replay", [ this, &name, &subjects ] {
+            release( name, SessionState::Stopped, QStringLiteral( "replay complete" ) );
+            hostNotify( QStringLiteral( "NATS %1 complete." ).arg( subjects ) );
+        } );
+    } );
     // In the session's context, not this one's: release() disconnects this
     // object, and a file the session goes on in while it stops still gets
     // its tab (the queued signal comes before the session's deleteLater()).
@@ -159,8 +175,8 @@ bool Sessions::start( const ConnectionProfile& profile )
     Q_EMIT changed( name );
 
     openFollowed( session->filePath() );
-    hostNotify( QStringLiteral( "NATS capture of %1 started on %2." )
-                    .arg( subjects, redactUrls( config.url ) ) );
+    hostNotify(
+        QStringLiteral( "NATS %1 started on %2." ).arg( subjects, redactUrls( config.url ) ) );
     return true;
 }
 
@@ -171,11 +187,11 @@ void Sessions::stop( const QString& name, bool notify )
         return;
     }
     auto* session = it->session;
-    const auto subjects = describeSubscriptions( session->config().subscriptions );
+    const auto subjects = describeCapture( session->config() );
     session->stop();
-    release( name, SessionState::Stopped );
+    release( name, SessionState::Stopped, QStringLiteral( "stopped" ) );
     if ( notify ) {
-        hostNotify( QStringLiteral( "NATS capture of %1 stopped." ).arg( subjects ) );
+        hostNotify( QStringLiteral( "NATS %1 stopped." ).arg( subjects ) );
     }
 }
 
@@ -218,7 +234,7 @@ SessionStatus Sessions::status( const QString& name ) const
     return status;
 }
 
-void Sessions::release( const QString& name, SessionState state )
+void Sessions::release( const QString& name, SessionState state, const QString& detail )
 {
     auto& entry = entries_[ name ];
     auto* session = entry.session;
@@ -230,8 +246,8 @@ void Sessions::release( const QString& name, SessionState state )
     entry.status.dropped = session->droppedCount();
     entry.status.state = state;
     entry.status.server.clear();
-    if ( state == SessionState::Stopped ) {
-        entry.status.detail = QStringLiteral( "stopped" );
+    if ( !detail.isEmpty() ) {
+        entry.status.detail = detail;
     }
     session->preserveFile();
     session->disconnect( this );

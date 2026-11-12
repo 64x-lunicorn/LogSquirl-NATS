@@ -23,7 +23,8 @@
  *
  * A profile is a saved connection: the server URLs, the authentication
  * method with its user name and file, the TLS settings, the subjects and
- * the limits of its capture.  Never a password or a token: the sidebar asks
+ * the limits of its capture, or instead of the subjects the JetStream
+ * stream it replays.  Never a password or a token: the sidebar asks
  * for those at Start, or they are in a .creds file.  Each profile is a tile
  * in the sidebar (sidebarwidget.h), started from there.
  *
@@ -59,6 +60,9 @@ struct ConnectionProfile {
     int maxBinaryBytes = kDefaultMaxBinaryBytes;
     PendingLimits pendingLimits = kDefaultPendingLimits;
     int maxFileMiB = kDefaultMaxFileMiB; ///< 0 for no limit.
+    /// The stream the connection replays instead of capturing the subjects,
+    /// if replay.enabled().
+    ReplayConfig replay;
 
     /// The subscriptions of subjects; those before an error if a line is wrong.
     QList<Subscription> subscriptions() const;

@@ -1730,6 +1730,103 @@ SCENARIO( "connections are saved as profiles, without passwords or tokens", "[pl
     }
 }
 
+SCENARIO( "a connection replays a JetStream stream from its tile", "[plugin][server][replay]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "an initialised plugin and a server with the streams ORDERS (five messages) and AUDIT" )
+    {
+        NatsServerOptions options;
+        options.jetStream = true;
+        NatsServer server( options );
+        Publisher publisher( server.url() );
+        nats_test::JetStream js( publisher );
+        js.addStream( "ORDERS", { "orders.>" } );
+        js.addStream( "AUDIT", { "audit.>" } );
+        for ( int i = 1; i <= 5; ++i ) {
+            js.publish( i % 2 ? "orders.eu" : "orders.us", QByteArray::number( i ) );
+        }
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        sidebarButton( host, "newConnection" )->click();
+        auto* dialog = openDialog();
+        field( dialog, "url" )->setText( server.url() );
+
+        WHEN( "the user chooses Replay and lists the streams" )
+        {
+            checkBox( dialog, "replay" )->setChecked( true );
+            button( dialog, "listStreams" )->click();
+
+            THEN( "the server's streams are offered" )
+            {
+                auto* streams = comboBox( dialog, "replayStream" );
+                REQUIRE( waitFor( [ & ] { return streams->count() == 2; }, 5000 ) );
+                REQUIRE( streams->itemText( 0 ) == "AUDIT" );
+                REQUIRE( streams->itemText( 1 ) == "ORDERS" );
+                REQUIRE( subjectsField( dialog )->isEnabled() == false );
+            }
+        }
+
+        WHEN( "the user saves a replay of the last 2 messages on orders.eu of ORDERS" )
+        {
+            checkBox( dialog, "replay" )->setChecked( true );
+            comboBox( dialog, "replayStream" )->setEditText( "ORDERS" );
+            field( dialog, "replayFilter" )->setText( "orders.eu" );
+            auto* start = comboBox( dialog, "replayStart" );
+            start->setCurrentIndex( start->findText( "Last messages" ) );
+            spinBox( dialog, "replayLast" )->setValue( 2 );
+            saveAs( dialog, "orders" );
+            INFO( "dialog: " << statusText( dialog ).toStdString() );
+
+            THEN( "its tile says what it replays" )
+            {
+                REQUIRE( tileSummary( host, "orders" )
+                             .contains( "Replays stream ORDERS, subject orders.eu, the last 2 "
+                                        "messages" ) );
+            }
+
+            THEN( "Edit shows the replay again" )
+            {
+                dialog->hide();
+                tileButton( host, "orders", "edit" )->click();
+                auto* again = openDialog();
+                REQUIRE( checkBox( again, "replay" )->isChecked() );
+                REQUIRE( comboBox( again, "replayStream" )->currentText() == "ORDERS" );
+                REQUIRE( field( again, "replayFilter" )->text() == "orders.eu" );
+                REQUIRE( comboBox( again, "replayStart" )->currentText() == "Last messages" );
+                REQUIRE( spinBox( again, "replayLast" )->value() == 2 );
+            }
+
+            AND_WHEN( "it is started from its tile" )
+            {
+                startTile( host, "orders" );
+
+                THEN( "messages 3 and 5 are replayed into a followed tab, the tile says the "
+                      "replay is complete, and the stream is unchanged" )
+                {
+                    REQUIRE( host.openedFiles.size() == 1 );
+                    REQUIRE( host.openedFollow.first() );
+                    const auto path = host.openedFiles.first();
+                    REQUIRE( waitFor(
+                        [ & ] {
+                            return tileDetails( host, "orders" ).contains( "replay complete" );
+                        },
+                        10000 ) );
+                    const auto lines = readLines( path );
+                    REQUIRE( lines.size() == 4 );
+                    REQUIRE( lines.at( 1 ).endsWith( " orders.eu - #3 1 3" ) );
+                    REQUIRE( lines.at( 2 ).endsWith( " orders.eu - #5 1 5" ) );
+                    REQUIRE(
+                        tileButton( host, "orders", "startStop" )->text().contains( "Start" ) );
+                    REQUIRE( js.messageCount( "ORDERS" ) == 5 );
+                }
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+}
+
 SCENARIO( "initialisation removes the temporary files of LogSquirl processes that ended",
           "[plugin]" )
 {

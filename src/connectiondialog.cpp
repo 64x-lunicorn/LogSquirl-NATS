@@ -34,16 +34,20 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDateTimeEdit>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QRegularExpressionValidator>
 #include <QSettings>
 #include <QSpinBox>
+#include <QTimeZone>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -131,6 +135,17 @@ ConnectionDialog::ConnectionDialog( const Sessions* sessions, QWidget* parent )
     , pendingMessagesSpin_( new QSpinBox( this ) )
     , pendingMegabytesSpin_( new QSpinBox( this ) )
     , maxFileSpin_( new QSpinBox( this ) )
+    , replayCheck_( new QCheckBox(
+          QStringLiteral( "Replay a JetStream stream instead of capturing the subjects" ), this ) )
+    , replayStreamCombo_( new QComboBox( this ) )
+    , listStreamsButton_( new QPushButton( QStringLiteral( "List" ), this ) )
+    , replayFilterEdit_( new QLineEdit( this ) )
+    , replayStartCombo_( new QComboBox( this ) )
+    , replayLastSpin_( new QSpinBox( this ) )
+    , replaySequenceEdit_( new QLineEdit( this ) )
+    , replayTimeEdit_( new QDateTimeEdit( this ) )
+    , replayFollowCheck_(
+          new QCheckBox( QStringLiteral( "Then go on with new messages (follow live)" ), this ) )
     , statusLabel_( new QLabel( this ) )
 {
     setWindowTitle( QStringLiteral( "NATS connection" ) );
@@ -221,6 +236,44 @@ ConnectionDialog::ConnectionDialog( const Sessions* sessions, QWidget* parent )
     maxFileSpin_->setToolTip(
         QStringLiteral( "When a file reaches this size, the capture goes on in a new file, "
                         "opened in a new tab; a new connection proposes the last one saved" ) );
+    replayCheck_->setObjectName( "replay" );
+    replayCheck_->setToolTip(
+        QStringLiteral( "Write what a stream already holds, through an ordered ephemeral consumer "
+                        "that never acknowledges: the stream stays as it is" ) );
+    replayStreamCombo_->setObjectName( "replayStream" );
+    replayStreamCombo_->setEditable( true );
+    replayStreamCombo_->setInsertPolicy( QComboBox::NoInsert );
+    replayStreamCombo_->lineEdit()->setPlaceholderText( QStringLiteral( "Name of the stream" ) );
+    listStreamsButton_->setObjectName( "listStreams" );
+    listStreamsButton_->setAutoDefault( false );
+    listStreamsButton_->setToolTip( QStringLiteral( "List the streams of the server" ) );
+    replayFilterEdit_->setObjectName( "replayFilter" );
+    replayFilterEdit_->setPlaceholderText( QStringLiteral( "All the stream's subjects" ) );
+    replayFilterEdit_->setToolTip(
+        QStringLiteral( "Replay only the messages on this subject; * and > match as in a "
+                        "subscription" ) );
+    replayStartCombo_->setObjectName( "replayStart" );
+    replayStartCombo_->addItem( QStringLiteral( "All messages" ),
+                                static_cast<int>( ReplayStart::All ) );
+    replayStartCombo_->addItem( QStringLiteral( "Last messages" ),
+                                static_cast<int>( ReplayStart::Last ) );
+    replayStartCombo_->addItem( QStringLiteral( "From sequence" ),
+                                static_cast<int>( ReplayStart::Sequence ) );
+    replayStartCombo_->addItem( QStringLiteral( "From time (UTC)" ),
+                                static_cast<int>( ReplayStart::Time ) );
+    replayLastSpin_->setObjectName( "replayLast" );
+    replayLastSpin_->setRange( 1, std::numeric_limits<int>::max() );
+    replayLastSpin_->setGroupSeparatorShown( true );
+    replayLastSpin_->setSuffix( QStringLiteral( " messages" ) );
+    replaySequenceEdit_->setObjectName( "replaySequence" );
+    replaySequenceEdit_->setValidator( new QRegularExpressionValidator(
+        QRegularExpression( QStringLiteral( "[1-9][0-9]{0,19}" ) ), replaySequenceEdit_ ) );
+    replaySequenceEdit_->setPlaceholderText( QStringLiteral( "Stream sequence, from 1" ) );
+    replayTimeEdit_->setObjectName( "replayTime" );
+    replayTimeEdit_->setTimeZone( QTimeZone::UTC );
+    replayTimeEdit_->setDisplayFormat( QStringLiteral( "yyyy-MM-dd HH:mm:ss.zzz 'UTC'" ) );
+    replayTimeEdit_->setCalendarPopup( true );
+    replayFollowCheck_->setObjectName( "replayFollow" );
     statusLabel_->setObjectName( "status" );
     statusLabel_->setWordWrap( true );
     statusLabel_->setTextInteractionFlags( Qt::TextSelectableByMouse );
@@ -286,11 +339,39 @@ ConnectionDialog::ConnectionDialog( const Sessions* sessions, QWidget* parent )
     form->addRow( QStringLiteral( "Pending at most:" ), pending );
     form->addRow( QStringLiteral( "New file at:" ), maxFileSpin_ );
 
+    auto* streamRow = new QHBoxLayout;
+    streamRow->addWidget( replayStreamCombo_, 1 );
+    streamRow->addWidget( listStreamsButton_ );
+    auto* startRow = new QHBoxLayout;
+    startRow->addWidget( replayStartCombo_ );
+    startRow->addWidget( replayLastSpin_, 1 );
+    startRow->addWidget( replaySequenceEdit_, 1 );
+    startRow->addWidget( replayTimeEdit_, 1 );
+    auto* replay = new QFormLayout;
+    replay->addRow( replayCheck_ );
+    const auto replayRow = [ &, this ]( const QString& title, QLayout* row ) {
+        auto* label = new QLabel( title + QLatin1Char( ':' ), this );
+        replay->addRow( label, row );
+        replayWidgets_ << label;
+    };
+    replayRow( QStringLiteral( "Stream" ), streamRow );
+    auto* filterRow = new QHBoxLayout;
+    filterRow->addWidget( replayFilterEdit_ );
+    replayRow( QStringLiteral( "Subject" ), filterRow );
+    replayRow( QStringLiteral( "Start at" ), startRow );
+    replay->addRow( replayFollowCheck_ );
+    replayWidgets_ << replayStreamCombo_ << listStreamsButton_ << replayFilterEdit_
+                   << replayStartCombo_ << replayLastSpin_ << replaySequenceEdit_ << replayTimeEdit_
+                   << replayFollowCheck_;
+    auto* replayBox = new QGroupBox( QStringLiteral( "JetStream replay" ), this );
+    replayBox->setLayout( replay );
+
     auto* layout = new QVBoxLayout( this );
     layout->addLayout( connection );
     layout->addWidget( authBox );
     layout->addWidget( tlsBox );
     layout->addLayout( form );
+    layout->addWidget( replayBox );
     layout->addWidget( statusLabel_ );
 
     connect( subjectsEdit_, &QPlainTextEdit::textChanged, this,
@@ -302,9 +383,20 @@ ConnectionDialog::ConnectionDialog( const Sessions* sessions, QWidget* parent )
     connect( authCombo_, &QComboBox::currentIndexChanged, this, &ConnectionDialog::updateButtons );
     connect( tlsCheck_, &QCheckBox::toggled, this, &ConnectionDialog::updateButtons );
     connect( urlEdit_, &QLineEdit::textChanged, this, &ConnectionDialog::updateButtons );
+    connect( replayCheck_, &QCheckBox::toggled, this, &ConnectionDialog::updateButtons );
+    connect( replayStartCombo_, &QComboBox::currentIndexChanged, this,
+             &ConnectionDialog::updateButtons );
+    connect( listStreamsButton_, &QPushButton::clicked, this, &ConnectionDialog::listStreams );
 
     newConnection();
     resize( 520, sizeHint().height() );
+}
+
+ConnectionDialog::~ConnectionDialog()
+{
+    if ( listing_.joinable() ) {
+        listing_.join();
+    }
 }
 
 ConnectionProfile ConnectionDialog::currentProfile() const
@@ -330,6 +422,16 @@ ConnectionProfile ConnectionDialog::currentProfile() const
     profile.pendingLimits = { pendingMessagesSpin_->value(),
                               static_cast<int>( pendingMegabytesSpin_->value() * kBytesPerMiB ) };
     profile.maxFileMiB = maxFileSpin_->value();
+    if ( replayCheck_->isChecked() ) {
+        auto& replay = profile.replay;
+        replay.stream = replayStreamCombo_->currentText().trimmed();
+        replay.filterSubject = replayFilterEdit_->text().trimmed();
+        replay.start = static_cast<ReplayStart>( replayStartCombo_->currentData().toInt() );
+        replay.lastMessages = static_cast<quint64>( replayLastSpin_->value() );
+        replay.sequence = std::max<quint64>( replaySequenceEdit_->text().toULongLong(), 1 );
+        replay.timeUs = replayTimeEdit_->dateTime().toMSecsSinceEpoch() * 1000;
+        replay.followLive = replayFollowCheck_->isChecked();
+    }
     return profile;
 }
 
@@ -350,6 +452,20 @@ void ConnectionDialog::showProfile( const ConnectionProfile& profile )
     pendingMegabytesSpin_->setValue(
         static_cast<int>( profile.pendingLimits.bytes / kBytesPerMiB ) );
     maxFileSpin_->setValue( profile.maxFileMiB );
+    const auto& replay = profile.replay;
+    replayCheck_->setChecked( replay.enabled() );
+    replayStreamCombo_->setEditText( replay.stream );
+    replayFilterEdit_->setText( replay.filterSubject );
+    replayStartCombo_->setCurrentIndex(
+        replayStartCombo_->findData( static_cast<int>( replay.start ) ) );
+    replayLastSpin_->setValue( static_cast<int>(
+        std::min<quint64>( replay.lastMessages, std::numeric_limits<int>::max() ) ) );
+    replaySequenceEdit_->setText( QString::number( replay.sequence ) );
+    // No time saved: an hour ago, a start that usually holds something.
+    replayTimeEdit_->setDateTime(
+        replay.timeUs > 0 ? QDateTime::fromMSecsSinceEpoch( replay.timeUs / 1000, QTimeZone::UTC )
+                          : QDateTime::currentDateTimeUtc().addSecs( -3600 ) );
+    replayFollowCheck_->setChecked( replay.followLive );
     updateButtons();
 }
 
@@ -410,6 +526,11 @@ void ConnectionDialog::saveProfile()
     const auto profile = currentProfile();
     if ( profile.name.isEmpty() ) {
         statusLabel_->setText( QStringLiteral( "Enter a name for the connection to save." ) );
+        return;
+    }
+    if ( replayCheck_->isChecked() && !profile.replay.enabled() ) {
+        statusLabel_->setText( QStringLiteral( "Enter the stream to replay, or List the server's "
+                                               "streams to choose it." ) );
         return;
     }
     for ( const auto& url : profile.url.split( ',' ) ) {
@@ -508,6 +629,69 @@ void ConnectionDialog::updateButtons()
     for ( auto* widget : tlsWidgets_ ) {
         widget->setEnabled( tls );
     }
+    const bool replay = replayCheck_->isChecked();
+    for ( auto* widget : replayWidgets_ ) {
+        widget->setEnabled( replay );
+    }
+    subjectsEdit_->setEnabled( !replay );
+    const auto start = static_cast<ReplayStart>( replayStartCombo_->currentData().toInt() );
+    replayLastSpin_->setVisible( start == ReplayStart::Last );
+    replaySequenceEdit_->setVisible( start == ReplayStart::Sequence );
+    replayTimeEdit_->setVisible( start == ReplayStart::Time );
+}
+
+void ConnectionDialog::listStreams()
+{
+    auto profile = currentProfile();
+    if ( const char* secret = authMethodInfo( profile.auth.method ).secret ) {
+        bool ok = false;
+        profile.auth.secret
+            = QInputDialog::getText( this, QStringLiteral( "NATS Monitor" ),
+                                     QStringLiteral( "The %1 to list the streams (never saved):" )
+                                         .arg( QLatin1String( secret ) ),
+                                     QLineEdit::Password, {}, &ok );
+        if ( !ok || profile.auth.secret.isEmpty() ) {
+            return;
+        }
+    }
+    if ( listing_.joinable() ) {
+        listing_.join(); // done: the button is enabled only once it answered
+    }
+    listStreamsButton_->setEnabled( false );
+    statusLabel_->setText(
+        QStringLiteral( "Listing the streams of %1…" ).arg( redactUrls( profile.url ) ) );
+    // In the background: connecting may take the connect timeout.  The
+    // destructor joins the thread, and Qt drops the answer if the dialog is
+    // gone before it is delivered.
+    listing_ = std::thread( [ this, config = sessionConfig( profile ) ] {
+        QString error;
+        const auto names = nats_monitor::listStreams( config, &error );
+        QMetaObject::invokeMethod(
+            this,
+            [ this, names, error ] {
+                guarded( "showing the streams", [ & ] { showStreams( names, error ); } );
+            },
+            Qt::QueuedConnection );
+    } );
+}
+
+void ConnectionDialog::showStreams( const QStringList& names, const QString& error )
+{
+    listStreamsButton_->setEnabled( replayCheck_->isChecked() );
+    if ( !error.isEmpty() ) {
+        statusLabel_->setText(
+            QStringLiteral( "The streams could not be listed: %1" ).arg( error ) );
+        return;
+    }
+    const auto current = replayStreamCombo_->currentText();
+    replayStreamCombo_->clear();
+    replayStreamCombo_->addItems( names );
+    replayStreamCombo_->setEditText( current.isEmpty() && !names.isEmpty() ? names.first()
+                                                                           : current );
+    statusLabel_->setText( names.isEmpty() ? QStringLiteral( "The server has no stream." )
+                           : names.size() == 1
+                               ? QStringLiteral( "1 stream listed." )
+                               : QStringLiteral( "%1 streams listed." ).arg( names.size() ) );
 }
 
 } // namespace nats_monitor

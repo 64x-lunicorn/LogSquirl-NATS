@@ -61,7 +61,10 @@ QStringList summaryOf( const ConnectionProfile& profile )
         QStringLiteral( "%1 · TLS %2" )
             .arg( QLatin1String( authMethodInfo( profile.auth.method ).label ),
                   profile.usesTls() ? QStringLiteral( "on" ) : QStringLiteral( "off" ) ),
-        subjects.isEmpty() ? QStringLiteral( "no subject" ) : describeSubscriptions( subjects ),
+        profile.replay.enabled()
+            ? QStringLiteral( "Replays %1" ).arg( describeReplay( profile.replay ) )
+        : subjects.isEmpty() ? QStringLiteral( "no subject" )
+                             : describeSubscriptions( subjects ),
     };
 }
 
@@ -224,7 +227,9 @@ void SidebarWidget::updateTile( ConnectionTile* tile )
     switch ( status.state ) {
     case SessionState::Stopped:
         if ( !status.filePath.isEmpty() ) {
-            details << QStringLiteral( "stopped" ) << countsOf( status );
+            // "stopped", or "replay complete"
+            details << ( status.detail.isEmpty() ? QStringLiteral( "stopped" ) : status.detail )
+                    << countsOf( status );
         }
         break;
     case SessionState::Connecting:
