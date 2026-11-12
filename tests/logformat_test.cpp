@@ -372,6 +372,7 @@ Message message( const QByteArray& subject, const QByteArray& payload )
 /// The columns LogSquirl should show for a line.
 struct Fields {
     QString timestamp, subject, reply, size, body;
+    QString seq = {}; ///< Empty for a live line.
 };
 
 /// Checks that the format reads @p line into @p expected.
@@ -384,6 +385,7 @@ void requireFields( const LogFormat& format, const QByteArray& line, const Field
     REQUIRE( match.captured( "timestamp" ) == expected.timestamp );
     REQUIRE( match.captured( "subject" ) == expected.subject );
     REQUIRE( match.captured( "reply" ) == expected.reply );
+    REQUIRE( match.captured( "seq" ) == expected.seq );
     REQUIRE( match.captured( "size" ) == expected.size );
     REQUIRE( match.captured( "body" ) == expected.body );
 }
@@ -404,26 +406,27 @@ SCENARIO( "the Log Format defines the columns of a NATS line", "[logformat]" )
         }
     }
 
-    THEN( "the columns are timestamp, subject, reply, size and body, in this order" )
+    THEN( "the columns are timestamp, subject, reply, seq, size and body, in this order" )
     {
         for ( const auto& pattern : format.patterns ) {
             REQUIRE( namedGroups( pattern )
-                     == QStringList{ "timestamp", "subject", "reply", "size", "body" } );
+                     == QStringList{ "timestamp", "subject", "reply", "seq", "size", "body" } );
         }
         REQUIRE( format.timestampField == "timestamp" );
         REQUIRE( format.bodyField == "body" );
         REQUIRE_FALSE( format.timestampFormats.isEmpty() );
     }
 
-    THEN( "the subject is an identifier, and the size the only number" )
+    THEN( "the subject is an identifier, and the seq and the size the only numbers" )
     {
         const auto values = format.definition.value( "value" ).toObject();
-        for ( const QString name : { "subject", "reply", "size" } ) {
+        for ( const QString name : { "subject", "reply", "seq", "size" } ) {
             INFO( "field " << name.toStdString() );
             REQUIRE( values.contains( name ) );
             const auto value = values.value( name ).toObject();
             const auto kind = value.value( "kind" ).toString();
-            REQUIRE( ( kind == "integer" || kind == "float" ) == ( name == "size" ) );
+            REQUIRE( ( kind == "integer" || kind == "float" )
+                     == ( name == "size" || name == "seq" ) );
             REQUIRE( value.value( "identifier" ).toBool() == ( name == "subject" ) );
             REQUIRE_FALSE( value.value( "hidden" ).toBool() );
         }
@@ -588,6 +591,29 @@ SCENARIO( "the Log Format reads every line the formatter writes", "[logformat]" 
         }
     }
 
+    GIVEN( "a message replayed from a stream, with headers and a payload starting with #" )
+    {
+        auto m = message( "orders.eu.created", "#7 [x]" );
+        m.streamSequence = 1042;
+        m.headers = { { "Nats-Msg-Id", "42" } };
+
+        THEN( "the stream sequence is the seq column, the rest as in a live line" )
+        {
+            requireFields(
+                format, formatLine( m ),
+                { ts, "orders.eu.created", "-", "6", "[Nats-Msg-Id=42] #7 [x]", "1042" } );
+        }
+    }
+
+    GIVEN( "a live message whose payload starts with # and a number" )
+    {
+        THEN( "the seq column is empty, the payload the body" )
+        {
+            requireFields( format, formatLine( message( "s", "#5 x" ) ),
+                           { ts, "s", "-", "4", "#5 x" } );
+        }
+    }
+
     GIVEN( "marker lines" )
     {
         THEN( "they are read with the subject $NATS-MONITOR" )
@@ -653,7 +679,9 @@ SCENARIO( "the Log Format reads no line of another log", "[logformat]" )
                   { "2026-11-11 10:00:00,123 INFO main started",
                     "2026-11-11 10:00:00.123 orders.eu.created - 20 x",
                     "2026-11-11T10:00:00.123456Z orders.eu.created - 20 x",
-                    "2026-11-11 10:00:00.123456Z orders.eu.created - twenty x" } ) {
+                    "2026-11-11 10:00:00.123456Z orders.eu.created - twenty x",
+                    "2026-11-11 10:00:00.123456Z orders.eu.created - #x 20 y",
+                    "2026-11-11 10:00:00.123456Z orders.eu.created - # 20 y" } ) {
                 INFO( "line: " << line.toStdString() );
                 REQUIRE_FALSE( matchLine( format, line ).hasMatch() );
             }

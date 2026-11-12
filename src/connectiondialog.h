@@ -45,6 +45,10 @@
  *   - the size limit of a file in MiB (default 256, 0 for no limit): each
  *     next file of the capture opens in a new followed tab, with a line in
  *     the host log (no notification: a busy capture rotates often)
+ *   - Replay a JetStream stream, instead of the subjects: the stream (List
+ *     fetches the server's streams in the background), optionally one
+ *     subject, where to start (all, the last N messages, a sequence, a UTC
+ *     time) and whether to go on live once caught up (natssession.h, REPLAY)
  *   - a status line: what was saved, or what is missing
  *
  * The connections are started and stopped from their tiles in the sidebar
@@ -68,10 +72,12 @@
 #include <QDialog>
 #include <QList>
 
+#include <thread>
 #include <utility>
 
 class QCheckBox;
 class QComboBox;
+class QDateTimeEdit;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
@@ -90,6 +96,10 @@ public:
     /// A dialog that does not delete a connection of @p sessions that
     /// runs; @p sessions must outlive it.
     explicit ConnectionDialog( const Sessions* sessions, QWidget* parent = nullptr );
+
+    /// Waits for a listing of the streams still under way: at most its
+    /// timeouts (listStreams() in replay.h).
+    ~ConnectionDialog() override;
 
     /// Set up an empty new connection, with the default settings.
     void newConnection();
@@ -129,6 +139,13 @@ private:
     /// Choose a file for @p edit, titled @p title.
     void browse( QLineEdit* edit, const QString& title );
 
+    /// List the server's streams into the stream list, in the background,
+    /// asking for the password or token first if the method takes one.
+    void listStreams();
+
+    /// The streams were listed: offer @p names, or say what failed.
+    void showStreams( const QStringList& names, const QString& error );
+
     const Sessions* sessions_;
     QComboBox* profileCombo_;
     QPushButton* saveProfileButton_;
@@ -153,8 +170,20 @@ private:
     QSpinBox* pendingMessagesSpin_;
     QSpinBox* pendingMegabytesSpin_;
     QSpinBox* maxFileSpin_;
+    QCheckBox* replayCheck_;
+    QComboBox* replayStreamCombo_;
+    QPushButton* listStreamsButton_;
+    QLineEdit* replayFilterEdit_;
+    QComboBox* replayStartCombo_;
+    QSpinBox* replayLastSpin_;
+    QLineEdit* replaySequenceEdit_;
+    QDateTimeEdit* replayTimeEdit_;
+    QCheckBox* replayFollowCheck_;
+    QList<QWidget*> replayWidgets_; ///< Enabled when Replay is checked.
     QLabel* statusLabel_;
     bool fillingProfiles_ = false; ///< The list is being filled: nothing is loaded.
+    std::thread listing_;          ///< Lists the streams (listStreams()).
+    bool listingStreams_ = false;  ///< listing_ has yet to answer: List is disabled.
 };
 
 } // namespace nats_monitor

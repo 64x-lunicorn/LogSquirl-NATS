@@ -5,7 +5,8 @@ one line to a growing file that LogSquirl follows, so live traffic can be
 searched, filtered and highlighted like any log — also at high message rates.
 
 Status: 0.1.0, live capture (#1–#8, #20), is implemented and not yet released;
-JetStream replay (0.2.0) is next. How the code works:
+of JetStream replay (0.2.0), the replay itself (#9) is implemented, consumer
+cleanup and permissions (#10) are next. How the code works:
 [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md#architecture). Tickets: see
 [Tickets](#tickets).
 
@@ -22,6 +23,15 @@ JetStream replay (0.2.0) is next. How the code works:
 | Queue groups | **Off by default**, per subject (#7) | A session in a queue group takes messages away from the group's other members. |
 | Where the plugin lives in LogSquirl | **A sidebar tab "NATS" with one tile (card) per saved connection**; the connection settings stay in a **dialog**, opened from the tab (*New connection…*, a tile's *Edit*) and from *Plugins → NATS Monitor…*; no status bar widget (#20) | The maintainer chose it after trying the status bar widget in the 26.12 beta. A tile shows what a connection is and, while it runs, what it does (state, msgs/s, received, dropped, server, file), so one glance covers every connection; Start / Stop is on the tile, several run at a time, one session each. The settings (profile, URLs, auth, TLS, subjects, limits) are too many for a sidebar's width, so they stay a dialog, as tcpdump's *Start live capture…* opens one; Serial's few settings fit into its tab. Both Serial and tcpdump keep a menu entry next to their tab, so the plugin does too. The tile widget (`ConnectionTile`) knows nothing of NATS, so that Serial and tcpdump can take the same pattern later. |
 | What a connection saves | **Everything but the secret**: URLs, auth method, user, file paths, TLS, subjects and limits (#20) | A tile starts from its saved connection alone; the password or token is asked for at Start. |
+| Where replay lives in the UI | **A section *JetStream replay* in the connection dialog**: a connection either captures its subjects or replays a stream (stream, optional subject, start, follow live), saved with it and started from its tile like a capture; **List** fetches the server's streams (#9) | No second kind of tile or dialog: the server, auth, TLS and limits are the same, and a tile already shows a session's state and counts. A replay that does not follow live ends by itself; its tile says *replay complete* (state stopped, not failed). |
+| Stream sequence in the line | **An optional field `#<seq>` between the reply field and the size**, only on replayed lines; the Log Format's column `seq`, empty for live lines (#9) | A live line has the size, a number, there, so the regex tells them apart without any new escaping of payloads, and live lines stay as they were. The reply field is `-` on a replayed line: a stream keeps no reply subject. |
+| A replay's full queue | **The delivery waits for the writer** instead of dropping (#9) | The messages are in the stream: dropping them would only make a replay incomplete. While nats.c's delivery thread waits it answers no flow control, so the server holds back; a million messages are written whole in about two seconds. Live capture still drops and counts, since a live publisher cannot be held back. |
+| Last N with a subject filter | **Read the stream from its start and write the last N that match** (the message metadata's pending count); without a filter, start at the sequence N before the end (#9) | Which messages match is the server's to know; a consumer has no "last N" start. Correct, at the price of reading the whole stream when filtered. |
+| Streams with work-queue or interest retention | **Work queue: refused**, saying why, before any consumer is made; **interest: replayed after a `warning:` line** (#10) | A work queue's consumer takes what it reads away from the workers, and the server allows no consumer that does not acknowledge; refusing up front says so in words. An interest stream keeps a message until all its consumers have acknowledged it: the replay's AckNone consumer counts as one more while it runs, so it takes nothing away from the others (a test shows the stream unchanged for its own consumer), but it sees only what is still held, which the warning says. |
+| A replay's consumer after a crash | **Inactive threshold of 5 s** on the ordered consumer (`ReplayConfig::inactiveThresholdMs`); Stop, completion, unload and quit delete it through nats.c's drain (#10) | A crashed or cut-off LogSquirl cannot delete it; the server then does, 5 s after nobody reads it. Short is safe: if the connection comes back after that, nats.c recreates the ordered consumer from the last sequence. |
+| A replay's consumer on a lost connection | **Kept, not deleted, while the connection is down** — a deviation from #10's "deleted on disconnect": the replay resumes on reconnect with the same ordered consumer (or nats.c recreates it from the last sequence). A Stop while disconnected cannot reach the server, so the consumer is left to the inactive threshold (#10) | Deleting it on every disconnect would make a short network blip restart the replay or lose its place, and the delete request could not reach the server anyway. The inactive threshold bounds what is left behind: 5 s after nobody reads it. Tests cover both: a cut that comes back resumes the replay with one consumer, and a Stop after a cut for good leaves the stream's consumers as they were once the threshold has passed. |
+| What a stopped replay does with what nats.c still holds | **Discarded, uncounted, no `dropped=` marker**; the queue is written, then `stopped`, and the drain still deletes the consumer (#9) | #9 asks that a replay can be stopped at any time: writing what nats.c holds, up to the pending limits, made a stop take seconds (5 s under ASan), and the stream keeps those messages. The user stopped it, so it is no drop. A live capture still writes all that arrived before Stop, since nothing else keeps it. |
+| A replay's writer that cannot keep up | **Safe without dropping**: the delivery thread waits, and nothing else (#9, #10) | nats.c marks an ordered consumer active from its reader thread, on every message and heartbeat that arrives, not from the delivery thread that waits: a slow writer misses no heartbeat, so the consumer is not reset. The server sends no more than flow control allows, so what nats.c holds stays far below the pending limits. A test replays 20,000 messages through a queue of one message, each flushed before the next is taken: all arrive once, in order, none dropped. |
 
 ## Architecture
 
@@ -94,14 +104,17 @@ One message per line, fields separated by one space; NATS subjects and reply
 subjects contain no spaces, so the fixed fields parse with a simple regex:
 
 ```
-<UTC timestamp>             <subject>         <reply|-> <size> [<headers>] <payload>
+<UTC timestamp>             <subject>         <reply|-> [#<seq>] <size> [<headers>] <payload>
 2026-11-11 10:00:00.123456Z orders.eu.created _INBOX.ab12 20 {"id":1,"total":9.5}
 2026-11-11 10:00:00.124001Z sensors.t1 - 4 [Nats-Msg-Id=42; Trace=abc] 21.5
+2026-11-11 09:58:12.000301Z orders.eu.created - #1042 20 {"id":1,"total":9.5}
 ```
 
 - **Timestamp**: receive time in UTC, with microseconds (nats.c gives no
   publish time for core NATS; JetStream replay uses the stream's stored
   timestamp instead).
+- **Stream sequence** (replay only): `#` and the message's sequence in its
+  stream, before the size (#9).
 - **Size**: the payload's real size in bytes, also when it is cut.
 - **Headers** (optional): `[k=v; k=v]` before the payload, sorted by key (a
   key with several values once per value). `;`, `]`, `\` and line breaks in
@@ -116,7 +129,7 @@ subjects contain no spaces, so the fixed fields parse with a simple regex:
   client can publish to, in the same format.
 - **Log Format definition** `formats/nats_log.json` (lnav format, shipped via
   `package_files` like tcpdump's) gives the Table View columns *timestamp,
-  subject, reply, size, body*, with subject as identifier.
+  subject, reply, seq, size, body*, with subject as identifier.
 
 ## Tickets
 

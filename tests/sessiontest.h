@@ -136,7 +136,12 @@ public:
         }
     }
 
-private:
+    natsConnection* connection() const
+    {
+        return connection_;
+    }
+
+    /// Fail the test if @p status is not NATS_OK, saying what failed.
     static void check( natsStatus status, const char* what )
     {
         if ( status != NATS_OK ) {
@@ -145,7 +150,152 @@ private:
         }
     }
 
+private:
     natsConnection* connection_ = nullptr;
+};
+
+/// JetStream on the connection of a Publisher: streams to replay, filled
+/// with messages, and what the server says about them.
+class JetStream {
+public:
+    explicit JetStream( Publisher& publisher )
+    {
+        jsOptions options;
+        jsOptions_Init( &options );
+        // Unbounded, a burst overruns the server's ingest queue, which then
+        // refuses messages.
+        options.PublishAsync.MaxPending = 1000;
+        Publisher::check( natsConnection_JetStream( &js_, publisher.connection(), &options ),
+                          "natsConnection_JetStream" );
+    }
+
+    ~JetStream()
+    {
+        jsCtx_Destroy( js_ );
+    }
+
+    JetStream( const JetStream& ) = delete;
+    JetStream& operator=( const JetStream& ) = delete;
+
+    /// Add the stream @p name, in memory, on @p subjects, with @p retention.
+    void addStream( const char* name, const std::vector<const char*>& subjects,
+                    jsRetentionPolicy retention = js_LimitsPolicy )
+    {
+        jsStreamConfig config;
+        jsStreamConfig_Init( &config );
+        config.Name = name;
+        config.Subjects = const_cast<const char**>( subjects.data() );
+        config.SubjectsLen = static_cast<int>( subjects.size() );
+        config.Storage = js_MemoryStorage;
+        config.Retention = retention;
+        jsErrCode error = static_cast<jsErrCode>( 0 );
+        jsStreamInfo* info = nullptr;
+        Publisher::check( js_AddStream( &info, js_, &config, nullptr, &error ), "js_AddStream" );
+        jsStreamInfo_Destroy( info );
+    }
+
+    /// Add the durable pull consumer @p durable to the stream @p name; it
+    /// acknowledges explicitly, and is never read here.
+    void addDurable( const char* name, const char* durable )
+    {
+        jsConsumerConfig config;
+        jsConsumerConfig_Init( &config );
+        config.Durable = durable;
+        config.AckPolicy = js_AckExplicit;
+        jsConsumerInfo* info = nullptr;
+        Publisher::check( js_AddConsumer( &info, js_, name, &config, nullptr, nullptr ),
+                          "js_AddConsumer" );
+        jsConsumerInfo_Destroy( info );
+    }
+
+    /// Publish @p payload on @p subject into its stream; the sequence the
+    /// stream stored it at.
+    quint64 publish( const char* subject, const QByteArray& payload,
+                     const std::vector<std::pair<const char*, const char*>>& headers = {} )
+    {
+        natsMsg* message = nullptr;
+        Publisher::check( natsMsg_Create( &message, subject, nullptr, payload.constData(),
+                                          static_cast<int>( payload.size() ) ),
+                          "natsMsg_Create" );
+        for ( const auto& [ key, value ] : headers ) {
+            natsMsgHeader_Add( message, key, value );
+        }
+        jsPubAck* ack = nullptr;
+        const auto status = js_PublishMsg( &ack, js_, message, nullptr, nullptr );
+        natsMsg_Destroy( message );
+        Publisher::check( status, "js_PublishMsg" );
+        const auto sequence = ack->Sequence;
+        jsPubAck_Destroy( ack );
+        return sequence;
+    }
+
+    /// Publish @p count messages "1", "2", … on @p subject into the stream
+    /// @p name, without waiting for each acknowledgment, and check that it
+    /// holds them.
+    void publishMany( const char* name, const char* subject, int count )
+    {
+        const auto before = messageCount( name );
+        for ( int i = 1; i <= count; ++i ) {
+            const auto payload = QByteArray::number( i );
+            Publisher::check( js_PublishAsync( js_, subject, payload.constData(),
+                                               static_cast<int>( payload.size() ), nullptr ),
+                              "js_PublishAsync" );
+        }
+        jsPubOptions options;
+        jsPubOptions_Init( &options );
+        options.MaxWait = 60000;
+        Publisher::check( js_PublishAsyncComplete( js_, &options ), "js_PublishAsyncComplete" );
+        REQUIRE( messageCount( name ) == before + count );
+    }
+
+    /// How many messages the stream @p name holds.
+    quint64 messageCount( const char* name )
+    {
+        jsStreamInfo* info = nullptr;
+        Publisher::check( js_GetStreamInfo( &info, js_, name, nullptr, nullptr ),
+                          "js_GetStreamInfo" );
+        const auto count = info->State.Msgs;
+        jsStreamInfo_Destroy( info );
+        return count;
+    }
+
+    /// The time the stream @p name stored its message @p sequence, in
+    /// microseconds since the epoch (UTC).
+    qint64 storedUs( const char* name, quint64 sequence )
+    {
+        natsMsg* message = nullptr;
+        Publisher::check( js_GetMsg( &message, js_, name, sequence, nullptr, nullptr ),
+                          "js_GetMsg" );
+        const auto ns = natsMsg_GetTime( message );
+        natsMsg_Destroy( message );
+        return ns / 1000;
+    }
+
+    /// The names of the consumers of the stream @p name, sorted.
+    QStringList consumers( const char* name )
+    {
+        jsConsumerNamesList* list = nullptr;
+        const auto status = js_ConsumerNames( &list, js_, name, nullptr, nullptr );
+        if ( status == NATS_NOT_FOUND ) {
+            return {}; // nats.c's answer for none
+        }
+        Publisher::check( status, "js_ConsumerNames" );
+        QStringList names;
+        for ( int i = 0; list && i < list->Count; ++i ) {
+            names << QString::fromUtf8( list->List[ i ] );
+        }
+        jsConsumerNamesList_Destroy( list );
+        names.sort();
+        return names;
+    }
+
+    jsCtx* context() const
+    {
+        return js_;
+    }
+
+private:
+    jsCtx* js_ = nullptr;
 };
 
 } // namespace nats_test

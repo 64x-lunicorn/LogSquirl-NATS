@@ -22,9 +22,10 @@
  * @brief A session's connection settings as nats.c options, and why a
  *        connection failed in words the user can act on.
  *
- * Part of NatsSession (natssession.cpp), apart because it is all about
- * nats.c's options: the server URLs, the authentication method and TLS of
- * a SessionConfig.  Tested through the session (auth_test.cpp).
+ * Part of NatsSession (natssession.cpp) and of listStreams() (replay.cpp),
+ * apart because it is all about nats.c's options: the server URLs, the
+ * authentication method and TLS of a SessionConfig, and connecting with
+ * them.  Tested through the session (auth_test.cpp).
  */
 
 #pragma once
@@ -72,5 +73,20 @@ QString configureConnection( natsOptions* options, const SessionConfig& config )
  */
 QString explainConnectFailure( const SessionConfig& config, natsStatus status,
                                const QString& detail );
+
+/// nats.c's text for @p status, followed by this thread's last nats.c
+/// error in parentheses if there is one.
+QString describeStatus( natsStatus status );
+
+/**
+ * Set up @p options for @p config (configureConnection()) and connect with
+ * them as @p connection: the steps a session and a listing of the streams
+ * share.  Any other option (callbacks, a timeout) is the caller's to set
+ * on @p options.
+ *
+ * @return empty, or why it failed, for the user: "connection to <URLs>
+ *         failed: …", the URLs without passwords.
+ */
+QString connectTo( natsOptions* options, const SessionConfig& config, natsConnection** connection );
 
 } // namespace nats_monitor

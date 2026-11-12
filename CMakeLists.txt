@@ -53,6 +53,7 @@ set(LOGSQUIRL_NATS_SOURCES
     src/natssession.cpp
     src/nkey.cpp
     src/profiles.cpp
+    src/replay.cpp
     src/sessions.cpp
     src/sidebarwidget.cpp
     src/subjects.cpp

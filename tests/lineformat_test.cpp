@@ -32,6 +32,7 @@
 using nats_monitor::formatLine;
 using nats_monitor::formatMarker;
 using nats_monitor::FormatOptions;
+using nats_monitor::formatTimestamp;
 using nats_monitor::Message;
 
 namespace {
@@ -276,6 +277,55 @@ SCENARIO( "a marker line has the same format", "[lineformat]" )
         {
             REQUIRE( formatMarker( kReceived, "disconnected" )
                      == "2026-11-11 10:00:00.123456Z $NATS-MONITOR - 12 disconnected" );
+        }
+    }
+}
+
+SCENARIO( "a time is named as a line's timestamp", "[lineformat]" )
+{
+    GIVEN( "a time in microseconds" )
+    {
+        THEN( "it reads as the timestamp field of a line" )
+        {
+            REQUIRE( formatTimestamp( kReceived ) == "2026-11-11 10:00:00.123456Z" );
+        }
+    }
+}
+
+SCENARIO( "a message replayed from a JetStream stream carries its stream sequence",
+          "[lineformat][replay]" )
+{
+    GIVEN( "a replayed message with its stored time and stream sequence 42" )
+    {
+        auto m = message( "orders.eu.created", R"({"id":1})" );
+        m.streamSequence = 42;
+
+        THEN( "the sequence follows the reply field as #42, before the size" )
+        {
+            REQUIRE( formatLine( m )
+                     == R"(2026-11-11 10:00:00.123456Z orders.eu.created - #42 8 {"id":1})" );
+        }
+    }
+
+    GIVEN( "a replayed message with headers and a payload starting with #" )
+    {
+        auto m = message( "s", "#1 up" );
+        m.streamSequence = 18446744073709551615ULL; // the largest a stream has
+        m.headers = { { "Nats-Msg-Id", "7" } };
+
+        THEN( "headers and payload follow the size as in a live line" )
+        {
+            REQUIRE( formatLine( m )
+                     == "2026-11-11 10:00:00.123456Z s - #18446744073709551615 5 "
+                        "[Nats-Msg-Id=7] #1 up" );
+        }
+    }
+
+    GIVEN( "a live message: no stream sequence" )
+    {
+        THEN( "there is no # field" )
+        {
+            REQUIRE( formatLine( message( "s", "#1" ) ) == "2026-11-11 10:00:00.123456Z s - 2 #1" );
         }
     }
 }

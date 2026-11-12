@@ -170,6 +170,106 @@ in `natssession_test.cpp` (and a queue group shared with another member);
 several connections and the overlap warning through the tab and the dialog
 in `plugin_test.cpp`.
 
+### JetStream replay
+
+With `SessionConfig::replay` set (a `ReplayConfig` with a stream name), a
+session replays the stream instead of subscribing to its subjects
+([`src/natssession.h`](../src/natssession.h), REPLAY). The writer thread
+connects, writes `connected to …, replaying stream ORDERS, …`
+(`describeReplay()`, [`src/replay.h`](../src/replay.h), which also has
+the start positions as one table, `kReplayStarts`, and the checks a replay
+must pass, `replayProblem()`) and subscribes with `js_Subscribe` and
+`jsSubOptions::Ordered`: nats.c's ordered push consumer, ephemeral, AckNone,
+with flow control and heartbeats, which nats.c recreates from the last
+stream sequence after a gap or a reconnect. The filter subject is the
+`ReplayConfig::filterSubject`, or `>` for all of the stream's.
+
+- **Start.** *All*: `js_DeliverAll`. *Sequence*: `js_DeliverByStartSequence`
+  with `OptStartSeq`. *Time*: `js_DeliverByStartTime` with `OptStartTime`
+  (nanoseconds). nats.c (3.14) writes that time's fraction of a second
+  without its leading zeros (`nats_EncodeTimeUTC`: 12:00:00.025 goes out as
+  12:00:00.25), so a time less than 0.1 s into its second starts the
+  consumer at the whole second instead, and the callback skips what was
+  stored before the time, until the first one written (fixed in nats.c's
+  main, 974c232, after 3.14.0: with a release of it this can go).
+  *Last N* without a filter: by start sequence, `OptStartSeq` = the
+  stream's last sequence − N + 1, from `js_GetStreamInfo`. *Last N* with
+  a filter: which messages match is the server's to know, so it delivers
+  all and the callback skips while the message's `NumPending` (metadata)
+  is N or more, until the first one written.
+- **The line.** `onReplayMessage` reads `natsMsg_GetMetaData`: the stored
+  time (`Timestamp`) and the stream sequence go into `Message`, and the
+  reply is cleared (nats.c's is the consumer's; the stream keeps none).
+- **Caught up.** A message with `NumPending` 0 is the last one there was:
+  with `followLive` the writer writes `caught up, following live` and goes
+  on; otherwise the writer ends as on stop, writes `replay complete` and
+  the session emits `completed()` (not `finished()`, which is a failure),
+  on which `Sessions` sets the tile to stopped with *replay complete*. With
+  nothing to replay no message comes, so after subscribing the consumer's
+  info (`natsSubscription_GetConsumerInfo`: nothing pending, nothing
+  delivered) says it.
+- **No drops by the plugin.** A replay's message callback waits for room in
+  the queue instead of dropping (`Shared::waitForRoom`, woken when the
+  writer takes the queue, and not while stopping): the stream holds the
+  messages, and while nats.c's delivery thread waits it answers no flow
+  control, so the server holds back. A stream of a million messages is
+  written whole in about two seconds; stop ends it at once. A writer that
+  cannot keep up misses no heartbeat: nats.c marks the ordered consumer
+  active from its reader thread, on each message and heartbeat that
+  arrives (`jsSub_trackSequences`, conn.c), not from the delivery thread
+  that waits, so the consumer is not reset; a test replays 20,000 messages
+  through a queue of one.
+- **Retention.** Before subscribing, `js_GetStreamInfo` gives the stream's
+  retention (and its first and last sequence, for *Last N*). A work queue
+  (`js_WorkQueuePolicy`) is refused: the replay fails with `replaying
+  stream JOBS failed: it is a work queue …`, before any consumer exists.
+  An interest stream (`js_InterestPolicy`) gets a `warning: stream EVENTS
+  has interest retention …` marker (a status event) and is replayed.
+- **Stop** drains the subscription like a live one; for a consumer
+  nats.c created, the drain (or unsubscribe) also deletes it on the server.
+  Unlike a live capture, a replay writes nothing nats.c delivers once
+  stopping (`Shared::discarding`; a callback waiting for room discards its
+  message too): what it holds, up to the pending limits, the stream keeps,
+  and writing it held a stop up for seconds under a sanitizer. It is
+  neither counted nor marked as dropped, since the user stopped it; what
+  was written until then is in order, followed by `stopped`. A test stops
+  a replay through a queue of one, whose backlog in nats.c is largest.
+  Unload and quit stop the same way (`Sessions::stopAll()`). A lost
+  connection keeps the consumer, so the replay resumes on reconnect; a
+  Stop while disconnected leaves it to the inactive threshold (PLAN.md,
+  Decisions).
+- **Inactive threshold.** When the delete request cannot reach the server
+  (a crash, the connection down at Stop) the consumer's
+  `InactiveThreshold` (`ReplayConfig::inactiveThresholdMs`, 5 s by
+  default; 0 leaves it to the server) removes it once nobody reads its
+  deliver subject. nats.c copies the config when it recreates the ordered
+  consumer, and the consumer it replaces goes the same way.
+
+The streams the dialog offers come from `listStreams()` (replay.h;
+it connects with `connectTo()`, as the session does, natsoptions.h;
+`js_StreamNames`, `$JS.API.STREAM.NAMES`), run on a thread of the dialog;
+List is disabled until it answers. The dialog joins it when it goes (at
+shutdown, before the library may be unloaded), so the listing bounds
+itself: 2 s to connect to each server URL and 2 s for each answer. The tests (`[replay]`) are at the main
+seam, `replay_test.cpp`, against a server started with `-js`
+(`NatsServerOptions::jetStream`); `nats_test::JetStream`
+([`tests/sessiontest.h`](../tests/sessiontest.h)) adds memory streams,
+publishes into them and reads their message count, stored times and
+consumers. The million-message test (`[large]`) takes about ten seconds.
+
+The cleanup tests (`[cleanup]`) start from a stream with a durable consumer
+of its own and compare the stream's consumer list before and after Stop, a completed replay, unload and quit (`plugin_test.cpp`), a
+connection cut and restored, and a Stop while the connection is down. The
+connection is cut by `nats_test::TcpProxy`
+([`tests/tcpproxy.h`](../tests/tcpproxy.h)), a proxy in its own thread in
+front of the server: `cut()` closes the connections, `refuse()` accepts no
+new ones. A crash is a real one: the test program starts itself as a child
+process running the hidden test *a replay runs in a process of its own
+until it is killed* (`[.][child]`, set up through environment variables),
+kills it and waits for the consumer to go, with a threshold of 500 ms. The
+permissions the README lists are checked by `permissions_test.cpp`
+(`[permissions]`) against a server configured with exactly those.
+
 ### The sidebar tab and its tiles
 
 The tab "NATS" ([`src/sidebarwidget.h`](../src/sidebarwidget.h)) is
@@ -210,7 +310,8 @@ question by finding the modal dialog from a timer (`onNextModal()` in
 ### The Log Format
 
 `formats/nats_log.json` gives LogSquirl's Table View the columns
-*timestamp, subject, reply, size, body* (the body being the headers and
+*timestamp, subject, reply, seq, size, body* (seq the stream sequence of a
+replayed message, the body being the headers and
 the payload). CI packages it beside the library (`package_files` in
 `.github/plugin-ci.json`, flat), the install rule does the same, and
 `plugin.json`'s `formats` names it, so LogSquirl 26.12 and later read it
@@ -426,6 +527,7 @@ a stopped server back for a reconnect test.
 ### The test seams
 
 - **A capture session against a real `nats-server`** (`natssession_test.cpp`,
+  `replay_test.cpp` with JetStream,
   and through the tab and the dialog in `plugin_test.cpp`, driven against
   `FakeHost`): start a `NatsSession`,
   publish with `nats_test::Publisher`, and assert on the lines of

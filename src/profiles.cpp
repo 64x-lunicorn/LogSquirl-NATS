@@ -26,6 +26,7 @@
 
 #include "authmethods.h"
 #include "natsoptions.h"
+#include "replay.h"
 #include "subjects.h"
 
 #include <QSettings>
@@ -143,6 +144,46 @@ void writeCapture( QSettings& settings, const ConnectionProfile& profile )
     settings.endGroup();
 }
 
+/// The replay, in the group "replay"; none if the profile has no stream.
+ReplayConfig readReplay( QSettings& settings )
+{
+    ReplayConfig replay;
+    settings.beginGroup( "replay" );
+    replay.stream = settings.value( "stream" ).toString();
+    replay.filterSubject = settings.value( "filterSubject" ).toString();
+    const auto start = settings.value( "start" ).toString();
+    for ( const auto& info : kReplayStarts ) {
+        if ( start == QLatin1String( info.savedName ) ) {
+            replay.start = info.start;
+        }
+    }
+    bool ok = false;
+    if ( const auto last = settings.value( "lastMessages" ).toULongLong( &ok ); ok && last > 0 ) {
+        replay.lastMessages = last;
+    }
+    if ( const auto sequence = settings.value( "sequence" ).toULongLong( &ok );
+         ok && sequence > 0 ) {
+        replay.sequence = sequence;
+    }
+    replay.timeUs = settings.value( "timeUs", 0 ).toLongLong();
+    replay.followLive = settings.value( "followLive", false ).toBool();
+    settings.endGroup();
+    return replay;
+}
+
+void writeReplay( QSettings& settings, const ReplayConfig& replay )
+{
+    settings.beginGroup( "replay" );
+    settings.setValue( "stream", replay.stream );
+    settings.setValue( "filterSubject", replay.filterSubject );
+    settings.setValue( "start", QString::fromLatin1( replayStartInfo( replay.start ).savedName ) );
+    settings.setValue( "lastMessages", replay.lastMessages );
+    settings.setValue( "sequence", replay.sequence );
+    settings.setValue( "timeUs", replay.timeUs );
+    settings.setValue( "followLive", replay.followLive );
+    settings.endGroup();
+}
+
 } // namespace
 
 QList<Subscription> ConnectionProfile::subscriptions() const
@@ -170,12 +211,30 @@ QString startProblem( const ConnectionProfile& profile )
     if ( profile.url.isEmpty() ) {
         return QStringLiteral( "Enter the server URL." );
     }
-    const auto subjects = parseSubscriptions( profile.subjects );
-    if ( !subjects.error.isEmpty() ) {
-        return subjects.error;
+    if ( profile.replay.enabled() ) {
+        if ( const auto problem = replayProblem( profile.replay ); !problem.isEmpty() ) {
+            return problem;
+        }
+        const auto filter = profile.replay.filterSubject;
+        if ( !filter.isEmpty() ) {
+            const auto parsed = parseSubscriptions( filter );
+            if ( !parsed.error.isEmpty() ) {
+                return parsed.error;
+            }
+            if ( parsed.subscriptions.size() != 1
+                 || !parsed.subscriptions.front().queueGroup.isEmpty() ) {
+                return QStringLiteral( "Enter one subject to replay, or none for all." );
+            }
+        }
     }
-    if ( subjects.subscriptions.isEmpty() ) {
-        return QStringLiteral( "Enter the subject to capture." );
+    else {
+        const auto subjects = parseSubscriptions( profile.subjects );
+        if ( !subjects.error.isEmpty() ) {
+            return subjects.error;
+        }
+        if ( subjects.subscriptions.isEmpty() ) {
+            return QStringLiteral( "Enter the subject to capture." );
+        }
     }
     const auto& method = authMethodInfo( profile.auth.method );
     if ( method.takesUser && profile.auth.user.isEmpty() ) {
@@ -199,6 +258,7 @@ SessionConfig sessionConfig( const ConnectionProfile& profile )
         config.tls = profile.tls; // also for a tls:// URL with Use TLS unchecked
     }
     config.subscriptions = profile.subscriptions();
+    config.replay = profile.replay;
     config.format.maxBinaryBytes = profile.maxBinaryBytes;
     config.pendingLimits = profile.pendingLimits;
     config.maxFileBytes = profile.maxFileMiB * kBytesPerMiB;
@@ -224,6 +284,7 @@ QList<ConnectionProfile> loadProfiles( const QString& settingsFile )
         profile.auth = readAuth( settings );
         profile.tls = readTls( settings );
         readCapture( settings, profile );
+        profile.replay = readReplay( settings );
         profiles << profile;
     }
     settings.endArray();
@@ -246,6 +307,7 @@ bool saveProfiles( const QString& settingsFile, const QList<ConnectionProfile>& 
         writeAuth( settings, profile.auth );
         writeTls( settings, profile.tls );
         writeCapture( settings, profile );
+        writeReplay( settings, profile.replay );
     }
     settings.endArray();
     settings.sync();

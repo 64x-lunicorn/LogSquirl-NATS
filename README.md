@@ -44,9 +44,10 @@ already are.
 | Less setup | More signal |
 | :--- | :--- |
 | **Every capture its own tab.** Each Start opens a followed LogSquirl tab; run as many connections side by side as you like. | **One message, one line.** Timestamp, subject, reply subject, size, headers and payload, so a regex finds a message and the line shows all of it. |
-| **Saved connections, one tile each.** Server URLs, authentication, TLS and subjects saved by name, started and watched from the NATS sidebar tab — never a password or token saved. | **Columns in the Table View.** A Log Format ships with the plugin: *timestamp, subject, reply, size, body*. |
+| **Saved connections, one tile each.** Server URLs, authentication, TLS and subjects saved by name, started and watched from the NATS sidebar tab — never a password or token saved. | **Columns in the Table View.** A Log Format ships with the plugin: *timestamp, subject, reply, seq, size, body*. |
 | **Several subjects per session.** Wildcards, queue groups, and a warning when two subjects overlap. | **Nothing dropped silently.** A `dropped=` line marks every gap, and the connection's tile counts them. |
 | **Nothing to install.** nats.c and OpenSSL are linked in: no NATS CLI, no system OpenSSL. | **Bounded files.** A capture goes on in a new file and tab at a size limit you choose. |
+| **Replay what already happened.** A JetStream stream into a tab, from its start, the last N messages, a sequence or a time, optionally following live; the stream is left as it is. | **Stored time and sequence.** A replayed line has the time the stream stored the message and its stream sequence. |
 
 ## Install
 
@@ -147,13 +148,49 @@ After installing, restart LogSquirl or re-scan via *Plugins → Manage Plugins�
      *No limit* turns it off). A message line is never split. A new
      connection proposes the last one saved.
 
-6. **Save** — the connection gets a tile in the NATS tab, or its tile is
+6. **JetStream replay** (optional) — check *Replay a JetStream stream
+   instead of capturing the subjects* to write what a stream already holds
+   rather than what comes next:
+   - **Stream** — its name; **List** fetches the server's streams to choose
+     from (asking for the password or token, if the connection uses one).
+   - **Subject** — replay only the messages on this subject (`*` and `>`
+     allowed); empty for all of the stream's.
+   - **Start at** — *All messages*, the *Last messages* (the last N, of
+     those that match the subject), *From sequence* (a stream sequence) or
+     *From time (UTC)*.
+   - **Then go on with new messages (follow live)** — once caught up, keep
+     writing what the stream stores from then on, until Stop. Without it
+     the replay ends by itself, with a `replay complete` line, and the
+     tile says so.
+
+   The replay reads through an ordered ephemeral consumer that never
+   acknowledges (AckNone): it is never durable and takes no message away
+   from anyone, so the stream is left as it is. A replayed line has the
+   time the stream stored the message and its stream sequence (see
+   [Line Format](#line-format)). A stream of any size is written whole:
+   instead of dropping, the replay waits for the file. Stop ends it at any
+   point.
+
+   The consumer goes with the replay: Stop, a replay that completes,
+   unloading the plugin and quitting LogSquirl delete it. If LogSquirl
+   crashes, or the connection is lost for good, the server deletes it
+   5 seconds after its reader went away (its inactive threshold).
+
+   A stream with **work-queue** retention is not replayed: its consumer
+   would take the messages away from the workers, and the replay says so.
+   A stream with **interest** retention is replayed after a `warning:`
+   line: it holds only the messages its consumers have yet to acknowledge,
+   and the replay is one more consumer while it runs (it takes no message
+   away from the others).
+
+7. **Save** — the connection gets a tile in the NATS tab, or its tile is
    updated. Choose a saved connection in the *Name* list to change it,
    **Delete** to remove it. Connections are saved in `nats.ini` in the
    plugin's configuration directory, without passwords or tokens.
 
-7. **The tiles.** Each saved connection is a tile, showing its server, how
-   it logs in, whether it uses TLS, and its subjects.
+8. **The tiles.** Each saved connection is a tile, showing its server, how
+   it logs in, whether it uses TLS, and its subjects or the stream it
+   replays.
    - **▶ Start** connects, subscribes and opens the capture in a new tab in
      follow mode; it asks for the password or token first, if the
      connection uses one. Several tiles can run at a time, each with its
@@ -178,12 +215,51 @@ After installing, restart LogSquirl or re-scan via *Plugins → Manage Plugins�
 
 **Where the files are.** A capture is written to
 `nats_<subjects>.log` (then `nats_<subjects>.2.log`, … after the size
-limit; `orders.>` gives `nats_orders._.log`) in a temporary directory `logsquirl-nats-<pid>-XXXXXX`. The files stay
+limit; `orders.>` gives `nats_orders._.log`; a replay of the stream
+`ORDERS` gives `nats_replay_ORDERS.log`) in a temporary directory `logsquirl-nats-<pid>-XXXXXX`. The files stay
 while LogSquirl runs, also after Stop, and are removed when it quits; copy
 one elsewhere to keep it.
 
 *Plugins → Manage Plugins… → Configure* has no settings yet: everything is in
 the NATS tab and its dialog.
+
+### NATS permissions
+
+If the server restricts what a user may do, these are the least the
+plugin needs (a test checks them against a server configured with exactly
+these, `tests/permissions_test.cpp`).
+
+**Live capture** needs to subscribe to its subjects, and to publish
+nothing:
+
+```text
+permissions: {
+  publish:   { deny: ">" }
+  subscribe: { allow: ["orders.>"] }      # the connection's subjects
+}
+```
+
+**Replay** cannot change the stream's messages: it may read the stream,
+and create, read and delete a consumer (its own, while it runs), but
+neither purge the stream nor publish into it. For the stream `ORDERS`:
+
+```text
+permissions: {
+  publish: { allow: [
+    "$JS.API.STREAM.NAMES",               # List, in the dialog
+    "$JS.API.STREAM.INFO.ORDERS",
+    "$JS.API.CONSUMER.CREATE.ORDERS",
+    "$JS.API.CONSUMER.INFO.ORDERS.*",
+    "$JS.API.CONSUMER.DELETE.ORDERS.*",
+    "$JS.FC.ORDERS.>"                     # flow control replies
+  ] }
+  subscribe: { allow: ["_INBOX.>"] }      # deliveries and API replies
+}
+```
+
+`*` in place of `ORDERS` allows any stream. Without `CONSUMER.DELETE`
+the consumer is left until its inactive threshold; without `JS.FC` a
+large replay stalls.
 
 ### Screenshots still to take
 
@@ -202,17 +278,23 @@ until then each has a marked placeholder above or below:
 One message per line, fields separated by one space:
 
 ```text
-<UTC timestamp>             <subject>         <reply|-> <size> [<headers>] <payload>
+<UTC timestamp>             <subject>         <reply|-> [#<seq>] <size> [<headers>] <payload>
 2026-11-11 10:00:00.123456Z orders.eu.created _INBOX.ab12 20 {"id":1,"total":9.5}
 2026-11-11 10:00:00.124001Z sensors.t1 - 4 [Nats-Msg-Id=42; Trace=abc] 21.5
 2026-11-11 10:00:00.125000Z bin - 4 hex:0001feff
 2026-11-11 10:00:02.000000Z $NATS-MONITOR - 28 dropped=1234 (slow consumer)
+2026-11-11 09:58:12.000301Z orders.eu.created - #1042 20 {"id":1,"total":9.5}
 ```
 
 - **Timestamp** — when the plugin received the message, in UTC, with
-  microseconds.
+  microseconds; for a message replayed from a JetStream stream, when the
+  stream stored it.
 - **Subject**, **reply subject** (`-` for none) — NATS subjects contain no
-  spaces, so these fields always parse.
+  spaces, so these fields always parse. A replayed message has no reply
+  subject: the stream keeps none.
+- **Stream sequence**, for a replayed message only — `#` and the message's
+  sequence in its stream (`#1042`). A live line has the size there, a
+  number, so the two never mix up.
 - **Size** — the payload's size in bytes, also when the line shows only part
   of it.
 - **Headers**, when there are any — `[k=v; k=v]`, sorted by key; `;`, `]`,
@@ -226,7 +308,9 @@ One message per line, fields separated by one space:
   `$NATS-MONITOR`, which no client can publish to: `connected to …,
   subscribed to …`, `disconnected`, `reconnected to …`, `connection to …
   failed: …`, `error: …`, `connection closed`, `stopped`, and `dropped=<n> (slow consumer)` or `dropped=<n> (queue full)` where
-  messages were lost. Search for `$NATS-MONITOR` to find every event.
+  messages were lost; for a replay `connected to …, replaying stream …`,
+  `caught up, following live`, `replay complete` and `replaying … failed:
+  …`. Search for `$NATS-MONITOR` to find every event.
 
 ### Log Format and the Table View
 
@@ -235,9 +319,10 @@ which gives LogSquirl's Table View these columns:
 
 | Column | Holds |
 |--------|-------|
-| `timestamp` | The receive time (UTC) |
+| `timestamp` | The receive time (UTC); for a replayed message the time the stream stored it |
 | `subject` | The subject; `$NATS-MONITOR` for a marker line. The identifier column |
 | `reply` | The reply subject, `-` for none |
+| `seq` | The stream sequence of a replayed message; empty for a live one |
 | `size` | The payload's size in bytes |
 | `body` | The headers and the payload |
 
@@ -247,7 +332,7 @@ about 1 MB (a message with a large payload) gets no columns: LogSquirl does
 not match longer lines.
 
 <!-- screenshot: docs/images/table-view.png — the Table View of a capture
-     with the timestamp, subject, reply, size and body columns. -->
+     with the timestamp, subject, reply, seq, size and body columns. -->
 
 > **Screenshot pending:** the Table View with the plugin's columns.
 
@@ -431,8 +516,9 @@ LogSquirl-NATS/
 │   ├── sidebarwidget.*         # The NATS sidebar tab: a tile per saved connection
 │   ├── connectiontile.*        # One tile: plain, knows nothing of NATS
 │   ├── sessions.*              # The captures, one session per connection
-│   ├── natssession.*           # A capture: connection, subscriptions, queue, writer
-│   ├── natsoptions.*           # Settings → nats.c options; failures in words
+│   ├── natssession.*           # A capture or replay: connection, subscriptions, queue, writer
+│   ├── replay.*                # A replay's start positions, description, checks; List
+│   ├── natsoptions.*           # Settings → nats.c options, connecting; failures in words
 │   ├── authmethods.h           # The authentication methods, one table
 │   ├── nkey.*                  # The public key of an NKey seed
 │   ├── profiles.*              # Saved connection profiles

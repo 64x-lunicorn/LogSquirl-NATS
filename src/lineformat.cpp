@@ -164,6 +164,11 @@ QByteArray formatLine( const Message& message, const FormatOptions& options )
         line.append( message.reply );
     }
     line.append( ' ' );
+    if ( message.streamSequence != 0 ) {
+        line.append( '#' );
+        line.append( QByteArray::number( message.streamSequence ) );
+        line.append( ' ' );
+    }
     line.append( QByteArray::number( payload.size() ) );
 
     if ( !message.headers.isEmpty() ) {
@@ -200,6 +205,13 @@ QByteArray formatMarker( qint64 receivedUs, const QByteArray& text )
     marker.subject = kMarkerSubject;
     marker.payload = text;
     return formatLine( marker );
+}
+
+QByteArray formatTimestamp( qint64 us )
+{
+    QByteArray timestamp;
+    appendTimestamp( timestamp, us );
+    return timestamp;
 }
 
 qint64 nowUs()

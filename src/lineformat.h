@@ -21,14 +21,19 @@
  * @file lineformat.h
  * @brief The line format: one NATS message, one line of the log file.
  *
- *     <UTC timestamp>             <subject>         <reply|-> <size> [<headers>] <payload>
+ *     <UTC timestamp>             <subject>         <reply|-> [#<seq>] <size> [<headers>] <payload>
  *     2026-11-11 10:00:00.123456Z orders.eu.created _INBOX.ab12 20 {"id":1,"total":9.5}
  *     2026-11-11 10:00:00.124001Z sensors.t1 - 4 [Nats-Msg-Id=42; Trace=abc] 21.5
+ *     2026-11-11 09:58:12.000301Z orders.eu.created - #1042 20 {"id":1,"total":9.5}
  *
  * Fields are separated by one space.  Subjects contain no spaces (NATS
  * rules), so the fixed fields parse with a simple regex.
  *
- *   - Timestamp: receive time in UTC, with microseconds.
+ *   - Timestamp: receive time in UTC, with microseconds; for a message
+ *     replayed from a JetStream stream, the time the stream stored it.
+ *   - Stream sequence, for a replayed message only: `#` and the message's
+ *     sequence in its stream, between the reply field and the size.  A
+ *     live line has a number there, the size, so the two never mix up.
  *   - Size: the payload's real size in bytes, also when it is cut.
  *   - Headers, when there are any: `[k=v; k=v]`, in the order of
  *     Message::headers, with `;`, `]`, `\` and line breaks in keys and
@@ -65,7 +70,12 @@ constexpr int kDefaultMaxBinaryBytes = 256;
 
 /// A received message, as the formatter needs it.
 struct Message {
-    qint64 receivedUs = 0; ///< Receive time, microseconds since the epoch (UTC).
+    /// Receive time, microseconds since the epoch (UTC); for a message
+    /// replayed from a JetStream stream, the time the stream stored it.
+    qint64 receivedUs = 0;
+    /// The message's sequence in its JetStream stream, for a replayed
+    /// message; 0 for a live one (a stream's sequences start at 1).
+    quint64 streamSequence = 0;
     QByteArray subject;
     QByteArray reply; ///< Empty: none.
     /// Header keys and values, in the order they are written; a key with
@@ -85,6 +95,10 @@ QByteArray formatLine( const Message& message, const FormatOptions& options = {}
 /// A marker line for an event the plugin itself reports, without a line
 /// terminator.  @p text is formatted as a payload.
 QByteArray formatMarker( qint64 receivedUs, const QByteArray& text );
+
+/// @p us microseconds since the epoch as a line's timestamp has it:
+/// "2026-11-11 10:00:00.123456Z" (UTC).
+QByteArray formatTimestamp( qint64 us );
 
 /// The current time in microseconds since the epoch, for Message::receivedUs.
 qint64 nowUs();

@@ -84,6 +84,34 @@
  * keeps writing the current one, reports the error once and tries again
  * once that file has grown by the limit once more.  0 means no limit.
  *
+ * REPLAY
+ * ──────
+ * With SessionConfig::replay set, the session replays a JetStream stream
+ * instead of subscribing: what the stream already holds, from the start
+ * position, optionally only the messages on a subject.  It reads through an
+ * ordered ephemeral consumer with AckNone (nats.c's ordered push consumer),
+ * never durable and never acknowledging, so the replay takes no message
+ * away from anyone and leaves the stream as it is.  A replayed line has the
+ * time the stream stored the message and its stream sequence (lineformat.h),
+ * and the reply field "-" (the stream keeps no reply subject).
+ *
+ * Once the replay has caught up (the consumer has nothing more pending), it
+ * either ends, with a "replay complete" marker and completed(), or, with
+ * ReplayConfig::followLive, writes "caught up, following live" and goes on
+ * with what the stream stores from then on, until stop().
+ *
+ * The writer, rotation and drop accounting are those of a live capture,
+ * except that a full queue makes the delivery wait instead of dropping: the
+ * stream holds the messages, and JetStream's flow control holds the server
+ * back meanwhile, so a replay of any size is written whole at the speed of
+ * the writer.  stop() ends a replay at any point: what was queued is
+ * written, what nats.c still holds is discarded, uncounted and with no
+ * dropped= marker (the stream keeps it), so a stop does not wait for it.
+ *
+ * "The last N messages" with a filter subject reads the stream from its
+ * start and writes the last N that match; without a filter it starts at
+ * the stream sequence N before the end.
+ *
  * USAGE
  * ─────
  *   SessionConfig config;
@@ -132,6 +160,10 @@ inline constexpr qint64 kBytesPerMiB = 1024 * 1024;
 /// The size limit in MiB the dialog proposes, unless the user chose another.
 inline constexpr int kDefaultMaxFileMiB = 256;
 
+/// The default inactive threshold of a replay's consumer, in milliseconds:
+/// the server deletes it this long after its reader went away.
+inline constexpr int kDefaultInactiveThresholdMs = 5000;
+
 /// How a session proves who it is to the server.
 enum class AuthMethod {
     None,         ///< No credentials.
@@ -171,11 +203,48 @@ struct Subscription {
 /// "orders.>, jobs.* (queue workers)".
 QString describeSubscriptions( const QList<Subscription>& subscriptions );
 
+/// Where a replay starts in its stream (REPLAY).
+enum class ReplayStart {
+    All,      ///< At the stream's first message.
+    Last,     ///< At the last ReplayConfig::lastMessages messages (that match the filter).
+    Sequence, ///< At the stream sequence ReplayConfig::sequence.
+    Time,     ///< At the first message stored at or after ReplayConfig::timeUs.
+};
+
+/// What a session replays from a JetStream stream (REPLAY).
+struct ReplayConfig {
+    /// The stream to replay; empty: no replay, the session subscribes.
+    QString stream;
+    /// Replay only the messages on this subject (wildcards allowed); empty
+    /// for all the stream's messages.
+    QString filterSubject;
+    ReplayStart start = ReplayStart::All;
+    quint64 lastMessages = 100; ///< For ReplayStart::Last; at least 1.
+    quint64 sequence = 1;       ///< For ReplayStart::Sequence; at least 1.
+    qint64 timeUs = 0;          ///< For ReplayStart::Time: microseconds since the epoch (UTC).
+    /// Once caught up, go on with the messages the stream stores from then
+    /// on, instead of ending.
+    bool followLive = false;
+    /// How long the server keeps the replay's consumer once nobody reads
+    /// it: after a crash, or a connection lost for good.  0 leaves it to
+    /// the server.
+    int inactiveThresholdMs = kDefaultInactiveThresholdMs;
+
+    bool enabled() const
+    {
+        return !stream.isEmpty();
+    }
+};
+
 struct SessionConfig {
     /// One or more URLs, comma-separated: the seeds of a cluster.
     QString url = QString::fromLatin1( kDefaultUrl );
-    /// What the session subscribes to: at least one subject.
+    /// What the session subscribes to: at least one subject, unless it
+    /// replays.
     QList<Subscription> subscriptions;
+    /// The stream the session replays instead, if enabled(); the
+    /// subscriptions are not used then.
+    ReplayConfig replay;
     AuthConfig auth;
     TlsConfig tls;
     FormatOptions format;
@@ -287,11 +356,18 @@ Q_SIGNALS:
     /// connection was closed for good); not emitted by stop().
     void finished();
 
+    /// A replay that does not follow live has caught up with its stream
+    /// and ended: the session no longer runs.  Not emitted by stop().
+    void completed();
+
 private:
     struct Worker;
 
     /// The writer thread of start number @p generation has ended on its own.
     void onWorkerFinished( int generation );
+
+    /// The replay of start number @p generation is complete: its writer has ended.
+    void onWorkerCompleted( int generation );
 
     /// The writer of start number @p generation goes on in @p path.
     void onWorkerRotated( int generation, const QString& path );

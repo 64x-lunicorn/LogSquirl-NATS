@@ -54,6 +54,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSpinBox>
+#include <QTcpServer>
 #include <QTemporaryDir>
 #include <QTimer>
 
@@ -1727,6 +1728,212 @@ SCENARIO( "connections are saved as profiles, without passwords or tokens", "[pl
         }
 
         logsquirl_plugin_shutdown();
+    }
+}
+
+SCENARIO( "a connection replays a JetStream stream from its tile", "[plugin][server][replay]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "an initialised plugin and a server with the streams ORDERS (five messages) and AUDIT" )
+    {
+        NatsServerOptions options;
+        options.jetStream = true;
+        NatsServer server( options );
+        Publisher publisher( server.url() );
+        nats_test::JetStream js( publisher );
+        js.addStream( "ORDERS", { "orders.>" } );
+        js.addStream( "AUDIT", { "audit.>" } );
+        for ( int i = 1; i <= 5; ++i ) {
+            js.publish( i % 2 ? "orders.eu" : "orders.us", QByteArray::number( i ) );
+        }
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        sidebarButton( host, "newConnection" )->click();
+        auto* dialog = openDialog();
+        field( dialog, "url" )->setText( server.url() );
+
+        WHEN( "the user chooses Replay and lists the streams" )
+        {
+            checkBox( dialog, "replay" )->setChecked( true );
+            button( dialog, "listStreams" )->click();
+
+            THEN( "the server's streams are offered" )
+            {
+                auto* streams = comboBox( dialog, "replayStream" );
+                REQUIRE( waitFor( [ & ] { return streams->count() == 2; }, 5000 ) );
+                REQUIRE( streams->itemText( 0 ) == "AUDIT" );
+                REQUIRE( streams->itemText( 1 ) == "ORDERS" );
+                REQUIRE( subjectsField( dialog )->isEnabled() == false );
+            }
+        }
+
+        WHEN( "the user saves a replay of the last 2 messages on orders.eu of ORDERS" )
+        {
+            checkBox( dialog, "replay" )->setChecked( true );
+            comboBox( dialog, "replayStream" )->setEditText( "ORDERS" );
+            field( dialog, "replayFilter" )->setText( "orders.eu" );
+            auto* start = comboBox( dialog, "replayStart" );
+            start->setCurrentIndex( start->findText( "Last messages" ) );
+            spinBox( dialog, "replayLast" )->setValue( 2 );
+            saveAs( dialog, "orders" );
+            INFO( "dialog: " << statusText( dialog ).toStdString() );
+
+            THEN( "its tile says what it replays" )
+            {
+                REQUIRE( tileSummary( host, "orders" )
+                             .contains( "Replays stream ORDERS, subject orders.eu, the last 2 "
+                                        "messages" ) );
+            }
+
+            THEN( "Edit shows the replay again" )
+            {
+                dialog->hide();
+                tileButton( host, "orders", "edit" )->click();
+                auto* again = openDialog();
+                REQUIRE( checkBox( again, "replay" )->isChecked() );
+                REQUIRE( comboBox( again, "replayStream" )->currentText() == "ORDERS" );
+                REQUIRE( field( again, "replayFilter" )->text() == "orders.eu" );
+                REQUIRE( comboBox( again, "replayStart" )->currentText() == "Last messages" );
+                REQUIRE( spinBox( again, "replayLast" )->value() == 2 );
+            }
+
+            AND_WHEN( "it is started from its tile" )
+            {
+                startTile( host, "orders" );
+
+                THEN( "messages 3 and 5 are replayed into a followed tab, the tile says the "
+                      "replay is complete, and the stream is unchanged" )
+                {
+                    REQUIRE( host.openedFiles.size() == 1 );
+                    REQUIRE( host.openedFollow.first() );
+                    const auto path = host.openedFiles.first();
+                    REQUIRE( waitFor(
+                        [ & ] {
+                            return tileDetails( host, "orders" ).contains( "replay complete" );
+                        },
+                        10000 ) );
+                    const auto lines = readLines( path );
+                    REQUIRE( lines.size() == 4 );
+                    REQUIRE( lines.at( 1 ).endsWith( " orders.eu - #3 1 3" ) );
+                    REQUIRE( lines.at( 2 ).endsWith( " orders.eu - #5 1 5" ) );
+                    REQUIRE(
+                        tileButton( host, "orders", "startStop" )->text().contains( "Start" ) );
+                    REQUIRE( js.messageCount( "ORDERS" ) == 5 );
+                }
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+}
+
+SCENARIO( "listing the streams of a server that does not answer", "[plugin][replay]" )
+{
+    GIVEN( "a dialog whose URL is a server that accepts connections but never answers" )
+    {
+        // The TCP handshake completes in the backlog; no INFO ever comes,
+        // so a listing takes nats.c's connect timeout.
+        QTcpServer silent;
+        REQUIRE( silent.listen( QHostAddress::LocalHost ) );
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        sidebarButton( host, "newConnection" )->click();
+        auto* dialog = openDialog();
+        field( dialog, "url" )
+            ->setText( QStringLiteral( "nats://127.0.0.1:%1" ).arg( silent.serverPort() ) );
+        checkBox( dialog, "replay" )->setChecked( true );
+        auto* list = button( dialog, "listStreams" );
+
+        WHEN( "List is clicked, and Replay is unchecked and checked again meanwhile" )
+        {
+            list->click();
+            checkBox( dialog, "replay" )->setChecked( false );
+            checkBox( dialog, "replay" )->setChecked( true );
+
+            THEN( "List stays disabled until the listing has answered, and is enabled then" )
+            {
+                REQUIRE_FALSE( list->isEnabled() );
+                REQUIRE( waitFor(
+                    [ & ] { return statusText( dialog ).contains( "could not be listed" ); },
+                    10000 ) );
+                REQUIRE( list->isEnabled() );
+            }
+            logsquirl_plugin_shutdown();
+        }
+
+        WHEN( "the plugin shuts down while the listing waits" )
+        {
+            list->click();
+            QElapsedTimer timer;
+            timer.start();
+            logsquirl_plugin_shutdown();
+
+            THEN( "it waits no longer than the listing's connect timeout" )
+            {
+                REQUIRE( timer.elapsed() < 3000 );
+            }
+        }
+    }
+}
+
+SCENARIO( "unloading the plugin or quitting LogSquirl during a replay leaves no consumer behind",
+          "[plugin][server][replay][cleanup]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a replay of ORDERS, which has a durable consumer of its own, that follows live, "
+           "started from its tile" )
+    {
+        NatsServerOptions options;
+        options.jetStream = true;
+        NatsServer server( options );
+        Publisher publisher( server.url() );
+        nats_test::JetStream js( publisher );
+        js.addStream( "ORDERS", { "orders.>" } );
+        js.addDurable( "ORDERS", "ORDERS_READER" );
+        js.publish( "orders.eu", "1" );
+        const auto before = js.consumers( "ORDERS" );
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        sidebarButton( host, "newConnection" )->click();
+        auto* dialog = openDialog();
+        field( dialog, "url" )->setText( server.url() );
+        checkBox( dialog, "replay" )->setChecked( true );
+        comboBox( dialog, "replayStream" )->setEditText( "ORDERS" );
+        checkBox( dialog, "replayFollow" )->setChecked( true );
+        saveAs( dialog, "orders" );
+        dialog->hide();
+        startTile( host, "orders" );
+        REQUIRE( host.openedFiles.size() == 1 );
+        const auto path = host.openedFiles.first();
+        REQUIRE( waitFor(
+            [ & ] {
+                return readLines( path ).join( '\n' ).contains( "caught up, following live" );
+            },
+            10000 ) );
+        REQUIRE( js.consumers( "ORDERS" ).size() == before.size() + 1 );
+
+        WHEN( "the plugin is disabled or updated, LogSquirl running on" )
+        {
+            logsquirl_plugin_shutdown();
+
+            THEN( "the stream has the same consumers as before" )
+            {
+                REQUIRE( js.consumers( "ORDERS" ) == before );
+            }
+        }
+
+        WHEN( "LogSquirl quits, which shuts the plugin down" )
+        {
+            QMetaObject::invokeMethod( QCoreApplication::instance(), "aboutToQuit" );
+            logsquirl_plugin_shutdown();
+
+            THEN( "the stream has the same consumers as before" )
+            {
+                REQUIRE( js.consumers( "ORDERS" ) == before );
+            }
+        }
     }
 }
 
