@@ -72,6 +72,11 @@ target_link_libraries(logsquirl_nats_common
         nats_static
         OpenSSL::Crypto
 )
+# nats.h pulls in <windows.h>, whose min/max macros break std::min/std::max
+# and std::numeric_limits<T>::max() in every source that includes it.
+if(WIN32)
+    target_compile_definitions(logsquirl_nats_common INTERFACE NOMINMAX)
+endif()
 
 add_library(logsquirl_nats SHARED ${LOGSQUIRL_NATS_SOURCES})
 
