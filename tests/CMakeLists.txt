@@ -37,6 +37,7 @@ add_executable(logsquirl_nats_tests
     lineformat_test.cpp
     logformat_test.cpp
     natssession_test.cpp
+    replay_test.cpp
     auth_test.cpp
 )
 
