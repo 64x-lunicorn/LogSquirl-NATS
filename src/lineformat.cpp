@@ -164,6 +164,11 @@ QByteArray formatLine( const Message& message, const FormatOptions& options )
         line.append( message.reply );
     }
     line.append( ' ' );
+    if ( message.streamSequence != 0 ) {
+        line.append( '#' );
+        line.append( QByteArray::number( message.streamSequence ) );
+        line.append( ' ' );
+    }
     line.append( QByteArray::number( payload.size() ) );
 
     if ( !message.headers.isEmpty() ) {

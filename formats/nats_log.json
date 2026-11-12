@@ -2,12 +2,12 @@
     "$schema": "https://lnav.org/schemas/format-v1.schema.json",
     "logsquirl_nats_log": {
         "title": "NATS Monitor messages",
-        "description": "The lines the NATS Monitor plugin writes: one per NATS message, with its receive time in UTC, subject, reply subject (- for none), payload size in bytes, then the headers in brackets and the payload, escaped to one line (hex: for a payload that is not UTF-8). Lines the plugin itself writes, such as connection events and the counts of dropped messages (dropped=<n> (slow consumer|queue full)), have the subject $NATS-MONITOR.",
+        "description": "The lines the NATS Monitor plugin writes: one per NATS message, with its receive time in UTC (for a message replayed from a JetStream stream, the time the stream stored it), subject, reply subject (- for none), for a replayed message its stream sequence (#<n>), payload size in bytes, then the headers in brackets and the payload, escaped to one line (hex: for a payload that is not UTF-8). Lines the plugin itself writes, such as connection events and the counts of dropped messages (dropped=<n> (slow consumer|queue full)), have the subject $NATS-MONITOR.",
         "url": "https://github.com/64x-lunicorn/LogSquirl-NATS#readme",
         "multiline": false,
         "regex": {
             "message": {
-                "pattern": "^(?<timestamp>\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{6}Z) (?<subject>\\S++) (?<reply>\\S++) (?<size>\\d++)(?: (?<body>.*))?$"
+                "pattern": "^(?<timestamp>\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{6}Z) (?<subject>\\S++) (?<reply>\\S++)(?: #(?<seq>\\d++))? (?<size>\\d++)(?: (?<body>.*))?$"
             }
         },
         "timestamp-field": "timestamp",
@@ -24,6 +24,10 @@
             "reply": {
                 "kind": "string",
                 "description": "The reply subject, - for none"
+            },
+            "seq": {
+                "kind": "integer",
+                "description": "The message's sequence in its JetStream stream, for a replayed message; empty for a live one"
             },
             "size": {
                 "kind": "integer",
@@ -42,6 +46,9 @@
             },
             {
                 "line": "2026-11-11 10:00:00.126000Z ping - 0"
+            },
+            {
+                "line": "2026-11-11 09:58:12.000301Z orders.eu.created - #1042 20 {\"id\":1,\"total\":9.5}"
             },
             {
                 "line": "2026-11-11 10:00:01.000000Z $NATS-MONITOR - 12 disconnected"
