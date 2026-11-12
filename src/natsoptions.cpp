@@ -190,6 +190,12 @@ constexpr std::initializer_list<const char*> kClientCertRefused{ "certificate re
                                                                  "unknown ca", "bad certificate",
                                                                  "certificate unknown" };
 
+/// The TLS connection broke off after the handshake (NATS_IO_ERROR): reset
+/// by the peer, or, on Windows, a failed read on a connection the server shut
+/// down ("SSL_read error: (null)").
+constexpr std::initializer_list<const char*> kTlsBrokenOff{ "reset", "ssl_read error",
+                                                            "ssl_write error" };
+
 /// Whether @p lower contains one of @p patterns.
 bool containsAny( const QString& lower, std::initializer_list<const char*> patterns )
 {
@@ -322,8 +328,7 @@ QString explainConnectFailure( const SessionConfig& config, natsStatus status,
     }
     else if ( tls
               && ( status == NATS_CONNECTION_CLOSED
-                   || ( status == NATS_IO_ERROR
-                        && lower.contains( QLatin1String( "reset" ) ) ) ) ) {
+                   || ( status == NATS_IO_ERROR && containsAny( lower, kTlsBrokenOff ) ) ) ) {
         // With TLS 1.3 a server that refuses the client's certificate
         // closes the connection after the handshake, without saying why.
         explanation = certFile.isEmpty()
