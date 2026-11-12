@@ -68,8 +68,9 @@ void openRotatedFile( const SessionConfig& config, const QString& path )
 
 } // namespace
 
-Sessions::Sessions( QObject* parent )
+Sessions::Sessions( const QString& tempRoot, QObject* parent )
     : QObject( parent )
+    , tempRoot_( tempRoot )
 {
 }
 
@@ -104,7 +105,7 @@ bool Sessions::start( const ConnectionProfile& profile )
     }
 
     const auto description = describeSession( config );
-    auto* session = new NatsSession( config, this );
+    auto* session = new NatsSession( config, tempRoot_, this );
     // The session's signals come through the host's event loop: nothing
     // may throw into it.
     connect( session, &NatsSession::statusChanged, this, [ this, name ]( const QString& text ) {

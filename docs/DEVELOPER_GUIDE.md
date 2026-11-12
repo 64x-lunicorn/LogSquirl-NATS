@@ -26,6 +26,14 @@ plugin.cpp            entry points (logsquirl_plugin_*), each through guarded()
             └─ writer thread    connects, writes in batches, rotates
 ```
 
+What a session is set up with, `SessionConfig` and the value types in it
+(`AuthConfig`, `TlsConfig`, `Subscription`, `ReplayConfig`,
+`PendingLimits`) with their defaults, is in
+[`src/sessionconfig.h`](../src/sessionconfig.h), apart from the session.
+The authentication methods, subjects, profiles, replay, connection options
+and the dialog include that header, not natssession.h; only `Sessions` and
+the session itself include the session.
+
 ### The plugin's lifetime
 
 [`src/plugin.cpp`](../src/plugin.cpp) holds the entry points. No exception
@@ -34,7 +42,8 @@ host is C), so their work runs through `guarded()` (plugin.h), which logs
 a failure to the host log instead.
 
 - **init** removes the temporary directories of LogSquirl processes that no
-  longer run, creates `Sessions`, the dialog (parentless: it must not die
+  longer run, creates `Sessions` (with the temporary root its sessions
+  write below), the dialog (parentless: it must not die
   with a main window) and the sidebar tab, connects the tab's requests (new,
   edit, delete) to the dialog and the dialog's saves back to the tab,
   registers the menu action and the tab, and logs which nats.c and OpenSSL
@@ -103,11 +112,17 @@ callback, writes what is left and the `stopped` marker, and closes the
 file. Nothing that reached the session before `stop()` is lost uncounted.
 
 **Temporary files.** Each session writes into its own directory
-`logsquirl-nats-<pid>-XXXXXX` in the system's temporary directory
-([`src/tempdirs.h`](../src/tempdirs.h)), named `nats_<subjects>.log`.
-`Sessions` calls `preserveFile()` when a session ends, so the tab keeps its
-file; the plugin removes its directories when LogSquirl quits, and those of
-processes that no longer run at the next init.
+`logsquirl-nats-<pid>-XXXXXX` ([`src/tempdirs.h`](../src/tempdirs.h)),
+named `nats_<subjects>.log`, below the temporary root its creator gives it:
+`NatsSession` takes the root in its constructor and never reads the
+plugin's global state. The plugin's root is `tempRoot()` (plugin.h: the
+system's temporary directory, or `PluginState::tempRoot`, which `FakeHost`
+sets to a directory of its own); init hands it to `Sessions`, which hands
+it to each session it starts, and the session tests give theirs
+(`nats_test::sessionTempRoot()`). `Sessions` calls `preserveFile()` when a
+session ends, so the tab keeps its file; the plugin removes its
+directories when LogSquirl quits, and those of processes that no longer
+run at the next init.
 
 ### Rotation at the size limit
 

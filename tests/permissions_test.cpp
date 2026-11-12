@@ -51,6 +51,7 @@ using nats_test::NatsServer;
 using nats_test::NatsServerOptions;
 using nats_test::Publisher;
 using nats_test::readLines;
+using nats_test::sessionTempRoot;
 using nats_test::waitFor;
 
 namespace {
@@ -157,7 +158,7 @@ SCENARIO( "the permissions the README lists are enough to capture and to replay"
             config.url = server.url();
             config.subscriptions = { { QStringLiteral( "orders.>" ), {} } };
             logInAs( config, "capture" );
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             QStringList errors;
             QObject::connect( &session, &NatsSession::errorOccurred,
                               [ &errors ]( const QString& message ) { errors << message; } );
@@ -186,7 +187,7 @@ SCENARIO( "the permissions the README lists are enough to capture and to replay"
             logInAs( config, "replay" );
             QString error;
             const auto streams = nats_monitor::listStreams( config, &error );
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             QStringList errors;
             QObject::connect( &session, &NatsSession::errorOccurred,
                               [ &errors ]( const QString& message ) { errors << message; } );

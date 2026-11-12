@@ -50,6 +50,7 @@
 #include <openssl/crypto.h>
 
 #include <QApplication>
+#include <QDir>
 #include <QWindow>
 
 #include <exception>
@@ -76,6 +77,11 @@ QString settingsFile()
         return {};
     }
     return QString::fromUtf8( dir ) + QStringLiteral( "/nats.ini" );
+}
+
+QString tempRoot()
+{
+    return g_state.tempRoot.isEmpty() ? QDir::tempPath() : g_state.tempRoot;
 }
 
 void logFailure( const char* what, const char* reason ) noexcept
@@ -231,7 +237,7 @@ LOGSQUIRL_PLUGIN_EXPORT int logsquirl_plugin_init( const LogSquirlHostApi* api, 
         nats_monitor::removeStaleTempDirs( nats_monitor::tempRoot() );
 
         auto& st = nats_monitor::g_state;
-        st.sessions = new nats_monitor::Sessions();
+        st.sessions = new nats_monitor::Sessions( nats_monitor::tempRoot() );
         st.dialog = new nats_monitor::ConnectionDialog( st.sessions );
 
         // The host shuts the plugin down both when LogSquirl quits (after

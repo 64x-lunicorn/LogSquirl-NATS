@@ -60,6 +60,7 @@ using nats_test::NatsServer;
 using nats_test::NatsServerOptions;
 using nats_test::Publisher;
 using nats_test::readLines;
+using nats_test::sessionTempRoot;
 using nats_test::TcpProxy;
 using nats_test::waitFor;
 
@@ -188,7 +189,7 @@ SCENARIO( "a stream is replayed into the session's file", "[server][replay]" )
 
         WHEN( "a session replays it from its start" )
         {
-            NatsSession session( replayOf( server.url(), "ORDERS" ) );
+            NatsSession session( replayOf( server.url(), "ORDERS" ), sessionTempRoot() );
             replayToTheEnd( session );
             const auto lines = readLines( session.filePath() );
 
@@ -241,7 +242,7 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
         {
             config.replay.start = ReplayStart::Last;
             config.replay.lastMessages = 3;
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             replayToTheEnd( session );
 
             THEN( "it writes 8, 9 and 10, and says so first" )
@@ -257,7 +258,7 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
         {
             config.replay.start = ReplayStart::Last;
             config.replay.lastMessages = 20;
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             replayToTheEnd( session );
 
             THEN( "it writes all ten" )
@@ -270,7 +271,7 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
         {
             config.replay.start = ReplayStart::Sequence;
             config.replay.sequence = 7;
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             replayToTheEnd( session );
 
             THEN( "it writes 7 to 10" )
@@ -285,7 +286,7 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
         {
             config.replay.start = ReplayStart::Time;
             config.replay.timeUs = js.storedUs( "ORDERS", 6 );
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             replayToTheEnd( session );
 
             THEN( "it writes 6 to 10, and names the time as the lines do" )
@@ -300,7 +301,7 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
         WHEN( "it replays only orders.us" )
         {
             config.replay.filterSubject = "orders.us";
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             replayToTheEnd( session );
 
             THEN( "it writes the even ones" )
@@ -317,7 +318,7 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
             config.replay.filterSubject = "orders.eu";
             config.replay.start = ReplayStart::Last;
             config.replay.lastMessages = 2;
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             replayToTheEnd( session );
 
             THEN( "it writes the last two odd ones, 7 and 9" )
@@ -330,7 +331,7 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
         {
             config.replay.start = ReplayStart::Sequence;
             config.replay.sequence = 11;
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             replayToTheEnd( session );
 
             THEN( "it writes no message and is complete at once" )
@@ -343,7 +344,7 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
 
         WHEN( "it has been replayed in full" )
         {
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             replayToTheEnd( session );
 
             THEN( "the stream still holds its ten messages" )
@@ -362,7 +363,7 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
 
         THEN( "its replay is complete at once, with no message" )
         {
-            NatsSession session( replayOf( server.url(), "EMPTY" ) );
+            NatsSession session( replayOf( server.url(), "EMPTY" ), sessionTempRoot() );
             replayToTheEnd( session );
             REQUIRE( messageLines( readLines( session.filePath() ) ).isEmpty() );
         }
@@ -432,7 +433,7 @@ SCENARIO( "a replay from a time early in its second starts at that time", "[serv
             auto config = replayOf( server.url(), QString::fromLatin1( stream ) );
             config.replay.start = ReplayStart::Time;
             config.replay.timeUs = kUs;
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             replayToTheEnd( session );
 
             THEN( "it writes k to 5, none before" )
@@ -458,7 +459,7 @@ SCENARIO( "a replay may go on live once it has caught up", "[server][replay]" )
         }
         auto config = replayOf( server.url(), "ORDERS" );
         config.replay.followLive = true;
-        NatsSession session( config );
+        NatsSession session( config, sessionTempRoot() );
         int completed = 0;
         QObject::connect( &session, &NatsSession::completed, [ &completed ] { ++completed; } );
         REQUIRE( session.start() );
@@ -508,7 +509,7 @@ SCENARIO( "a replay of a stream that does not exist fails, saying why", "[server
     GIVEN( "a server with JetStream but no stream NOPE" )
     {
         NatsServer server( withJetStream() );
-        NatsSession session( replayOf( server.url(), "NOPE" ) );
+        NatsSession session( replayOf( server.url(), "NOPE" ), sessionTempRoot() );
         int finished = 0;
         QObject::connect( &session, &NatsSession::finished, [ &finished ] { ++finished; } );
 
@@ -551,7 +552,7 @@ SCENARIO( "a stream of a million messages is replayed whole, or stopped at any p
 
         WHEN( "it is replayed to its end" )
         {
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             replayToTheEnd( session, 120000 );
             const auto lines = readLines( session.filePath() );
 
@@ -571,7 +572,7 @@ SCENARIO( "a stream of a million messages is replayed whole, or stopped at any p
         // before any): it stops at once, what it wrote until then in order,
         // the stream unchanged.
         const auto requireStopsAt = [ & ]( int lines ) {
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             REQUIRE( session.start() );
             if ( lines > 0 ) {
                 // Counted, not read from the file: reading half a million
@@ -640,7 +641,7 @@ SCENARIO( "a replay whose writer cannot keep up is still written whole", "[serve
 
         WHEN( "it is replayed to its end" )
         {
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             replayToTheEnd( session, 120000 );
             const auto lines = readLines( session.filePath() );
 
@@ -658,7 +659,7 @@ SCENARIO( "a replay whose writer cannot keep up is still written whole", "[serve
             // nats.c holds what the writer has yet to take, up to the
             // pending limits: the stream keeps it, a stop does not wait
             // for it.
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             REQUIRE( session.start() );
             REQUIRE(
                 waitFor( [ & ] { return readLines( session.filePath() ).size() > 100; }, 30000 ) );
@@ -740,7 +741,7 @@ SCENARIO( "a replay without a stream name does not start", "[replay]" )
     {
         THEN( "start() fails" )
         {
-            NatsSession session( replayOf( "nats://127.0.0.1:1", " " ) );
+            NatsSession session( replayOf( "nats://127.0.0.1:1", " " ), sessionTempRoot() );
             REQUIRE_FALSE( session.start() );
         }
     }
@@ -767,7 +768,7 @@ SCENARIO( "a replay leaves no consumer behind", "[server][replay][cleanup]" )
         {
             auto config = replayOf( server.url(), "ORDERS" );
             config.replay.followLive = true;
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             startAndCatchUp( session );
 
             THEN( "the stream has one consumer more while it runs, and the same as before once "
@@ -781,7 +782,7 @@ SCENARIO( "a replay leaves no consumer behind", "[server][replay][cleanup]" )
 
         WHEN( "a replay ends by itself, complete" )
         {
-            NatsSession session( replayOf( server.url(), "ORDERS" ) );
+            NatsSession session( replayOf( server.url(), "ORDERS" ), sessionTempRoot() );
             replayToTheEnd( session );
 
             THEN( "the stream has the same consumers as before" )
@@ -810,7 +811,7 @@ TEST_CASE( "a replay runs in a process of its own until it is killed", "[.][chil
                             env.value( "LOGSQUIRL_NATS_REPLAY_STREAM" ) );
     config.replay.followLive = true;
     config.replay.inactiveThresholdMs = env.value( "LOGSQUIRL_NATS_REPLAY_INACTIVE_MS" ).toInt();
-    NatsSession session( config );
+    NatsSession session( config, sessionTempRoot() );
     startAndCatchUp( session );
     std::cout << "caught up" << std::endl;
     waitFor( [] { return false; }, 60000 );
@@ -882,7 +883,7 @@ SCENARIO( "a replay that loses its connection leaves no consumer behind",
         auto config = replayOf( proxy.url(), "ORDERS" );
         config.replay.followLive = true;
         config.replay.inactiveThresholdMs = 500;
-        NatsSession session( config );
+        NatsSession session( config, sessionTempRoot() );
         startAndCatchUp( session );
         REQUIRE( js.consumers( "ORDERS" ).size() == before.size() + 1 );
 
@@ -942,7 +943,7 @@ SCENARIO( "a stream that removes what its consumers took is refused or replayed 
 
         WHEN( "a session replays it" )
         {
-            NatsSession session( replayOf( server.url(), "JOBS" ) );
+            NatsSession session( replayOf( server.url(), "JOBS" ), sessionTempRoot() );
             int finished = 0;
             QObject::connect( &session, &NatsSession::finished, [ &finished ] { ++finished; } );
             REQUIRE( session.start() );
@@ -969,7 +970,7 @@ SCENARIO( "a stream that removes what its consumers took is refused or replayed 
 
         WHEN( "a session replays it" )
         {
-            NatsSession session( replayOf( server.url(), "EVENTS" ) );
+            NatsSession session( replayOf( server.url(), "EVENTS" ), sessionTempRoot() );
             replayToTheEnd( session );
             const auto lines = readLines( session.filePath() );
 

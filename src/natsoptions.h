@@ -34,7 +34,7 @@
 // windows.h.
 #include <nats.h>
 
-#include "natssession.h"
+#include "sessionconfig.h"
 
 #include <QString>
 #include <QStringList>

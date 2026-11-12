@@ -32,6 +32,7 @@
 #include <catch2/catch.hpp>
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QString>
@@ -43,6 +44,13 @@
 #include <vector>
 
 namespace nats_test {
+
+/// The temporary root a test's NatsSession is given to write below: the
+/// system's, as the plugin's default.
+inline QString sessionTempRoot()
+{
+    return QDir::tempPath();
+}
 
 /// Run the event loop until @p condition holds or @p timeoutMs passed;
 /// whether it holds.

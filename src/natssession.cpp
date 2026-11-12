@@ -1330,22 +1330,10 @@ struct NatsSession::Worker {
 
 // ── NatsSession ─────────────────────────────────────────────────────────
 
-QString describeSubscriptions( const QList<Subscription>& subscriptions )
-{
-    QStringList names;
-    for ( const auto& subscription : subscriptions ) {
-        names << ( subscription.queueGroup.isEmpty()
-                       ? subscription.subject
-                       : QStringLiteral( "%1 (queue %2)" )
-                             .arg( subscription.subject, subscription.queueGroup ) );
-    }
-    return names.join( QStringLiteral( ", " ) );
-}
-
-NatsSession::NatsSession( const SessionConfig& config, QObject* parent )
+NatsSession::NatsSession( const SessionConfig& config, const QString& tempRoot, QObject* parent )
     : QObject( parent )
     , config_( config )
-    , tempDir_( tempDirTemplate( tempRoot() ) )
+    , tempDir_( tempDirTemplate( tempRoot ) )
 {
 }
 

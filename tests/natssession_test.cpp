@@ -52,6 +52,7 @@ using nats_test::NatsServer;
 using nats_test::NatsServerOptions;
 using nats_test::Publisher;
 using nats_test::readLines;
+using nats_test::sessionTempRoot;
 using nats_test::settle;
 using nats_test::waitFor;
 
@@ -117,7 +118,7 @@ SCENARIO( "a published message shows up as a line in the session's file", "[serv
     GIVEN( "a session subscribed to a subject with a wildcard" )
     {
         NatsServer server;
-        NatsSession session( configFor( server.url(), "orders.*.created" ) );
+        NatsSession session( configFor( server.url(), "orders.*.created" ), sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "orders.*.created" );
 
         THEN( "the file is in a logsquirl-nats temporary directory" )
@@ -196,7 +197,8 @@ SCENARIO( "a session subscribed to several subjects writes them all into one fil
     {
         NatsServer server;
         NatsSession session(
-            configWith( server.url(), { { "orders.eu.*", {} }, { "billing.>", {} } } ) );
+            configWith( server.url(), { { "orders.eu.*", {} }, { "billing.>", {} } } ),
+            sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "orders.eu.*, billing.>" );
 
         WHEN( "messages are published on each subject and on another" )
@@ -232,7 +234,8 @@ SCENARIO( "overlapping subjects write a message once for each subscription",
     {
         NatsServer server;
         NatsSession session(
-            configWith( server.url(), { { "orders.>", {} }, { "orders.eu.*", {} } } ) );
+            configWith( server.url(), { { "orders.>", {} }, { "orders.eu.*", {} } } ),
+            sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "orders.>, orders.eu.*" );
 
         WHEN( "a message matching both and one matching only orders.> are published" )
@@ -327,7 +330,8 @@ SCENARIO( "a subject may be subscribed in a queue group", "[server][session][sub
     GIVEN( "a session subscribed to jobs.> in the queue group workers, and another member" )
     {
         NatsServer server;
-        NatsSession session( configWith( server.url(), { { "jobs.>", "workers" } } ) );
+        NatsSession session( configWith( server.url(), { { "jobs.>", "workers" } } ),
+                             sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "jobs.> (queue workers)" );
         QueueMember other( server.url(), "jobs.>", "workers" );
 
@@ -353,7 +357,7 @@ SCENARIO( "a subject may be subscribed in a queue group", "[server][session][sub
     GIVEN( "a session subscribed to jobs.> without a queue group, and a member of a group" )
     {
         NatsServer server;
-        NatsSession session( configFor( server.url(), "jobs.>" ) );
+        NatsSession session( configFor( server.url(), "jobs.>" ), sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "jobs.>" );
         QueueMember other( server.url(), "jobs.>", "workers" );
 
@@ -381,7 +385,7 @@ SCENARIO( "a session without a subject does not start", "[session][subjects]" )
     {
         const auto config = GENERATE( SessionConfig{},
                                       configFor( "nats://127.0.0.1:1", QStringLiteral( "  " ) ) );
-        NatsSession session( config );
+        NatsSession session( config, sessionTempRoot() );
         QStringList errors;
         QObject::connect( &session, &NatsSession::errorOccurred,
                           [ & ]( const QString& message ) { errors << message; } );
@@ -410,7 +414,8 @@ SCENARIO( "a session's file is named after its subjects, wildcards spelled out",
 
         WHEN( "a session is started" )
         {
-            NatsSession session( configWith( "nats://127.0.0.1:1", subscriptions ) );
+            NatsSession session( configWith( "nats://127.0.0.1:1", subscriptions ),
+                                 sessionTempRoot() );
             REQUIRE( session.start() );
             const auto name = QFileInfo( session.filePath() ).fileName();
             session.stop();
@@ -431,7 +436,8 @@ SCENARIO( "stopping a session closes the connection and keeps the file", "[serve
     {
         NatsServer server;
         Publisher publisher( server.url() );
-        auto session = std::make_unique<NatsSession>( configFor( server.url(), ">" ) );
+        auto session
+            = std::make_unique<NatsSession>( configFor( server.url(), ">" ), sessionTempRoot() );
         startAndWaitConnected( *session, server.url(), ">" );
         const QString path = session->filePath();
         publisher.publish( "a", "before" );
@@ -496,7 +502,7 @@ SCENARIO( "a session can be started and stopped repeatedly", "[server][session]"
         {
             QStringList paths;
             for ( int round = 0; round < 3; ++round ) {
-                NatsSession session( configFor( server.url(), "round" ) );
+                NatsSession session( configFor( server.url(), "round" ), sessionTempRoot() );
                 startAndWaitConnected( session, server.url(), "round" );
                 publisher.publish( "round", QByteArray::number( round ) );
                 REQUIRE( waitFor( [ & ] {
@@ -523,7 +529,7 @@ SCENARIO( "destroying a running session stops it cleanly", "[server][session]" )
         QString path;
         QElapsedTimer timer;
         {
-            NatsSession session( configFor( server.url(), "stream" ) );
+            NatsSession session( configFor( server.url(), "stream" ), sessionTempRoot() );
             startAndWaitConnected( session, server.url(), "stream" );
             session.preserveFile();
             path = session.filePath();
@@ -558,7 +564,7 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
             port = server.port();
         }
         const QString url = QStringLiteral( "nats://127.0.0.1:%1" ).arg( port );
-        NatsSession session( configFor( url, "x" ) );
+        NatsSession session( configFor( url, "x" ), sessionTempRoot() );
         QStringList errors;
         QObject::connect( &session, &NatsSession::errorOccurred,
                           [ &errors ]( const QString& message ) { errors << message; } );
@@ -587,7 +593,7 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
         auto server = std::make_unique<NatsServer>();
         const int port = server->port();
         const QString url = server->url();
-        NatsSession session( configFor( url, "back" ) );
+        NatsSession session( configFor( url, "back" ), sessionTempRoot() );
         QStringList status;
         QObject::connect( &session, &NatsSession::statusChanged,
                           [ &status ]( const QString& text ) { status << text; } );
@@ -725,7 +731,7 @@ SCENARIO( "the subscription gets the session's pending limits", "[server][sessio
 
         WHEN( "a session is started with the default configuration" )
         {
-            NatsSession session( configFor( server.url(), "limits" ) );
+            NatsSession session( configFor( server.url(), "limits" ), sessionTempRoot() );
             startAndWaitConnected( session, server.url(), "limits" );
 
             THEN( "the subscription holds up to 1,000,000 messages and 512 MiB" )
@@ -739,7 +745,7 @@ SCENARIO( "the subscription gets the session's pending limits", "[server][sessio
         {
             auto config = configFor( server.url(), "limits" );
             config.pendingLimits = { 1234, 5678 * 1024 };
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             startAndWaitConnected( session, server.url(), "limits" );
 
             THEN( "the subscription has them" )
@@ -762,7 +768,7 @@ SCENARIO( "a slow consumer's drops are counted and marked where they happen",
         Publisher publisher( server.url() );
         auto config = configFor( server.url(), "flood" );
         config.pendingLimits.messages = 1;
-        NatsSession session( config );
+        NatsSession session( config, sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "flood" );
 
         WHEN( "it is flooded faster than it can take the messages, and stopped" )
@@ -801,7 +807,7 @@ SCENARIO( "the drops of all subscriptions of a session add up in its markers",
         Publisher publisher( server.url() );
         auto config = configWith( server.url(), { { "a.flood", {} }, { "b.flood", {} } } );
         config.pendingLimits.messages = 1;
-        NatsSession session( config );
+        NatsSession session( config, sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "a.flood, b.flood" );
 
         WHEN( "both are flooded faster than it can take the messages, and it is stopped" )
@@ -850,7 +856,7 @@ SCENARIO( "under a flood every drop is counted in exactly one marker", "[server]
         auto config = configFor( server.url(), "flood" );
         config.pendingLimits.messages = 16;
         config.queueLimit = 1;
-        NatsSession session( config );
+        NatsSession session( config, sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "flood" );
         const qint64 published = 50000;
 
@@ -908,7 +914,7 @@ SCENARIO( "when the server goes away during a flood, the drops until then are st
         auto config = configFor( url, "flood" );
         config.pendingLimits.messages = 16;
         config.queueLimit = 1;
-        NatsSession session( config );
+        NatsSession session( config, sessionTempRoot() );
         int finished = 0;
         QObject::connect( &session, &NatsSession::finished, [ &finished ] { ++finished; } );
         startAndWaitConnected( session, url, "flood" );
@@ -985,7 +991,7 @@ SCENARIO( "a session sustains 50k msgs/s at 200 B without drops", "[.benchmark]"
     {
         NatsServer server;
         Publisher publisher( server.url() );
-        NatsSession session( configFor( server.url(), "bench" ) );
+        NatsSession session( configFor( server.url(), "bench" ), sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "bench" );
 
         WHEN( "50k msgs/s of 200 B are published for 10 seconds" )
@@ -1037,7 +1043,7 @@ SCENARIO( "when the session's own queue is full, its drops are counted and marke
         Publisher publisher( server.url() );
         auto config = configFor( server.url(), "flood" );
         config.queueLimit = 1;
-        NatsSession session( config );
+        NatsSession session( config, sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "flood" );
 
         WHEN( "it is flooded faster than it can write, and stopped" )
@@ -1083,7 +1089,7 @@ SCENARIO( "without drops no dropped marker is written, and the session counts wh
     {
         NatsServer server;
         Publisher publisher( server.url() );
-        NatsSession session( configFor( server.url(), "calm" ) );
+        NatsSession session( configFor( server.url(), "calm" ), sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "calm" );
 
         WHEN( "a burst it can keep up with is published, and the session stopped" )
@@ -1186,7 +1192,7 @@ SCENARIO( "a capture's file is rotated at its size limit, between messages",
         Publisher publisher( server.url() );
         auto config = configFor( server.url(), "rot" );
         config.maxFileBytes = 1000;
-        NatsSession session( config );
+        NatsSession session( config, sessionTempRoot() );
         QStringList rotatedTo;
         QObject::connect( &session, &NatsSession::fileRotated,
                           [ & ]( const QString& path ) { rotatedTo << path; } );
@@ -1275,7 +1281,7 @@ SCENARIO( "a session started again goes on in its last file, within the size lim
         Publisher publisher( server.url() );
         auto config = configFor( server.url(), "again" );
         config.maxFileBytes = 1000;
-        NatsSession session( config );
+        NatsSession session( config, sessionTempRoot() );
         int connections = 0;
         QObject::connect( &session, &NatsSession::connected, [ & ] { ++connections; } );
         startAndWaitConnected( session, server.url(), "again" );
@@ -1334,7 +1340,7 @@ SCENARIO( "a rotation that fails is retried one limit later", "[server][session]
         Publisher publisher( server.url() );
         auto config = configFor( server.url(), "rf" );
         config.maxFileBytes = 1000;
-        NatsSession session( config );
+        NatsSession session( config, sessionTempRoot() );
         QStringList errors;
         QStringList rotatedTo;
         QObject::connect( &session, &NatsSession::errorOccurred,
@@ -1416,7 +1422,7 @@ SCENARIO( "a size limit of 0 means no limit", "[server][session][rotation]" )
         Publisher publisher( server.url() );
         auto config = configFor( server.url(), "nolimit" );
         config.maxFileBytes = 0;
-        NatsSession session( config );
+        NatsSession session( config, sessionTempRoot() );
         startAndWaitConnected( session, server.url(), "nolimit" );
         const auto first = session.filePath();
 

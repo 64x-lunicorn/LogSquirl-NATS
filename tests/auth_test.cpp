@@ -135,7 +135,7 @@ SessionConfig configFor( const QString& url, const QString& subject )
 /// A session's run: started, and either subscribed or failed.
 struct Run {
     explicit Run( const SessionConfig& config )
-        : session( config )
+        : session( config, nats_test::sessionTempRoot() )
     {
         QObject::connect( &session, &NatsSession::errorOccurred,
                           [ this ]( const QString& message ) { errors << message; } );

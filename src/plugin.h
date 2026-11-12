@@ -72,6 +72,11 @@ void hostLog( int level, const QString& message );
 /// empty without a host to say where that is.
 QString settingsFile();
 
+/// The directory the plugin's temporary directories go in (tempdirs.h):
+/// PluginState::tempRoot, or the system's.  Read by init, which hands it to
+/// Sessions, and by shutdown, which removes them.
+QString tempRoot();
+
 /// Show a host notification (no-op if not initialised).
 /// The host decodes the message as UTF-8.
 void hostNotify( const QString& message );

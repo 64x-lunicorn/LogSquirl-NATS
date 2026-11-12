@@ -26,7 +26,6 @@
 
 #include "authmethods.h"
 #include "natsoptions.h"
-#include "natssession.h"
 #include "plugin.h"
 #include "profiles.h"
 #include "replay.h"

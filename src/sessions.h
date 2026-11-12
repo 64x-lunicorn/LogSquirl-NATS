@@ -35,7 +35,9 @@
  * Starting, stopping (with notify) and errors are host notifications, as
  * in the Serial plugin; stopAll() (shutdown) notifies nothing.  A session's
  * file is kept for its tab when the session ends; the plugin removes the
- * temporary files when LogSquirl quits.
+ * temporary files when LogSquirl quits.  Each session writes below the
+ * temporary root Sessions was created with: the plugin's (tempRoot(),
+ * plugin.h).
  *
  * OWNERSHIP
  * ─────────
@@ -77,7 +79,8 @@ class Sessions : public QObject {
     Q_OBJECT
 
 public:
-    explicit Sessions( QObject* parent = nullptr );
+    /// Sessions whose temporary directories go below @p tempRoot (tempdirs.h).
+    explicit Sessions( const QString& tempRoot, QObject* parent = nullptr );
     ~Sessions() override;
 
     /**
@@ -121,6 +124,7 @@ private:
     /// unless empty, @p detail.
     void release( const QString& name, SessionState state, const QString& detail = {} );
 
+    const QString tempRoot_; ///< Given to each session it starts.
     QHash<QString, Entry> entries_;
 };
 
