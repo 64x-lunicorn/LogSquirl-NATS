@@ -33,6 +33,7 @@ _Avoid_: Validation error
 **Save problem**:
 Why a connection cannot be saved, or none: no name, Replay checked without a
 stream, credentials in a URL, then its start problem (`saveProblem()`). The
+replay's rule in it is the replay module's (`replaySaveProblem()`). The
 profile store refuses to save a profile with one.
 
 ### Capture

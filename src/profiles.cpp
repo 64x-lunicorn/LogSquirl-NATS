@@ -258,9 +258,9 @@ QString saveProblem( const ConnectionProfile& profile )
     if ( profile.name.isEmpty() ) {
         return QStringLiteral( "Enter a name for the connection to save." );
     }
-    if ( profile.replayChosen && !profile.replay.enabled() ) {
-        return QStringLiteral(
-            "Enter the stream to replay, or List the server's streams to choose it." );
+    if ( const auto problem = replaySaveProblem( profile.replayChosen, profile.replay );
+         !problem.isEmpty() ) {
+        return problem;
     }
     for ( const auto& url : profile.url.split( ',' ) ) {
         if ( !QUrl( url.trimmed() ).userInfo().isEmpty() ) {

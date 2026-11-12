@@ -82,6 +82,12 @@ QString describeReplay( const ReplayConfig& replay );
 /// (startProblem(), profiles.h).
 QString replayProblem( const ReplayConfig& replay );
 
+/// Why a connection whose user chose to replay (@p chosen) cannot be saved
+/// with @p replay, for the user; empty if it can: replay chosen but no
+/// stream entered.  The save check of a connection makes it before its
+/// other rules (saveProblem(), profiles.h).
+QString replaySaveProblem( bool chosen, const ReplayConfig& replay );
+
 /// How a stream keeps its messages (js_RetentionPolicy).
 enum class Retention {
     Limits,    ///< Until its limits remove them: a replay takes nothing away.

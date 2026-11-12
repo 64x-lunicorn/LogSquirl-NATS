@@ -33,7 +33,6 @@
 
 #include "replay.h"
 
-#include <utility>
 #include <vector>
 
 using nats_monitor::caughtUpOnSubscribing;
@@ -41,6 +40,7 @@ using nats_monitor::DeliverFrom;
 using nats_monitor::planReplay;
 using nats_monitor::ReplayConfig;
 using nats_monitor::ReplayPlan;
+using nats_monitor::replaySaveProblem;
 using nats_monitor::ReplaySkip;
 using nats_monitor::ReplayStart;
 using nats_monitor::ReplayStep;
@@ -311,6 +311,33 @@ SCENARIO( "a replay plan refuses a work queue and warns of interest retention",
                      == "Enter one subject to replay, or none for all." );
             REQUIRE( planReplay( last( 2, "orders.>.eu" ), stream( 1, 3 ) ).refusal
                      == "orders.>.eu is not a valid subject: > must be the last token." );
+        }
+    }
+}
+
+SCENARIO( "a connection that chose to replay is saved only with a stream", "[replay][checks]" )
+{
+    const QString noStream
+        = "Enter the stream to replay, or List the server's streams to choose it.";
+    ReplayConfig withStream;
+    withStream.stream = "ORDERS";
+
+    GIVEN( "replay chosen" )
+    {
+        THEN( "it needs a stream, any stream: the rest is replayProblem()'s" )
+        {
+            REQUIRE( replaySaveProblem( true, ReplayConfig{} ) == noStream );
+            REQUIRE( replaySaveProblem( true, withStream ).isEmpty() );
+            REQUIRE( replaySaveProblem( true, fromSequence( 0 ) ).isEmpty() );
+        }
+    }
+
+    GIVEN( "replay not chosen" )
+    {
+        THEN( "it needs none" )
+        {
+            REQUIRE( replaySaveProblem( false, ReplayConfig{} ).isEmpty() );
+            REQUIRE( replaySaveProblem( false, withStream ).isEmpty() );
         }
     }
 }

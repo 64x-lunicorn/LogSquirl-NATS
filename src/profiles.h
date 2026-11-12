@@ -49,9 +49,9 @@
  * saveProblem() (the store's upsert() makes it, so the dialog's Save does)
  * and startProblem() (Sessions makes it at Start, the session again on its
  * config before it starts).  The rules of a replay are the Replay module's
- * (replayProblem(), replay.h).  The session's check is a free function on a
- * SessionConfig, so natssession.cpp needs this header and no store.  Each
- * rule is a row of profiles_test.cpp ([checks]).
+ * (replayProblem() and replaySaveProblem(), replay.h).  The session's check
+ * is a free function on a SessionConfig, so natssession.cpp needs this
+ * header and no store.  Each rule is a row of profiles_test.cpp ([checks]).
  */
 
 #pragma once
@@ -111,8 +111,9 @@ QString startProblem( const ConnectionProfile& profile );
 QString startProblem( const SessionConfig& config );
 
 /// Why @p profile cannot be saved, in words for the user; empty if it can:
-/// no name, replay chosen without a stream, credentials in a URL (never
-/// saved), then whatever keeps it from starting (startProblem()).
+/// no name, replay chosen without a stream (replaySaveProblem(), replay.h),
+/// credentials in a URL (never saved), then whatever keeps it from
+/// starting (startProblem()).
 QString saveProblem( const ConnectionProfile& profile );
 
 /// The session configuration of @p profile, with its auth.secret as is.

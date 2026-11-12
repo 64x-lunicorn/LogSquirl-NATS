@@ -708,6 +708,8 @@ SCENARIO( "whether a connection can be saved is one check, with a reason for the
               p.url = "nats://bob:s3cret@localhost:4222";
           },
           "Enter a name for the connection to save." },
+        // The replay's save rule is the Replay module's (replaySaveProblem()):
+        // here only where it comes among the others.
         { "replay chosen with no stream", []( ConnectionProfile& p ) { p.replayChosen = true; },
           "Enter the stream to replay, or List the server's streams to choose it." },
         { "replay chosen with a stream",

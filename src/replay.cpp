@@ -90,6 +90,15 @@ QString replayProblem( const ReplayConfig& replay )
     return {};
 }
 
+QString replaySaveProblem( bool chosen, const ReplayConfig& replay )
+{
+    if ( chosen && !replay.enabled() ) {
+        return QStringLiteral(
+            "Enter the stream to replay, or List the server's streams to choose it." );
+    }
+    return {};
+}
+
 ReplayPlan planReplay( const ReplayConfig& replay, const StreamState& stream )
 {
     ReplayPlan plan;

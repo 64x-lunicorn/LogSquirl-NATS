@@ -512,12 +512,13 @@ credentials in a URL, then the start problem). `upsert()` makes the save
 check, so the dialog's Save does; `Sessions` makes the start check at
 Start, and `NatsSession::start()` again as a backstop on its
 `SessionConfig` (an overload of `startProblem()`, so the session needs no
-store). The replay's rules are `replayProblem()`'s (replay.h). Replay
-checked without a stream is told by a profile's `replayChosen`, which the
-dialog sets when Replay is checked, stream or not (a loaded profile has it
-if it has a stream). Each rule is a row of the
-tables in `profiles_test.cpp` (`[checks]`), with its exact text, checked
-without the dialog.
+store). The replay's rules are the Replay module's (replay.h):
+`replayProblem()` to start, `replaySaveProblem()` to save. Replay checked
+without a stream is told by a profile's `replayChosen`, which the dialog
+sets when Replay is checked, stream or not (a loaded profile has it if it
+has a stream). Each rule is a row of the tables in `profiles_test.cpp`
+(`[checks]`; the replay's save rule also in `replayplan_test.cpp`), with
+its exact text, checked without the dialog.
 
 The **profile store** (`ProfileStore`, in profiles.h) is the only code that
 reads or writes `nats.ini`. It is opened on a file path, and told by a
