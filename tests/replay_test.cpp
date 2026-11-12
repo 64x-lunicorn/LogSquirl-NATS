@@ -489,27 +489,86 @@ SCENARIO( "a stream of a million messages is replayed whole, or stopped at any p
             }
         }
 
-        WHEN( "it is stopped once the first lines are written" )
-        {
+        // Stopped once the file has more than @p lines lines (0: at once,
+        // before any): it stops at once, what it wrote until then in order,
+        // the stream unchanged.
+        const auto requireStopsAt = [ & ]( int lines ) {
             NatsSession session( config );
             REQUIRE( session.start() );
-            REQUIRE(
-                waitFor( [ & ] { return readLines( session.filePath() ).size() > 1000; }, 10000 ) );
+            if ( lines > 0 ) {
+                REQUIRE( waitFor( [ & ] { return readLines( session.filePath() ).size() > lines; },
+                                  30000 ) );
+            }
             QElapsedTimer timer;
             timer.start();
             session.stop();
             const auto stopMs = timer.elapsed();
-            const auto lines = readLines( session.filePath() );
+            const auto written = readLines( session.filePath() );
+            REQUIRE( stopMs < 3000 );
+            REQUIRE( markerText( written.last() ) == "stopped" );
+            const auto messages = messageLines( written );
+            REQUIRE( messages.size() < kCount );
+            requireInOrder( messages );
+            REQUIRE_FALSE( anyOf( written, "dropped=" ) );
+            REQUIRE( js.messageCount( "BIG" ) == kCount );
+        };
 
+        WHEN( "it is stopped right after it started" )
+        {
+            THEN( "it stops at once, what it wrote in order, the stream unchanged" )
+            {
+                requireStopsAt( 0 );
+            }
+        }
+
+        WHEN( "it is stopped once the first lines are written" )
+        {
             THEN( "it stops at once, what it wrote until then in order, the stream unchanged" )
             {
-                REQUIRE( stopMs < 3000 );
-                REQUIRE( markerText( lines.last() ) == "stopped" );
-                const auto messages = messageLines( lines );
-                REQUIRE( messages.size() < kCount );
-                requireInOrder( messages );
+                requireStopsAt( 1000 );
+            }
+        }
+
+        WHEN( "it is stopped half-way" )
+        {
+            THEN( "it stops at once, what it wrote until then in order, the stream unchanged" )
+            {
+                requireStopsAt( kCount / 2 );
+            }
+        }
+    }
+}
+
+SCENARIO( "a replay whose writer cannot keep up is still written whole", "[server][replay]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a stream of 20,000 messages and a replay whose queue holds one message" )
+    {
+        // Each message waits until the writer has written and flushed the
+        // one before: the delivery thread is held up all the time, which
+        // JetStream's flow control and heartbeats must survive.
+        constexpr int kCount = 20000;
+        NatsServer server( withJetStream() );
+        Publisher publisher( server.url() );
+        JetStream js( publisher );
+        js.addStream( "BIG", { "big.>" } );
+        js.publishMany( "BIG", "big.data", kCount );
+        auto config = replayOf( server.url(), "BIG" );
+        config.queueLimit = 1;
+
+        WHEN( "it is replayed to its end" )
+        {
+            NatsSession session( config );
+            replayToTheEnd( session, 120000 );
+            const auto lines = readLines( session.filePath() );
+
+            THEN( "every message is a line, once and in order, none dropped" )
+            {
+                REQUIRE( sequences( lines ) == range( 1, kCount ) );
                 REQUIRE_FALSE( anyOf( lines, "dropped=" ) );
-                REQUIRE( js.messageCount( "BIG" ) == kCount );
+                REQUIRE( session.droppedCount() == 0 );
+                REQUIRE( markerText( lines.last() ) == "replay complete" );
             }
         }
     }
@@ -582,16 +641,18 @@ SCENARIO( "a replay leaves no consumer behind", "[server][replay][cleanup]" )
 {
     SKIP_WITHOUT_NATS_SERVER();
 
-    GIVEN( "a stream of three messages, with no consumer" )
+    GIVEN( "a stream of three messages, with a durable consumer of its own" )
     {
         NatsServer server( withJetStream() );
         Publisher publisher( server.url() );
         JetStream js( publisher );
         js.addStream( "ORDERS", { "orders.>" } );
+        js.addDurable( "ORDERS", "ORDERS_READER" );
         for ( int i = 1; i <= 3; ++i ) {
             js.publish( "orders.eu", QByteArray::number( i ) );
         }
-        REQUIRE( js.consumers( "ORDERS" ).isEmpty() );
+        const auto before = js.consumers( "ORDERS" );
+        REQUIRE( before == QStringList{ "ORDERS_READER" } );
 
         WHEN( "a replay that follows live runs" )
         {
@@ -600,11 +661,12 @@ SCENARIO( "a replay leaves no consumer behind", "[server][replay][cleanup]" )
             NatsSession session( config );
             startAndCatchUp( session );
 
-            THEN( "the stream has one consumer while it runs, and none once it is stopped" )
+            THEN( "the stream has one consumer more while it runs, and the same as before once "
+                  "it is stopped" )
             {
-                REQUIRE( js.consumers( "ORDERS" ).size() == 1 );
+                REQUIRE( js.consumers( "ORDERS" ).size() == before.size() + 1 );
                 session.stop();
-                REQUIRE( js.consumers( "ORDERS" ).isEmpty() );
+                REQUIRE( js.consumers( "ORDERS" ) == before );
             }
         }
 
@@ -613,9 +675,9 @@ SCENARIO( "a replay leaves no consumer behind", "[server][replay][cleanup]" )
             NatsSession session( replayOf( server.url(), "ORDERS" ) );
             replayToTheEnd( session );
 
-            THEN( "the stream has no consumer" )
+            THEN( "the stream has the same consumers as before" )
             {
-                REQUIRE( js.consumers( "ORDERS" ).isEmpty() );
+                REQUIRE( js.consumers( "ORDERS" ) == before );
             }
         }
     }
@@ -656,7 +718,9 @@ SCENARIO( "the consumer of a replay that is killed disappears after its inactive
         Publisher publisher( server.url() );
         JetStream js( publisher );
         js.addStream( "ORDERS", { "orders.>" } );
+        js.addDurable( "ORDERS", "ORDERS_READER" );
         js.publish( "orders.eu", "1" );
+        const auto before = js.consumers( "ORDERS" );
 
         QProcess child;
         auto env = QProcessEnvironment::systemEnvironment();
@@ -672,18 +736,19 @@ SCENARIO( "the consumer of a replay that is killed disappears after its inactive
                 return output.contains( "caught up" );
             },
             10000 ) );
-        REQUIRE( js.consumers( "ORDERS" ).size() == 1 );
+        REQUIRE( js.consumers( "ORDERS" ).size() == before.size() + 1 );
 
         WHEN( "the process is killed" )
         {
             child.kill();
             REQUIRE( child.waitForFinished( 5000 ) );
 
-            THEN( "its consumer is gone within a few seconds (the server's default: 5 s)" )
+            THEN( "its consumer is gone soon after the threshold (the plugin's default is 5 s), "
+                  "the stream's own consumer kept" )
             {
                 QElapsedTimer timer;
                 timer.start();
-                REQUIRE( waitFor( [ & ] { return js.consumers( "ORDERS" ).isEmpty(); }, 3000 ) );
+                REQUIRE( waitFor( [ & ] { return js.consumers( "ORDERS" ) == before; }, 3000 ) );
                 INFO( "gone after " << timer.elapsed() << " ms" );
             }
         }
@@ -701,14 +766,16 @@ SCENARIO( "a replay that loses its connection leaves no consumer behind",
         Publisher publisher( server.url() );
         JetStream js( publisher );
         js.addStream( "ORDERS", { "orders.>" } );
+        js.addDurable( "ORDERS", "ORDERS_READER" );
         js.publish( "orders.eu", "1" );
+        const auto before = js.consumers( "ORDERS" );
         TcpProxy proxy( server.port() );
         auto config = replayOf( proxy.url(), "ORDERS" );
         config.replay.followLive = true;
         config.replay.inactiveThresholdMs = 500;
         NatsSession session( config );
         startAndCatchUp( session );
-        REQUIRE( js.consumers( "ORDERS" ).size() == 1 );
+        REQUIRE( js.consumers( "ORDERS" ).size() == before.size() + 1 );
 
         WHEN( "the connection is cut and comes back" )
         {
@@ -717,15 +784,17 @@ SCENARIO( "a replay that loses its connection leaves no consumer behind",
                 [ & ] { return anyOf( readLines( session.filePath() ), "reconnected to " ); },
                 15000 ) );
 
-            THEN( "the replay goes on, with one consumer, and none once it is stopped" )
+            THEN( "the replay goes on, with one consumer more, and the stream has the same "
+                  "consumers as before once it is stopped" )
             {
                 js.publish( "orders.eu", "2" );
                 REQUIRE( waitFor(
                     [ & ] { return sequences( readLines( session.filePath() ) ).contains( 2 ); },
                     20000 ) );
-                REQUIRE( waitFor( [ & ] { return js.consumers( "ORDERS" ).size() == 1; } ) );
+                REQUIRE( waitFor(
+                    [ & ] { return js.consumers( "ORDERS" ).size() == before.size() + 1; } ) );
                 session.stop();
-                REQUIRE( waitFor( [ & ] { return js.consumers( "ORDERS" ).isEmpty(); } ) );
+                REQUIRE( waitFor( [ & ] { return js.consumers( "ORDERS" ) == before; } ) );
             }
         }
 
@@ -738,9 +807,9 @@ SCENARIO( "a replay that loses its connection leaves no consumer behind",
                          10000 ) );
             session.stop();
 
-            THEN( "its consumer is gone after the inactive threshold" )
+            THEN( "its consumer is gone after the inactive threshold, the stream's own kept" )
             {
-                REQUIRE( waitFor( [ & ] { return js.consumers( "ORDERS" ).isEmpty(); }, 3000 ) );
+                REQUIRE( waitFor( [ & ] { return js.consumers( "ORDERS" ) == before; }, 3000 ) );
             }
         }
     }

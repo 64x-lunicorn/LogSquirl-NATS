@@ -1882,7 +1882,8 @@ SCENARIO( "unloading the plugin or quitting LogSquirl during a replay leaves no 
 {
     SKIP_WITHOUT_NATS_SERVER();
 
-    GIVEN( "a replay of ORDERS that follows live, started from its tile" )
+    GIVEN( "a replay of ORDERS, which has a durable consumer of its own, that follows live, "
+           "started from its tile" )
     {
         NatsServerOptions options;
         options.jetStream = true;
@@ -1890,7 +1891,9 @@ SCENARIO( "unloading the plugin or quitting LogSquirl during a replay leaves no 
         Publisher publisher( server.url() );
         nats_test::JetStream js( publisher );
         js.addStream( "ORDERS", { "orders.>" } );
+        js.addDurable( "ORDERS", "ORDERS_READER" );
         js.publish( "orders.eu", "1" );
+        const auto before = js.consumers( "ORDERS" );
         FakeHost host;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         sidebarButton( host, "newConnection" )->click();
@@ -1909,15 +1912,15 @@ SCENARIO( "unloading the plugin or quitting LogSquirl during a replay leaves no 
                 return readLines( path ).join( '\n' ).contains( "caught up, following live" );
             },
             10000 ) );
-        REQUIRE( js.consumers( "ORDERS" ).size() == 1 );
+        REQUIRE( js.consumers( "ORDERS" ).size() == before.size() + 1 );
 
         WHEN( "the plugin is disabled or updated, LogSquirl running on" )
         {
             logsquirl_plugin_shutdown();
 
-            THEN( "the stream has no consumer" )
+            THEN( "the stream has the same consumers as before" )
             {
-                REQUIRE( js.consumers( "ORDERS" ).isEmpty() );
+                REQUIRE( js.consumers( "ORDERS" ) == before );
             }
         }
 
@@ -1926,9 +1929,9 @@ SCENARIO( "unloading the plugin or quitting LogSquirl during a replay leaves no 
             QMetaObject::invokeMethod( QCoreApplication::instance(), "aboutToQuit" );
             logsquirl_plugin_shutdown();
 
-            THEN( "the stream has no consumer" )
+            THEN( "the stream has the same consumers as before" )
             {
-                REQUIRE( js.consumers( "ORDERS" ).isEmpty() );
+                REQUIRE( js.consumers( "ORDERS" ) == before );
             }
         }
     }
