@@ -143,13 +143,30 @@ QString safeFileName( const QString& subject )
 /// 255 bytes on every platform, and the path is longer still.
 constexpr int kMaxFileNameSubjects = 100;
 
-/// The subjects of @p subscriptions as the file's name: "orders.__billing._"
-/// for orders.> and billing.*, cut to kMaxFileNameSubjects.
+/// @p subject with its wildcards spelled out, a token > as "all" and a
+/// token * as "any": orders.> is "orders.all", > alone is "all".
+QString spelledOut( const QString& subject )
+{
+    auto tokens = subject.split( QLatin1Char( '.' ) );
+    for ( auto& token : tokens ) {
+        if ( token == QLatin1String( ">" ) ) {
+            token = QStringLiteral( "all" );
+        }
+        else if ( token == QLatin1String( "*" ) ) {
+            token = QStringLiteral( "any" );
+        }
+    }
+    return tokens.join( QLatin1Char( '.' ) );
+}
+
+/// The subjects of @p subscriptions as the file's name:
+/// "orders.all_billing.any" for orders.> and billing.*, cut to
+/// kMaxFileNameSubjects.
 QString fileNameFor( const QList<Subscription>& subscriptions )
 {
     QStringList subjects;
     for ( const auto& subscription : subscriptions ) {
-        subjects << safeFileName( subscription.subject );
+        subjects << safeFileName( spelledOut( subscription.subject ) );
     }
     return subjects.join( '_' ).left( kMaxFileNameSubjects );
 }

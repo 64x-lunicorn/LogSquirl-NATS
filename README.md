@@ -215,7 +215,7 @@ After installing, restart LogSquirl or re-scan via *Plugins → Manage Plugins�
 
 **Where the files are.** A capture is written to
 `nats_<subjects>.log` (then `nats_<subjects>.2.log`, … after the size
-limit; `orders.>` gives `nats_orders._.log`; a replay of the stream
+limit; `orders.>` gives `nats_orders.all.log`, `billing.*` gives `nats_billing.any.log`; a replay of the stream
 `ORDERS` gives `nats_replay_ORDERS.log`) in a temporary directory `logsquirl-nats-<pid>-XXXXXX`. The files stay
 while LogSquirl runs, also after Stop, and are removed when it quits; copy
 one elsewhere to keep it.
@@ -428,8 +428,8 @@ graph TD
     SS -- state, counts --> T
     SS -- starts --> S1
     SS -- starts --> S2
-    S1 -- writes --> F1[nats_orders._.log]
-    S2 -- writes --> F2[nats_jobs._.log]
+    S1 -- writes --> F1[nats_orders.all.log]
+    S2 -- writes --> F2[nats_jobs.all.log]
     F1 -- open_file follow=1 --> H
     F2 -- open_file follow=1 --> H
 ```

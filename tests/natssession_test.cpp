@@ -394,6 +394,35 @@ SCENARIO( "a session without a subject does not start", "[session][subjects]" )
     }
 }
 
+SCENARIO( "a session's file is named after its subjects, wildcards spelled out",
+          "[session][subjects]" )
+{
+    GIVEN( "subjects with the wildcards > and *" )
+    {
+        const auto [ subscriptions, fileName ] = GENERATE( table<QList<Subscription>, QString>( {
+            { { { ">", {} } }, "nats_all.log" },
+            { { { "orders.>", {} } }, "nats_orders.all.log" },
+            { { { "billing.*", {} } }, "nats_billing.any.log" },
+            { { { "orders.*.created", {} } }, "nats_orders.any.created.log" },
+            { { { "orders.>", {} }, { "billing.*", {} } }, "nats_orders.all_billing.any.log" },
+            { { { "a/b", {} } }, "nats_a_b.log" },
+        } ) );
+
+        WHEN( "a session is started" )
+        {
+            NatsSession session( configWith( "nats://127.0.0.1:1", subscriptions ) );
+            REQUIRE( session.start() );
+            const auto name = QFileInfo( session.filePath() ).fileName();
+            session.stop();
+
+            THEN( "its file is " << fileName.toStdString() )
+            {
+                REQUIRE( name == fileName );
+            }
+        }
+    }
+}
+
 SCENARIO( "stopping a session closes the connection and keeps the file", "[server][session]" )
 {
     SKIP_WITHOUT_NATS_SERVER();
