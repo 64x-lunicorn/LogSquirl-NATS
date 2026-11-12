@@ -171,6 +171,18 @@ After installing, restart LogSquirl or re-scan via *Plugins → Manage Plugins�
    instead of dropping, the replay waits for the file. Stop ends it at any
    point.
 
+   The consumer goes with the replay: Stop, a replay that completes,
+   unloading the plugin and quitting LogSquirl delete it. If LogSquirl
+   crashes, or the connection is lost for good, the server deletes it
+   5 seconds after its reader went away (its inactive threshold).
+
+   A stream with **work-queue** retention is not replayed: its consumer
+   would take the messages away from the workers, and the replay says so.
+   A stream with **interest** retention is replayed after a `warning:`
+   line: it holds only the messages its consumers have yet to acknowledge,
+   and the replay is one more consumer while it runs (it takes no message
+   away from the others).
+
 7. **Save** — the connection gets a tile in the NATS tab, or its tile is
    updated. Choose a saved connection in the *Name* list to change it,
    **Delete** to remove it. Connections are saved in `nats.ini` in the
@@ -210,6 +222,44 @@ one elsewhere to keep it.
 
 *Plugins → Manage Plugins… → Configure* has no settings yet: everything is in
 the NATS tab and its dialog.
+
+### NATS permissions
+
+If the server restricts what a user may do, these are the least the
+plugin needs (a test checks them against a server configured with exactly
+these, `tests/permissions_test.cpp`).
+
+**Live capture** needs to subscribe to its subjects, and to publish
+nothing:
+
+```text
+permissions: {
+  publish:   { deny: ">" }
+  subscribe: { allow: ["orders.>"] }      # the connection's subjects
+}
+```
+
+**Replay** is read-only: it may read the stream, and create, read and
+delete its own consumer, but not change the stream (no purge, no
+publishing into it). For the stream `ORDERS`:
+
+```text
+permissions: {
+  publish: { allow: [
+    "$JS.API.STREAM.NAMES",               # List, in the dialog
+    "$JS.API.STREAM.INFO.ORDERS",
+    "$JS.API.CONSUMER.CREATE.ORDERS",
+    "$JS.API.CONSUMER.INFO.ORDERS.*",
+    "$JS.API.CONSUMER.DELETE.ORDERS.*",
+    "$JS.FC.ORDERS.>"                     # flow control replies
+  ] }
+  subscribe: { allow: ["_INBOX.>"] }      # deliveries and API replies
+}
+```
+
+`*` in place of `ORDERS` allows any stream. Without `CONSUMER.DELETE`
+the consumer is left until its inactive threshold; without `JS.FC` a
+large replay stalls.
 
 ### Screenshots still to take
 
