@@ -379,7 +379,6 @@ SCENARIO( "a replay from a time early in its second starts at that time", "[serv
         NatsServer server( withJetStream() );
         Publisher publisher( server.url() );
         JetStream js( publisher );
-        js.addStream( "ORDERS", { "orders.>" } );
         // Until the clock is @p ms milliseconds into a second, or up to 10 more.
         const auto waitUntilInSecond = []( int ms ) {
             REQUIRE( waitFor(
@@ -389,20 +388,33 @@ SCENARIO( "a replay from a time early in its second starts at that time", "[serv
                 },
                 3000 ) );
         };
-        waitUntilInSecond( 5 );
-        js.publish( "orders.eu", "1" );
-        js.publish( "orders.eu", "2" );
-        waitUntilInSecond( 25 );
-        for ( int i = 3; i <= 5; ++i ) {
-            js.publish( "orders.eu", QByteArray::number( i ) );
+        // A slow machine may publish past the second (or past its first
+        // tenth): then again, into a new stream.
+        QByteArray stream;
+        qint64 third = 0;
+        for ( int attempt = 1; attempt <= 10; ++attempt ) {
+            stream = "ORDERS" + QByteArray::number( attempt );
+            const auto subjects = "orders" + QByteArray::number( attempt );
+            js.addStream( stream.constData(), { ( subjects + ".>" ).constData() } );
+            waitUntilInSecond( 5 );
+            js.publish( ( subjects + ".eu" ).constData(), "1" );
+            js.publish( ( subjects + ".eu" ).constData(), "2" );
+            waitUntilInSecond( 25 );
+            for ( int i = 3; i <= 5; ++i ) {
+                js.publish( ( subjects + ".eu" ).constData(), QByteArray::number( i ) );
+            }
+            third = js.storedUs( stream.constData(), 3 );
+            if ( third / 1000000 == js.storedUs( stream.constData(), 1 ) / 1000000 // same second
+                 && third % 1000000 < 100000 ) { // a leading zero in its fraction
+                break;
+            }
+            third = 0;
         }
-        const auto third = js.storedUs( "ORDERS", 3 );
-        REQUIRE( third / 1000000 == js.storedUs( "ORDERS", 1 ) / 1000000 ); // the same second
-        REQUIRE( third % 1000000 < 100000 ); // a leading zero in its fraction
+        REQUIRE( third != 0 );
 
         WHEN( "it replays from the time message 3 was stored" )
         {
-            auto config = replayOf( server.url(), "ORDERS" );
+            auto config = replayOf( server.url(), QString::fromLatin1( stream ) );
             config.replay.start = ReplayStart::Time;
             config.replay.timeUs = third;
             NatsSession session( config );
