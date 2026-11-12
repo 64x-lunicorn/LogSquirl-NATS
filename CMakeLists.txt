@@ -57,6 +57,7 @@ set(LOGSQUIRL_NATS_SOURCES
     src/replay.cpp
     src/sessionconfig.cpp
     src/sessions.cpp
+    src/sessionstatus.cpp
     src/streams.cpp
     src/sidebarwidget.cpp
     src/subjects.cpp

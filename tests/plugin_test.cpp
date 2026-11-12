@@ -35,7 +35,9 @@
 #include "capture.h"
 #include "fakehost.h"
 #include "natsserver.h"
+#include "plugin.h"
 #include "profiles.h"
+#include "sessions.h"
 #include "sessiontest.h"
 
 #include "testconfig.h"
@@ -64,6 +66,7 @@
 #include <optional>
 
 using nats_monitor::ProfileStore;
+using nats_monitor::SessionState;
 using nats_test::Capture;
 using nats_test::ConfiguredServer;
 using nats_test::FakeHost;
@@ -237,6 +240,20 @@ QString tileSummary( const FakeHost& host, const QString& name )
 QString tileDetails( const FakeHost& host, const QString& name )
 {
     return tile( host, name )->findChild<QLabel*>( "details" )->text();
+}
+
+/// The status of the connection @p name, as Sessions keeps it and its tile
+/// shows it.
+nats_monitor::SessionStatus statusOf( const QString& name )
+{
+    REQUIRE( nats_monitor::g_state.sessions );
+    return nats_monitor::g_state.sessions->status( name );
+}
+
+/// Whether the connection @p name is in @p state.
+bool isIn( const QString& name, nats_monitor::SessionState state )
+{
+    return statusOf( name ).state == state;
 }
 
 /// Have @p act deal with the next modal dialog once it is open.
@@ -732,9 +749,10 @@ SCENARIO( "a capture that fails is notified", "[plugin][server]" )
                     },
                     10000 ) );
                 REQUIRE( host.notifications.last().contains( url ) );
-                REQUIRE( waitFor(
-                    [ & ] { return tileDetails( host, "test" ).startsWith( "failed: " ); } ) );
-                REQUIRE( tileDetails( host, "test" ).contains( url ) );
+                REQUIRE( waitFor( [ & ] { return isIn( "test", SessionState::Failed ); } ) );
+                REQUIRE( statusOf( "test" ).detail.contains( url ) );
+                REQUIRE( tileDetails( host, "test" )
+                             .startsWith( "failed: " + statusOf( "test" ).detail ) );
                 REQUIRE( tileButton( host, "test", "startStop" )->text().contains( "Start" ) );
             }
         }
@@ -812,13 +830,11 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
 
             THEN( "the tile says the server refused the user name or password" )
             {
-                REQUIRE( waitFor(
-                    [ & ] {
-                        return tileDetails( host, "test" ).startsWith( "failed: " )
-                               && tileDetails( host, "test" )
-                                      .contains( "the server refused the user name or password" );
-                    },
-                    10000 ) );
+                REQUIRE(
+                    waitFor( [ & ] { return isIn( "test", SessionState::Failed ); }, 10000 ) );
+                REQUIRE( tileDetails( host, "test" ).startsWith( "failed: " ) );
+                REQUIRE( tileDetails( host, "test" )
+                             .contains( "the server refused the user name or password" ) );
                 REQUIRE( tileButton( host, "test", "startStop" )->text().contains( "Start" ) );
             }
         }
@@ -877,12 +893,10 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
 
             THEN( "the tile says the server's certificate is not trusted" )
             {
-                REQUIRE( waitFor(
-                    [ & ] {
-                        return tileDetails( host, "test" )
-                            .contains( "the server's certificate is not trusted" );
-                    },
-                    10000 ) );
+                REQUIRE(
+                    waitFor( [ & ] { return isIn( "test", SessionState::Failed ); }, 10000 ) );
+                REQUIRE( tileDetails( host, "test" )
+                             .contains( "the server's certificate is not trusted" ) );
             }
         }
 
@@ -897,8 +911,9 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
                 REQUIRE( host.openedFiles.size() == 1 );
                 REQUIRE( waitSubscribed( host.openedFiles.first() ) );
                 REQUIRE( tileSummary( host, "test" ).contains( "TLS on" ) );
-                REQUIRE( waitFor(
-                    [ & ] { return tileDetails( host, "test" ).contains( "connected to " ); } ) );
+                REQUIRE( waitFor( [ & ] { return isIn( "test", SessionState::Running ); } ) );
+                REQUIRE( statusOf( "test" ).server == server.url() );
+                REQUIRE( tileDetails( host, "test" ).contains( "connected to " + server.url() ) );
             }
         }
 
@@ -945,13 +960,9 @@ void requireStatusAfterStart( FakeHost& host, const QString& url, const QString&
                               const std::optional<QString>& secret = {} )
 {
     startFromDialog( host, url, "x", secret );
-    REQUIRE( waitFor(
-        [ & ] {
-            const auto details = tileDetails( host, "test" );
-            return details.startsWith( "failed: " ) && details.contains( text );
-        },
-        10000 ) );
+    REQUIRE( waitFor( [ & ] { return isIn( "test", SessionState::Failed ); }, 10000 ) );
     INFO( "tile: " << tileDetails( host, "test" ).toStdString() );
+    REQUIRE( tileDetails( host, "test" ).startsWith( "failed: " ) );
     REQUIRE( tileDetails( host, "test" ).contains( text ) );
     REQUIRE( tileButton( host, "test", "startStop" )->text().contains( "Start" ) );
 }
@@ -1198,31 +1209,6 @@ SCENARIO( "the dialog warns when the subjects of a session overlap", "[plugin][s
 
 namespace {
 
-/// The number before @p word in @p text, whatever the locale groups its
-/// digits with; -1 if there is none.
-qint64 numberBefore( const QString& text, const QString& word )
-{
-    const auto match = QRegularExpression( QStringLiteral( "(\\d[\\d.,' \\x{a0}\\x{202f}]*) " )
-                                           + QRegularExpression::escape( word ) )
-                           .match( text );
-    if ( !match.hasMatch() ) {
-        return -1;
-    }
-    return match.captured( 1 ).remove( QRegularExpression( "\\D" ) ).toLongLong();
-}
-
-/// The number after @p word in @p text, as numberBefore().
-qint64 numberAfter( const QString& text, const QString& word )
-{
-    const auto match = QRegularExpression( QRegularExpression::escape( word )
-                                           + QStringLiteral( " (\\d[\\d.,'\\x{a0}\\x{202f}]*)" ) )
-                           .match( text );
-    if ( !match.hasMatch() ) {
-        return -1;
-    }
-    return match.captured( 1 ).remove( QRegularExpression( "\\D" ) ).toLongLong();
-}
-
 /// Open a new connection from the sidebar, enter @p url and @p subjects and
 /// save it as @p name.
 void saveConnection( FakeHost& host, const QString& name, const QString& url,
@@ -1462,12 +1448,14 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
                          == "connected to " + server.url()
                                 + ", subscribed to orders.>, billing.* (queue auditors)" );
                 for ( const auto* name : { "orders", "metrics" } ) {
-                    REQUIRE( waitFor(
-                        [ & ] { return tileDetails( host, name ).startsWith( "running" ); } ) );
+                    REQUIRE( waitFor( [ & ] { return isIn( name, SessionState::Running ); } ) );
+                    const auto status = statusOf( name );
+                    REQUIRE( status.received == 0 );
+                    REQUIRE( status.dropped == 0 );
+                    REQUIRE( status.server == server.url() );
                     const auto details = tileDetails( host, name );
                     INFO( details.toStdString() );
-                    REQUIRE( numberAfter( details, "received" ) == 0 );
-                    REQUIRE( numberAfter( details, "dropped" ) == 0 );
+                    REQUIRE( details.startsWith( "running" ) );
                     REQUIRE( details.contains( "connected to " + server.url() ) );
                     REQUIRE( details.contains(
                         QFileInfo( name == QStringLiteral( "orders" ) ? first : second )
@@ -1505,18 +1493,21 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
                         for ( int i = 0; i < 20; ++i ) {
                             publisher.publish( "orders.eu", "x", {}, {}, i == 19 );
                         }
-                        return numberBefore( tileDetails( host, "orders" ), "msgs/s" ) > 0;
+                        return statusOf( "orders" ).rate > 0;
                     },
                     5000 );
 
-                THEN( "the tile shows the rate and how many it received" )
+                THEN( "its status has the rate and how many it received, and the tile shows "
+                      "them" )
                 {
                     REQUIRE( shown );
-                    const auto details = tileDetails( host, "orders" );
-                    INFO( details.toStdString() );
-                    REQUIRE( numberAfter( details, "received" ) > 0 );
-                    REQUIRE( numberAfter( details, "dropped" ) == 0 );
-                    REQUIRE( numberBefore( tileDetails( host, "metrics" ), "msgs/s" ) == 0 );
+                    const auto status = statusOf( "orders" );
+                    REQUIRE( status.received > 0 );
+                    REQUIRE( status.dropped == 0 );
+                    REQUIRE( statusOf( "metrics" ).rate == 0 );
+                    REQUIRE( tileDetails( host, "orders" )
+                                 .startsWith( QStringLiteral( "running · %1 msgs/s" )
+                                                  .arg( QLocale().toString( status.rate ) ) ) );
                 }
             }
 
@@ -1529,13 +1520,12 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
                     REQUIRE( endsStopped( first ) );
                     REQUIRE( host.notifications.last()
                              == "NATS capture of orders.>, billing.* (queue auditors) stopped." );
+                    REQUIRE( isIn( "orders", SessionState::Stopped ) );
                     REQUIRE( tileDetails( host, "orders" ).startsWith( "stopped" ) );
                     REQUIRE(
                         tileButton( host, "orders", "startStop" )->text().contains( "Start" ) );
                     REQUIRE_FALSE( tileButton( host, "orders", "delete" )->isHidden() );
-                    REQUIRE( waitFor( [ & ] {
-                        return tileDetails( host, "metrics" ).startsWith( "running" );
-                    } ) );
+                    REQUIRE( isIn( "metrics", SessionState::Running ) );
                     {
                         Publisher publisher( server.url() );
                         publisher.publish( "metrics.mem", "still" );
@@ -1557,8 +1547,10 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
                 {
                     REQUIRE( endsStopped( first ) );
                     REQUIRE( endsStopped( second ) );
-                    REQUIRE( tileDetails( host, "orders" ).startsWith( "stopped" ) );
-                    REQUIRE( tileDetails( host, "metrics" ).startsWith( "stopped" ) );
+                    for ( const auto* name : { "orders", "metrics" } ) {
+                        REQUIRE( isIn( name, SessionState::Stopped ) );
+                        REQUIRE( tileDetails( host, name ).startsWith( "stopped" ) );
+                    }
                     REQUIRE_FALSE( sidebarButton( host, "stopAll" )->isEnabled() );
                 }
             }
@@ -1639,7 +1631,7 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
             THEN( "its tile shows how many were dropped" )
             {
                 REQUIRE( waitFor(
-                    [ & ] { return numberAfter( tileDetails( host, "metrics" ), "dropped" ) > 0; },
+                    [ & ] { return statusOf( "metrics" ).dropped > 0; },
                     10000 ) );
             }
         }
@@ -1869,11 +1861,11 @@ SCENARIO( "a connection replays a JetStream stream from its tile", "[plugin][ser
                     REQUIRE( host.openedFiles.size() == 1 );
                     REQUIRE( host.openedFollow.first() );
                     const auto path = host.openedFiles.first();
-                    REQUIRE( waitFor(
-                        [ & ] {
-                            return tileDetails( host, "orders" ).contains( "replay complete" );
-                        },
-                        10000 ) );
+                    REQUIRE( waitFor( [ & ] { return isIn( "orders", SessionState::Stopped ); },
+                                      10000 ) );
+                    REQUIRE( statusOf( "orders" ).detail == "replay complete" );
+                    REQUIRE( statusOf( "orders" ).received == 2 );
+                    REQUIRE( tileDetails( host, "orders" ).startsWith( "replay complete" ) );
                     const auto capture = Capture::read( path );
                     REQUIRE( capture.size() == 4 );
                     REQUIRE( capture.at( 1 ).fields()

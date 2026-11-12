@@ -41,17 +41,12 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
-#include <QTimer>
 #include <QVBoxLayout>
 
-#include <algorithm>
 
 namespace nats_monitor {
 
 namespace {
-
-/// How often the counts are polled.
-constexpr int kSampleMs = 1000;
 
 /// What @p profile is, for its tile.
 QStringList summaryOf( const ConnectionProfile& profile )
@@ -99,6 +94,42 @@ QStringList countsOf( const SessionStatus& status )
 
 } // namespace
 
+TileView tileViewOf( const SessionStatus& status )
+{
+    TileView view;
+    switch ( status.state ) {
+    case SessionState::Stopped:
+        view.state = TileState::Stopped;
+        if ( !status.filePath.isEmpty() ) {
+            // "stopped", or "replay complete"
+            view.details << ( status.detail.isEmpty() ? QStringLiteral( "stopped" )
+                                                      : status.detail )
+                         << countsOf( status );
+        }
+        break;
+    case SessionState::Connecting:
+        view.state = TileState::Connecting;
+        view.details << QStringLiteral( "connecting · %1" ).arg( status.detail )
+                     << countsOf( status );
+        break;
+    case SessionState::Running:
+        view.state = TileState::Running;
+        view.details << QStringLiteral( "running · %1 msgs/s" )
+                            .arg( QLocale().toString( status.rate ) )
+                     << countsOf( status )
+                     << QStringLiteral( "connected to %1" ).arg( status.server );
+        break;
+    case SessionState::Failed:
+        view.state = TileState::Failed;
+        view.details << QStringLiteral( "failed: %1" ).arg( status.detail );
+        if ( !status.filePath.isEmpty() ) {
+            view.details << countsOf( status );
+        }
+        break;
+    }
+    return view;
+}
+
 SidebarWidget::SidebarWidget( ProfileStore* profiles, Sessions* sessions, QWidget* parent )
     : QWidget( parent )
     , profiles_( profiles )
@@ -107,7 +138,6 @@ SidebarWidget::SidebarWidget( ProfileStore* profiles, Sessions* sessions, QWidge
     , empty_( new QLabel( QStringLiteral( "No saved connection yet: New connection… adds one." ),
                           this ) )
     , tiles_( new QVBoxLayout )
-    , timer_( new QTimer( this ) )
 {
     auto* newConnection = new QPushButton( QStringLiteral( "New connection…" ), this );
     newConnection->setObjectName( "newConnection" );
@@ -158,9 +188,6 @@ SidebarWidget::SidebarWidget( ProfileStore* profiles, Sessions* sessions, QWidge
     } );
     connect( profiles_, &ProfileStore::changed, this,
              [ this ] { guarded( "showing the connections", [ this ] { reload(); } ); } );
-    connect( timer_, &QTimer::timeout, this,
-             [ this ] { guarded( "counting the captures", [ this ] { sample(); } ); } );
-    timer_->start( kSampleMs );
 
     reload();
 }
@@ -215,7 +242,6 @@ void SidebarWidget::start( const QString& name )
             return;
         }
     }
-    samples_.remove( name );
     sessions_->start( *profile );
 }
 
@@ -237,64 +263,9 @@ void SidebarWidget::confirmDelete( const QString& name )
 
 void SidebarWidget::updateTile( ConnectionTile* tile )
 {
-    const auto status = sessions_->status( tile->name() );
-    if ( sessions_->isRunning( tile->name() ) ) {
-        tile->setState( status.state == SessionState::Connecting ? TileState::Connecting
-                                                                 : TileState::Running );
-    }
-    else {
-        tile->setState( status.state == SessionState::Failed ? TileState::Failed
-                                                             : TileState::Stopped );
-    }
-    const QLocale locale;
-    QStringList details;
-    switch ( status.state ) {
-    case SessionState::Stopped:
-        if ( !status.filePath.isEmpty() ) {
-            // "stopped", or "replay complete"
-            details << ( status.detail.isEmpty() ? QStringLiteral( "stopped" ) : status.detail )
-                    << countsOf( status );
-        }
-        break;
-    case SessionState::Connecting:
-        details << QStringLiteral( "connecting · %1" ).arg( status.detail ) << countsOf( status );
-        break;
-    case SessionState::Running:
-        details << QStringLiteral( "running · %1 msgs/s" )
-                       .arg( locale.toString( samples_.value( tile->name() ).rate ) )
-                << countsOf( status ) << QStringLiteral( "connected to %1" ).arg( status.server );
-        break;
-    case SessionState::Failed:
-        details << QStringLiteral( "failed: %1" ).arg( status.detail );
-        if ( !status.filePath.isEmpty() ) {
-            details << countsOf( status );
-        }
-        break;
-    }
-    tile->setDetails( details );
-}
-
-void SidebarWidget::sample()
-{
-    for ( auto* tile : std::as_const( tileByName_ ) ) {
-        const auto name = tile->name();
-        if ( !sessions_->isRunning( name ) ) {
-            samples_.remove( name );
-            continue;
-        }
-        const auto received = sessions_->status( name ).received;
-        auto it = samples_.find( name );
-        if ( it == samples_.end() ) {
-            it = samples_.insert( name, {} );
-            it->since.start();
-        }
-        else {
-            const auto elapsedMs = std::max<qint64>( it->since.restart(), 1 );
-            it->rate = ( received - it->received ) * 1000 / static_cast<quint64>( elapsedMs );
-        }
-        it->received = received;
-        updateTile( tile );
-    }
+    const auto view = tileViewOf( sessions_->status( tile->name() ) );
+    tile->setState( view.state );
+    tile->setDetails( view.details );
 }
 
 void SidebarWidget::updateStopAll()

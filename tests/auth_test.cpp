@@ -52,7 +52,9 @@ using nats_test::NatsServer;
 using nats_test::Publisher;
 using nats_test::readLines;
 using nats_test::sessionConfig;
+using nats_test::Transitions;
 using nats_test::waitFor;
+using Kind = nats_monitor::Transition::Kind;
 
 namespace {
 
@@ -87,12 +89,18 @@ QString tlsBlock( bool verifyClients )
 struct Run {
     explicit Run( const SessionConfig& config )
         : session( config, nats_test::sessionTempRoot() )
+        , transitions( session )
     {
         QObject::connect( &session, &NatsSession::errorOccurred,
                           [ this ]( const QString& message ) { errors << message; } );
-        QObject::connect( &session, &NatsSession::finished, [ this ] { finished = true; } );
         REQUIRE( session.start() );
-        REQUIRE( waitFor( [ this ] { return finished || connected(); }, 15000 ) );
+        REQUIRE( waitFor( [ this ] { return finished() || connected(); }, 15000 ) );
+    }
+
+    /// Whether the session failed: it reported why.
+    bool finished() const
+    {
+        return transitions.count( Kind::Failed ) > 0;
     }
 
     /// Whether the file has the connected marker.
@@ -103,7 +111,7 @@ struct Run {
 
     bool subscribed() const
     {
-        return !finished && connected();
+        return !finished() && connected();
     }
 
     /// The file, read with the line reader.
@@ -112,10 +120,15 @@ struct Run {
         return Capture::read( session.filePath() );
     }
 
-    /// The error reported, which the dialog shows; empty if none.
+    /// The errors reported and why it failed, as the tile shows them; empty
+    /// if none.
     QString error() const
     {
-        return errors.join( '\n' );
+        auto all = errors;
+        if ( finished() ) {
+            all << transitions.last( Kind::Failed ).detail;
+        }
+        return all.join( '\n' );
     }
 
     /// Whether a message published on @p subject with @p configure reaches the file.
@@ -133,8 +146,8 @@ struct Run {
     }
 
     NatsSession session;
+    Transitions transitions;
     QStringList errors;
-    bool finished = false;
 };
 
 /// That the session of @p run is subscribed.
@@ -148,7 +161,7 @@ void requireSubscribed( const Run& run )
 void requireError( const Run& run, const QString& text )
 {
     INFO( "error: " << run.error().toStdString() );
-    REQUIRE( run.finished );
+    REQUIRE( run.finished() );
     REQUIRE( run.error().contains( text ) );
 }
 
@@ -547,7 +560,7 @@ SCENARIO( "a password in a session's URL is never written to its file or its err
 
             THEN( "it fails, and neither its error nor its file shows the password" )
             {
-                REQUIRE( run.finished );
+                REQUIRE( run.finished() );
                 // The secret is nowhere: not in any field, so not in the text.
                 const auto everything
                     = run.error() + '\n' + readLines( run.session.filePath() ).join( '\n' );

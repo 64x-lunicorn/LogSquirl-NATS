@@ -48,6 +48,7 @@
 using nats_monitor::NatsSession;
 using nats_monitor::SessionConfig;
 using nats_monitor::Subscription;
+using nats_monitor::Transition;
 using nats_test::Capture;
 using nats_test::ConfiguredServer;
 using nats_test::LineFields;
@@ -60,7 +61,9 @@ using nats_test::readLines;
 using nats_test::sessionConfig;
 using nats_test::sessionTempRoot;
 using nats_test::settle;
+using nats_test::Transitions;
 using nats_test::waitFor;
+using Kind = nats_monitor::Transition::Kind;
 
 namespace {
 
@@ -365,14 +368,18 @@ SCENARIO( "a session without a subject does not start", "[session][subjects]" )
         const auto config = GENERATE( SessionConfig{},
                                       sessionConfig( "nats://127.0.0.1:1", { "  " } ) );
         NatsSession session( config, sessionTempRoot() );
+        Transitions transitions( session );
         QStringList errors;
         QObject::connect( &session, &NatsSession::errorOccurred,
                           [ & ]( const QString& message ) { errors << message; } );
 
-        THEN( "start() refuses, and says why as the start check does" )
+        THEN( "start() refuses: it failed, saying why as the start check does, and that alone" )
         {
             REQUIRE_FALSE( session.start() );
-            REQUIRE( errors == QStringList{ "Enter the subject to capture." } );
+            REQUIRE( transitions.all()
+                     == QList<Transition>{
+                         { Kind::Failed, "Enter the subject to capture.", {} } } );
+            REQUIRE( errors.isEmpty() );
         }
     }
 
@@ -390,15 +397,15 @@ SCENARIO( "a session without a subject does not start", "[session][subjects]" )
             config.auth.method = nats_monitor::AuthMethod::UserPassword;
         }
         NatsSession session( config, sessionTempRoot() );
-        QStringList errors;
-        QObject::connect( &session, &NatsSession::errorOccurred,
-                          [ & ]( const QString& message ) { errors << message; } );
+        Transitions transitions( session );
 
         THEN( "start() refuses with the start check's reason" )
         {
             REQUIRE_FALSE( session.start() );
-            REQUIRE( errors == QStringList{ nats_monitor::startProblem( config ) } );
-            REQUIRE_FALSE( errors.first().isEmpty() );
+            REQUIRE( transitions.kinds() == QList<Kind>{ Kind::Failed } );
+            REQUIRE( transitions.last( Kind::Failed ).detail
+                     == nats_monitor::startProblem( config ) );
+            REQUIRE_FALSE( transitions.last( Kind::Failed ).detail.isEmpty() );
         }
     }
 }
@@ -444,7 +451,9 @@ SCENARIO( "stopping a session closes the connection and keeps the file", "[serve
         Publisher publisher( server.url() );
         auto session = std::make_unique<NatsSession>( sessionConfig( server.url(), { ">" } ),
                                                       sessionTempRoot() );
+        Transitions transitions( *session );
         startAndWaitConnected( *session, server.url(), ">" );
+        REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Running ) == 1; } ) );
         const QString path = session->filePath();
         publisher.publish( "a", "before" );
         REQUIRE( waitFor( [ & ] {
@@ -459,6 +468,26 @@ SCENARIO( "stopping a session closes the connection and keeps the file", "[serve
             {
                 REQUIRE_FALSE( session->isRunning() );
                 REQUIRE( Capture::read( path ).last().fields() == markerFields( "stopped" ) );
+            }
+
+            THEN( "it reported each step once: connecting, running at the server, stopped" )
+            {
+                settle( 100 ); // nothing more comes
+                REQUIRE( transitions.all()
+                         == QList<Transition>{
+                             { Kind::Connecting, "connecting to " + server.url() + "…", {} },
+                             { Kind::Running, "connected to " + server.url(), server.url() },
+                             { Kind::Stopped, "stopped", {} } } );
+            }
+
+            AND_WHEN( "it is stopped again" )
+            {
+                session->stop();
+
+                THEN( "nothing more is reported" )
+                {
+                    REQUIRE( transitions.count( Kind::Stopped ) == 1 );
+                }
             }
 
             AND_WHEN( "a message is published afterwards" )
@@ -581,21 +610,22 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
         QStringList errors;
         QObject::connect( &session, &NatsSession::errorOccurred,
                           [ &errors ]( const QString& message ) { errors << message; } );
-        int finished = 0;
-        QObject::connect( &session, &NatsSession::finished, [ &finished ] { ++finished; } );
+        Transitions transitions( session );
 
         WHEN( "a session is started" )
         {
             REQUIRE( session.start() );
 
-            THEN( "the failure is reported, written to the file, and the session ends" )
+            THEN( "it failed, saying why as in the file's marker, and the session ends" )
             {
-                REQUIRE( waitFor( [ & ] { return finished == 1; }, 10000 ) );
-                REQUIRE( errors.size() == 1 );
-                REQUIRE( errors.first().contains( url ) );
+                REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Failed ) == 1; },
+                                  10000 ) );
+                REQUIRE( transitions.kinds() == QList<Kind>{ Kind::Connecting, Kind::Failed } );
+                const auto why = transitions.last( Kind::Failed ).detail;
+                REQUIRE( why.startsWith( "connection to " + url + " failed: " ) );
+                REQUIRE( errors.isEmpty() ); // the transition says it, once
                 REQUIRE_FALSE( session.isRunning() );
-                REQUIRE( Capture::read( session.filePath() )
-                             .hasMarkerStartingWith( "connection to " + url + " failed: " ) );
+                REQUIRE( Capture::read( session.filePath() ).last().markerText() == why );
             }
         }
     }
@@ -606,12 +636,7 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
         const int port = server->port();
         const QString url = server->url();
         NatsSession session( sessionConfig( url, { "back" } ), sessionTempRoot() );
-        QStringList status;
-        QObject::connect( &session, &NatsSession::statusChanged,
-                          [ &status ]( const QString& text ) { status << text; } );
-        QStringList connected;
-        QObject::connect( &session, &NatsSession::connected,
-                          [ &connected ]( const QString& server ) { connected << server; } );
+        Transitions transitions( session );
         startAndWaitConnected( session, url, "back" );
 
         WHEN( "the server stops" )
@@ -651,13 +676,15 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
                             .messageFields()
                             .contains( liveFields( "back", "again" ) );
                     } ) );
-                    // The dialog shows them too.
-                    REQUIRE( waitFor( [ & ] { return status.size() >= 3; } ) );
-                    REQUIRE( status.at( 0 ) == "connected to " + url );
-                    REQUIRE( status.at( 1 ) == "disconnected" );
-                    REQUIRE( status.at( 2 ) == "reconnected to " + url );
-                    // Connected again, as after the first connect.
-                    REQUIRE( connected == QStringList{ url, url } );
+                    // Each step reported once: running again, as after the
+                    // first connect.
+                    REQUIRE( waitFor( [ & ] { return transitions.all().size() >= 4; } ) );
+                    REQUIRE( transitions.all()
+                             == QList<Transition>{
+                                 { Kind::Connecting, "connecting to " + url + "…", {} },
+                                 { Kind::Running, "connected to " + url, url },
+                                 { Kind::Reconnecting, "disconnected", {} },
+                                 { Kind::Running, "reconnected to " + url, url } } );
                 }
             }
         }
@@ -898,8 +925,7 @@ SCENARIO( "when the server goes away during a flood, the drops until then are st
         config.pendingLimits.messages = 16;
         config.queueLimit = 1;
         NatsSession session( config, sessionTempRoot() );
-        int finished = 0;
-        QObject::connect( &session, &NatsSession::finished, [ &finished ] { ++finished; } );
+        Transitions transitions( session );
         startAndWaitConnected( session, url, "flood" );
         {
             Publisher publisher( url );
@@ -946,7 +972,9 @@ SCENARIO( "when the server goes away during a flood, the drops until then are st
 
             THEN( "the session ends, and every drop is in a marker before the closed marker" )
             {
-                REQUIRE( waitFor( [ & ] { return finished == 1; }, 30000 ) );
+                REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Failed ) == 1; },
+                                  30000 ) );
+                REQUIRE( transitions.last( Kind::Failed ).detail == "connection closed" );
                 check( "connection closed" );
             }
         }
@@ -1200,8 +1228,7 @@ SCENARIO( "a session started again goes on in its last file, within the size lim
         auto config = sessionConfig( server.url(), { "again" } );
         config.maxFileBytes = 1000;
         NatsSession session( config, sessionTempRoot() );
-        int connections = 0;
-        QObject::connect( &session, &NatsSession::connected, [ & ] { ++connections; } );
+        Transitions transitions( session );
         startAndWaitConnected( session, server.url(), "again" );
         const auto first = session.filePath();
 
@@ -1225,7 +1252,7 @@ SCENARIO( "a session started again goes on in its last file, within the size lim
         WHEN( "it is started again and gets another 1500 bytes" )
         {
             REQUIRE( session.start() );
-            REQUIRE( waitFor( [ & ] { return connections == 2; }, 10000 ) );
+            REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Running ) == 2; }, 10000 ) );
             REQUIRE( session.filePath() == last );
             publish( 15 );
             session.stop();

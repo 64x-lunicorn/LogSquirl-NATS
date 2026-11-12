@@ -70,7 +70,8 @@
  * A marker line may carry an event, which the writer reports as it writes
  * the line (also after a write failure), in the order of the lines: a
  * report never comes before its line is handed to the file.  The kinds
- * (Event::Kind) are typed so that the session can map each to a signal.
+ * (Event::Kind) are typed so that the session can map each to a transition
+ * or a signal without reading the text.
  * The reporter is called on the writer thread (or the caller's, not
  * started), never under the sink's mutex.
  *
@@ -112,10 +113,14 @@ public:
     /// What the sink reports, once the line that goes with it is written.
     struct Event {
         enum class Kind {
-            Connected,   ///< A marker; the text is the server URL.
-            Reconnected, ///< A marker; the text is the server URL.
-            Status,      ///< A marker of a connection event; the text is what it says.
-            Error,       ///< A marker of a failure; the text is what it says.
+            Connected,    ///< A marker; the text is the server URL.
+            Reconnected,  ///< A marker; the text is the server URL.
+            Disconnected, ///< A marker of the connection broken; the text is what it says.
+            /// A marker the session reports nothing more of: a warning,
+            /// caught up, the end of the capture or why it failed (the
+            /// session's own transitions say those); the text is what it says.
+            Status,
+            Error, ///< A marker of an error the capture runs on after; the text is what it says.
             Rotated,     ///< The capture goes on in another file; the text is its path.
             FileError,   ///< A file could not be written or started; the text says why.
         };

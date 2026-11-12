@@ -29,6 +29,24 @@
  * reported through the signals.  What a session is set up with, its
  * SessionConfig, is in sessionconfig.h.
  *
+ * TRANSITIONS
+ * ───────────
+ * Each step of the session's life is one typed Transition (sessionstatus.h),
+ * emitted once, in the order of the file's markers:
+ *
+ *     start() ──► Connecting ──► Running(server) ◄──► Reconnecting
+ *                     │               │                   │
+ *                     └───────────────┴─────► Failed(why), Completed, Stopped
+ *
+ * Connecting when start() has opened the file; Running once connected and
+ * subscribed (its "connected" marker written), again after a reconnect;
+ * Reconnecting when the connection breaks.  The end comes from the
+ * connection thread's decision: Failed with the reason it could not start,
+ * connect or subscribe, or "connection closed"; Completed for a replay that
+ * caught up; Stopped from stop().  A Failed start() emits Failed alone.  An
+ * error that does not end the session (nats.c's, a file's) is
+ * errorOccurred() instead.  Nobody reads a state out of the texts.
+ *
  * SUBSCRIPTIONS
  * ─────────────
  * A session subscribes to one or more subjects (SessionConfig::subscriptions),
@@ -102,7 +120,7 @@
  * and the reply field "-" (the stream keeps no reply subject).
  *
  * Once the replay has caught up (the consumer has nothing more pending), it
- * either ends, with a "replay complete" marker and completed(), or, with
+ * either ends, with a "replay complete" marker and Completed, or, with
  * ReplayConfig::followLive, writes "caught up, following live" and goes on
  * with what the stream stores from then on, until stop().
  *
@@ -135,6 +153,7 @@
 #pragma once
 
 #include "sessionconfig.h"
+#include "sessionstatus.h"
 
 #include <QObject>
 #include <QString>
@@ -162,28 +181,30 @@ public:
 
     /**
      * Create the file and start connecting and subscribing in the
-     * background.  No-op (true) if already running.
+     * background, a Connecting transition.  No-op (true) if already
+     * running.
      *
-     * Whether the connection succeeds is reported later: connected(), or
-     * errorOccurred() and finished().
+     * Whether the connection succeeds is reported later: Running, or
+     * Failed.
      *
-     * @return false, after errorOccurred(), if the session could not start
-     *         (its config has a startProblem(), profiles.h, such as no
+     * @return false, after a Failed transition, if the session could not
+     *         start (its config has a startProblem(), profiles.h, such as no
      *         subject or a blank one; the file cannot be created).
      */
     bool start();
 
     /**
      * Drain the subscription and close the connection, write what was
-     * received before and a "stopped" marker, and close the file.  Waits
-     * for the connection thread and the sink's writer: a round trip to the
-     * server and the writing of
+     * received before and a "stopped" marker, and close the file: a Stopped
+     * transition.  Waits for the connection thread and the sink's writer: a
+     * round trip to the server and the writing of
      * what nats.c held, at most about 15 s should the connection break
      * while draining.  No-op if not running.
      */
     void stop();
 
-    /// Whether the session runs: between start() and stop() or finished().
+    /// Whether the session runs: between start() and the transition that
+    /// ends it (Failed, Completed, Stopped).
     bool isRunning() const;
 
     /// The file the session writes; valid after start().  After a rotation
@@ -227,38 +248,28 @@ public:
     };
 
 Q_SIGNALS:
-    /// Connected to @p url and subscribed: after start(), and again after
-    /// each reconnect.
-    void connected( const QString& url );
+    /// The session went a step on (TRANSITIONS): once for each step.
+    void transitioned( const Transition& transition );
 
-    /// A connection event, as written to the file (without the marker
-    /// line's fixed fields).
-    void statusChanged( const QString& text );
-
-    /// The session could not start, connect or subscribe, or nats.c
-    /// reported an error.
+    /// nats.c reported an error, or a file could not be written or
+    /// started, and the session runs on.  What ends it is a Failed
+    /// transition instead.
     void errorOccurred( const QString& message );
 
     /// The file reached the size limit: the capture goes on in @p path,
     /// the next file of the session (ROTATION).
     void fileRotated( const QString& path );
 
-    /// The session ended on its own (it could not connect, or the
-    /// connection was closed for good); not emitted by stop().
-    void finished();
-
-    /// A replay that does not follow live has caught up with its stream
-    /// and ended: the session no longer runs.  Not emitted by stop().
-    void completed();
-
 private:
     struct Worker;
 
-    /// The connection thread of start number @p generation has ended on its own.
-    void onWorkerFinished( int generation );
+    /// The sink of start number @p generation wrote the marker of
+    /// @p transition: emit it, unless the session ended meanwhile.
+    void onWorkerTransition( int generation, const Transition& transition );
 
-    /// The replay of start number @p generation is complete: its threads have ended.
-    void onWorkerCompleted( int generation );
+    /// The connection thread of start number @p generation has ended on its
+    /// own, as @p end says (Failed or Completed): its threads have ended.
+    void onWorkerEnded( int generation, const Transition& end );
 
     /// The sink of start number @p generation goes on in @p path.
     void onWorkerRotated( int generation, const QString& path );

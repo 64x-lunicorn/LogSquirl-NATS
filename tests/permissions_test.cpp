@@ -54,7 +54,9 @@ using nats_test::Publisher;
 using nats_test::replayConfig;
 using nats_test::sessionConfig;
 using nats_test::sessionTempRoot;
+using nats_test::Transitions;
 using nats_test::waitFor;
+using Kind = nats_monitor::Transition::Kind;
 
 namespace {
 
@@ -126,10 +128,9 @@ SCENARIO( "the permissions the README lists are enough to capture and to replay"
             QStringList errors;
             QObject::connect( &session, &NatsSession::errorOccurred,
                               [ &errors ]( const QString& message ) { errors << message; } );
-            int connected = 0;
-            QObject::connect( &session, &NatsSession::connected, [ &connected ] { ++connected; } );
+            Transitions transitions( session );
             REQUIRE( session.start() );
-            REQUIRE( waitFor( [ & ] { return connected == 1; }, 10000 ) );
+            REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Running ) == 1; }, 10000 ) );
             admin.publish( "orders.us", "live" );
 
             THEN( "the message is written, without any error" )
@@ -158,10 +159,10 @@ SCENARIO( "the permissions the README lists are enough to capture and to replay"
             QStringList errors;
             QObject::connect( &session, &NatsSession::errorOccurred,
                               [ &errors ]( const QString& message ) { errors << message; } );
-            int completed = 0;
-            QObject::connect( &session, &NatsSession::completed, [ &completed ] { ++completed; } );
+            Transitions transitions( session );
             REQUIRE( session.start() );
-            REQUIRE( waitFor( [ & ] { return completed == 1; }, 20000 ) );
+            REQUIRE(
+                waitFor( [ & ] { return transitions.count( Kind::Completed ) == 1; }, 20000 ) );
 
             THEN( "ORDERS is listed, its messages are all written, and its consumer is gone" )
             {

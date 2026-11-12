@@ -20,7 +20,7 @@ plugin.cpp            entry points (logsquirl_plugin_*), each through guarded()
   ├─ SidebarWidget    the tab: New connection…, Stop all, a tile per saved connection
   │    └─ ConnectionTile × N  plain card: summary, details, Start/Stop, Edit, Delete
   ├─ ConnectionDialog edits and saves connections through the store; opened from the tab
-  └─ Sessions         one session per connection; state and counts for the tiles
+  └─ Sessions         one session per connection; owns each connection's status (sessionstatus.h)
        └─ NatsSession × N   children of Sessions: the nats.c adapter
             ├─ connection thread  connects, subscribes, waits; drains and closes
             ├─ nats.c threads     callbacks: format a line, hand it to the sink
@@ -82,7 +82,8 @@ rotation and the end of the capture. It knows nothing of NATS. It takes
 message lines (`message()`), marker lines (`marker()`) and drops counted
 elsewhere (`dropped()`) from any thread, and reports a typed
 `CaptureSink::Event` for each marker it writes, each rotation and each file
-error; the session forwards them to its signals.
+error; the session maps each kind to one transition or signal, never
+reading the text (below, *Transitions and the connection status*).
 
 What the callbacks use (`Shared` in natssession.cpp, the sink in it) is kept
 apart from the worker: should nats.c not confirm within its timeout that its
@@ -204,11 +205,33 @@ the narrower one.
 ([`src/sessions.h`](../src/sessions.h)) starts a session for a connection's
 profile, beside those of the other connections, with its own connection,
 file and tab, as LogSquirl-Serial does per port; shutdown stops them all.
-It keeps what the tile shows: the state (`SessionState`: connecting,
-running, failed, stopped), the last connection event or why it failed, the
-server it is connected to, its file and how many files it rotated into,
-and the counts. That stays after the session ended, until the connection
-is started again.
+It is the one owner of each connection's status, which the tile shows
+(below). That stays after the session ended, until the connection is
+started again.
+
+**Transitions and the connection status.** A session reports each step of
+its life once, as a typed `Transition`
+([`src/sessionstatus.h`](../src/sessionstatus.h)) with a detail text:
+*Connecting* (from `start()`, once the file is open), *Running* at a server
+(the sink wrote the `connected` or `reconnected` marker: `Event::Connected`,
+`Event::Reconnected`), *Reconnecting* (`Event::Disconnected`), and the end,
+which the connection thread decides: *Failed* with why it could not start,
+connect or subscribe, or `connection closed`; *Completed* for a replay
+that caught up; *Stopped* from `stop()`. A transition the sink reported
+after `stop()` is dropped, so *Stopped* is the last. `errorOccurred()` is
+only for an error the session runs on after (nats.c's, a file's); an error
+that ends it is the *Failed* transition, so each event is one signal.
+`Sessions` applies the transitions to a `ConnectionStatus` per connection:
+the `SessionState` (connecting, running, failed, stopped), the detail, the
+server, the file and how many files it rotated into, and the counts and
+msgs/s it samples from the session once a second (`Sessions::sample()`) on
+the clock it was given (a test gives its own). It says `changed()` at once
+for a transition, and after a sample when the counts or the rate moved.
+Nothing reads a state out of a text. The status is tested without a server
+or a clock (`[status]`, `sessionstatus_test.cpp`), `Sessions` with an
+injected clock (`[sessions]`, `sessions_test.cpp`), the transitions of a
+session in `natssession_test.cpp` and `replay_test.cpp`
+(`nats_test::Transitions` records them).
 
 The tests (`[subjects]`) are at the main seam: two subjects and the overlap
 in `natssession_test.cpp` (and a queue group shared with another member);
@@ -262,8 +285,8 @@ stream sequence after a gap or a reconnect. The filter subject is the
 - **Caught up.** A message with `NumPending` 0 is the last one there was:
   with `followLive` the sink writes `caught up, following live` and goes
   on; otherwise the capture ends as on stop, with `replay complete`, and
-  the session emits `completed()` (not `finished()`, which is a failure),
-  on which `Sessions` sets the tile to stopped with *replay complete*. With
+  the session reports the *Completed* transition (not *Failed*), on which
+  `Sessions` sets the status to stopped with *replay complete*. With
   nothing to replay no message comes, so after subscribing the plan (an
   empty stream, a start sequence after its last) or the consumer's info
   (`natsSubscription_GetConsumerInfo`: nothing pending, nothing delivered)
@@ -362,12 +385,14 @@ tile.
   muted, below a thin line, and hidden with it when there are none.
 - **Summary**: the URLs, the authentication method, TLS on or off (as
   `usesTls()`), `Subjects  <subjects>` or what the replay reads.
-- **Details**, polled once a second and updated at once on a state change
-  (`Sessions::changed`): while running, `running · <n> msgs/s` (the rate
-  over the last second), `received · dropped`, the file's name, size and
-  number after a rotation, and `connected to <server>`; while connecting,
-  the last event; after a failure, `failed: <why>`; after Stop, what it
-  captured.
+- **Details**, updated whenever `Sessions::changed` says the connection's
+  status changed: at once on a transition, once a second while the counts
+  move. The tab only maps the status onto the tile (`tileViewOf()`): one
+  `TileState` for each `SessionState`, and while running, `running · <n>
+  msgs/s` (the status's rate over the last second), `received · dropped`,
+  the file's name, size and number after a rotation, and `connected to
+  <server>`; while connecting, the last event; after a failure, `failed:
+  <why>`; after Stop, what it captured. It computes no rate of its own.
 - **Start** finds the profile in the store and, when its method takes a
   password or token, asks for it (`QInputDialog`, password echo); it is
   never saved, and an empty answer starts nothing. **Delete** asks
@@ -381,7 +406,10 @@ tile.
   another name is another connection, with a tile of its own.
 
 The tile's states are tested on the tile itself (`[tile]`,
-`connectiontile_test.cpp`). The tests (`[sidebar]`) drive the tab through
+`connectiontile_test.cpp`), what a tile shows of each status on
+`tileViewOf()` (`[sidebar]`, `sidebar_test.cpp`). The tests (`[sidebar]`)
+read state, counts and rate from `Sessions::status()`, not from the tile's
+localized text, and drive the tab through
 `FakeHost`, which records the
 sidebar tabs registered and unregistered: tiles created, updated and
 deleted, Start and Stop, the details of a running tile, two tiles at once,

@@ -1,0 +1,253 @@
+/*
+ * Copyright (C) 2026 LogSquirl Contributors
+ *
+ * This file is part of logsquirl-nats.
+ *
+ * logsquirl-nats is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * logsquirl-nats is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with logsquirl-nats.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/**
+ * @file sessions_test.cpp
+ * @brief BDD tests for Sessions, the one owner of each connection's status
+ *        (issue #29).
+ *
+ * Sessions is driven without the host (its notifications and tabs go
+ * nowhere) and with a clock of the test's, so that the rate is exact.  The
+ * status is read with status(), and what changed() announced is recorded.
+ */
+
+// First: on Windows nats.h includes winsock2.h, which must come before any
+// windows.h.
+#include <nats.h>
+
+#include <catch2/catch.hpp>
+
+#include "natsserver.h"
+#include "profiles.h"
+#include "sessions.h"
+#include "sessiontest.h"
+
+#include <QDir>
+#include <QTemporaryDir>
+
+#include <memory>
+#include <utility>
+
+using nats_monitor::ConnectionProfile;
+using nats_monitor::SessionState;
+using nats_monitor::Sessions;
+using nats_monitor::SessionStatus;
+using nats_test::NatsServer;
+using nats_test::Publisher;
+using nats_test::sessionTempRoot;
+using nats_test::waitFor;
+
+namespace {
+
+/// The connection @p name on @p url capturing @p subjects.
+ConnectionProfile profile( const QString& name, const QString& url, const QString& subjects )
+{
+    ConnectionProfile profile;
+    profile.name = name;
+    profile.url = url;
+    profile.subjects = subjects;
+    return profile;
+}
+
+/// The states and details Sessions announced for a connection, each change
+/// of either once: what its transitions were.
+struct Announced {
+    Announced( Sessions& sessions, const QString& name )
+    {
+        QObject::connect( &sessions, &Sessions::changed,
+                          [ &sessions, name, list = list ]( const QString& changed ) {
+                              if ( changed != name ) {
+                                  return;
+                              }
+                              const auto status = sessions.status( name );
+                              const std::pair<SessionState, QString> step{ status.state,
+                                                                           status.detail };
+                              if ( list->isEmpty() || list->last() != step ) {
+                                  list->append( step );
+                              }
+                          } );
+    }
+
+    QList<SessionState> states() const
+    {
+        QList<SessionState> states;
+        for ( const auto& step : *list ) {
+            states << step.first;
+        }
+        return states;
+    }
+
+    std::shared_ptr<QList<std::pair<SessionState, QString>>> list
+        = std::make_shared<QList<std::pair<SessionState, QString>>>();
+};
+
+} // namespace
+
+SCENARIO( "Sessions keeps the state, counts and rate of each connection",
+          "[server][sessions]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "Sessions on a clock of the test's, and a server" )
+    {
+        NatsServer server;
+        auto nowMs = std::make_shared<qint64>( 10000 );
+        Sessions sessions( sessionTempRoot(), nullptr, [ nowMs ] { return *nowMs; } );
+        Announced announced( sessions, "orders" );
+
+        WHEN( "the connection orders is started" )
+        {
+            REQUIRE( sessions.start( profile( "orders", server.url(), "orders.>" ) ) );
+
+            THEN( "it connects, saying where to, and writes its file" )
+            {
+                const auto status = sessions.status( "orders" );
+                REQUIRE( status.state == SessionState::Connecting );
+                REQUIRE( status.detail == "connecting to " + server.url() + "…" );
+                REQUIRE_FALSE( status.filePath.isEmpty() );
+                REQUIRE( status.files == 1 );
+                REQUIRE( sessions.isRunning( "orders" ) );
+            }
+
+            AND_WHEN( "it is subscribed, and receives 5 messages within a second" )
+            {
+                REQUIRE( waitFor(
+                    [ & ] { return sessions.status( "orders" ).state == SessionState::Running; },
+                    10000 ) );
+                {
+                    Publisher publisher( server.url() );
+                    for ( int i = 0; i < 5; ++i ) {
+                        publisher.publish( "orders.eu", "x" );
+                    }
+                }
+                REQUIRE( waitFor( [ & ] {
+                    sessions.sample();
+                    return sessions.status( "orders" ).received == 5;
+                } ) );
+                *nowMs += 1000;
+                sessions.sample();
+
+                THEN( "it runs, connected to the server, at 5 msgs/s" )
+                {
+                    const auto status = sessions.status( "orders" );
+                    REQUIRE( status.state == SessionState::Running );
+                    REQUIRE( status.server == server.url() );
+                    REQUIRE( status.received == 5 );
+                    REQUIRE( status.dropped == 0 );
+                    REQUIRE( status.rate == 5 );
+                }
+
+                AND_WHEN( "nothing arrives in the next half second" )
+                {
+                    *nowMs += 500;
+                    sessions.sample();
+
+                    THEN( "the rate is 0" )
+                    {
+                        REQUIRE( sessions.status( "orders" ).rate == 0 );
+                    }
+                }
+
+                AND_WHEN( "it is stopped" )
+                {
+                    sessions.stop( "orders", false );
+
+                    THEN( "it is stopped, what it captured kept, and each transition was "
+                          "announced once" )
+                    {
+                        const auto status = sessions.status( "orders" );
+                        REQUIRE( status.state == SessionState::Stopped );
+                        REQUIRE( status.detail == "stopped" );
+                        REQUIRE( status.server.isEmpty() );
+                        REQUIRE( status.received == 5 );
+                        REQUIRE( status.rate == 0 );
+                        REQUIRE_FALSE( sessions.isRunning( "orders" ) );
+                        REQUIRE( announced.states()
+                                 == QList<SessionState>{ SessionState::Connecting,
+                                                         SessionState::Running,
+                                                         SessionState::Stopped } );
+                    }
+                }
+            }
+        }
+
+        WHEN( "a connection to where no server listens is started" )
+        {
+            int port = 0;
+            {
+                NatsServer gone; // a port that was free a moment ago
+                port = gone.port();
+            }
+            const auto url = QStringLiteral( "nats://127.0.0.1:%1" ).arg( port );
+            REQUIRE( sessions.start( profile( "orders", url, "x" ) ) );
+
+            THEN( "it failed, saying why, announced once, and no longer runs" )
+            {
+                REQUIRE( waitFor(
+                    [ & ] { return sessions.status( "orders" ).state == SessionState::Failed; },
+                    10000 ) );
+                const auto status = sessions.status( "orders" );
+                INFO( status.detail.toStdString() );
+                REQUIRE( status.detail.startsWith( "connection to " + url + " failed: " ) );
+                REQUIRE_FALSE( sessions.isRunning( "orders" ) );
+                REQUIRE( announced.states()
+                         == QList<SessionState>{ SessionState::Connecting,
+                                                 SessionState::Failed } );
+            }
+        }
+    }
+}
+
+SCENARIO( "a connection that cannot start has failed, saying why", "[sessions]" )
+{
+    GIVEN( "a connection without a subject" )
+    {
+        Sessions sessions( sessionTempRoot() );
+        Announced announced( sessions, "x" );
+
+        THEN( "it does not start, and its status says why, announced once" )
+        {
+            REQUIRE_FALSE( sessions.start( profile( "x", "nats://127.0.0.1:1", "" ) ) );
+            const auto status = sessions.status( "x" );
+            REQUIRE( status.state == SessionState::Failed );
+            REQUIRE( status.detail == "Enter the subject to capture." );
+            REQUIRE_FALSE( sessions.isRunning( "x" ) );
+            REQUIRE( announced.states() == QList<SessionState>{ SessionState::Failed } );
+        }
+    }
+
+    GIVEN( "Sessions whose temporary root cannot hold a directory" )
+    {
+        QTemporaryDir parent;
+        REQUIRE( parent.isValid() );
+        Sessions sessions( parent.filePath( "missing/root" ) );
+        Announced announced( sessions, "x" );
+
+        THEN( "the session refuses to start, and the status says why, announced once" )
+        {
+            REQUIRE_FALSE( sessions.start( profile( "x", "nats://127.0.0.1:1", "x" ) ) );
+            const auto status = sessions.status( "x" );
+            INFO( status.detail.toStdString() );
+            REQUIRE( status.state == SessionState::Failed );
+            REQUIRE( status.detail.startsWith( "Cannot create a temporary directory" ) );
+            REQUIRE_FALSE( sessions.isRunning( "x" ) );
+            REQUIRE( announced.states() == QList<SessionState>{ SessionState::Failed } );
+        }
+    }
+}

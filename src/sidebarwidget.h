@@ -33,7 +33,8 @@
  * tile shows its state, msgs/s, received and dropped counts, the server it
  * is connected to and its file (name, size, how many files it rotated
  * into); after it failed, why.  Several connections can run at a time, one
- * session each (sessions.h).
+ * session each (sessions.h).  All of that is the connection's status, which
+ * Sessions keeps: the tab only maps it onto the tile (tileViewOf()).
  *
  * Start asks for the password or token when the connection's method takes
  * one: it is never saved.  Edit opens the dialog with the connection and New
@@ -43,7 +44,8 @@
  * the store cannot, a message box says why.  The tiles follow the store:
  * reload() shows the connections saved now whenever it changed.
  *
- * The counts are polled once a second; a state change shows at once.
+ * A tile is updated whenever Sessions says its connection's status changed:
+ * at once on a transition, once a second while the counts move.
  *
  * Children named for tests: "newConnection", "stopAll", "empty" (the hint
  * shown without connections), and the tiles ("tile").
@@ -57,20 +59,34 @@
 
 #pragma once
 
-#include <QElapsedTimer>
+#include "connectiontile.h"
+#include "sessionstatus.h"
+
 #include <QHash>
+#include <QStringList>
 #include <QWidget>
 
 class QLabel;
 class QPushButton;
-class QTimer;
 class QVBoxLayout;
 
 namespace nats_monitor {
 
-class ConnectionTile;
 class ProfileStore;
 class Sessions;
+
+/// What a connection's tile shows of its session.
+struct TileView {
+    TileState state = TileState::Stopped;
+    QStringList details;
+};
+
+/// The tile view of @p status, one state for each SessionState, the
+/// numbers in the locale's format: while running "running · <n> msgs/s",
+/// the counts, the file and "connected to <server>"; while connecting
+/// "connecting · <detail>"; after a failure "failed: <why>"; after a stop
+/// (or a complete replay) the detail and what it captured.
+TileView tileViewOf( const SessionStatus& status );
 
 class SidebarWidget : public QWidget {
     Q_OBJECT
@@ -98,11 +114,8 @@ private:
     /// or say why it could not be.
     void confirmDelete( const QString& name );
 
-    /// Show what the session of the tile @p tile does.
+    /// Show the status of the tile @p tile's connection.
     void updateTile( ConnectionTile* tile );
-
-    /// The counts polled: the rate of each running session.
-    void sample();
 
     /// Stop all is enabled while some capture runs.
     void updateStopAll();
@@ -112,16 +125,7 @@ private:
     QPushButton* stopAll_;
     QLabel* empty_;
     QVBoxLayout* tiles_;
-    QTimer* timer_;
     QHash<QString, ConnectionTile*> tileByName_;
-
-    /// What a running session had received at the last sample.
-    struct Sample {
-        quint64 received = 0;
-        quint64 rate = 0; ///< msgs/s since the sample before.
-        QElapsedTimer since;
-    };
-    QHash<QString, Sample> samples_;
 };
 
 } // namespace nats_monitor

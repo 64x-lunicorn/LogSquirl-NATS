@@ -19,8 +19,9 @@
 
 /**
  * @file sessiontest.h
- * @brief What tests of a capture session use: its configuration, waiting,
- *        reading the session's file, and publishing with nats.c.
+ * @brief What tests of a capture session use: its configuration, its
+ *        transitions, waiting, reading the session's file, and publishing
+ *        with nats.c.
  *
  * The lines read here are read into fields by the line reader, capture.h.
  */
@@ -33,6 +34,7 @@
 
 #include <catch2/catch.hpp>
 
+#include "natssession.h"
 #include "sessionconfig.h"
 
 #include <QCoreApplication>
@@ -44,6 +46,7 @@
 #include <QThread>
 
 #include <functional>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -95,6 +98,56 @@ bool waitFor( Condition condition, int timeoutMs = 3000 )
     }
     return true;
 }
+
+/// The transitions a session reports, in order, from when it is made.
+class Transitions {
+public:
+    using Kind = nats_monitor::Transition::Kind;
+
+    explicit Transitions( nats_monitor::NatsSession& session )
+    {
+        QObject::connect( &session, &nats_monitor::NatsSession::transitioned,
+                          [ list = list_ ]( const nats_monitor::Transition& transition ) {
+                              list->append( transition );
+                          } );
+    }
+
+    const QList<nats_monitor::Transition>& all() const
+    {
+        return *list_;
+    }
+
+    /// Their kinds, in order.
+    QList<Kind> kinds() const
+    {
+        QList<Kind> kinds;
+        for ( const auto& transition : *list_ ) {
+            kinds << transition.kind;
+        }
+        return kinds;
+    }
+
+    /// How many of @p kind.
+    int count( Kind kind ) const
+    {
+        return static_cast<int>( kinds().count( kind ) );
+    }
+
+    /// The last of @p kind; a default one if none.
+    nats_monitor::Transition last( Kind kind ) const
+    {
+        for ( auto it = list_->crbegin(); it != list_->crend(); ++it ) {
+            if ( it->kind == kind ) {
+                return *it;
+            }
+        }
+        return {};
+    }
+
+private:
+    std::shared_ptr<QList<nats_monitor::Transition>> list_
+        = std::make_shared<QList<nats_monitor::Transition>>();
+};
 
 /// Run the event loop for @p ms milliseconds.
 inline void settle( int ms )
@@ -334,3 +387,14 @@ private:
 };
 
 } // namespace nats_test
+
+/// A transition as a failed assertion shows it: {kind, "detail", "server"}.
+template <>
+struct Catch::StringMaker<nats_monitor::Transition> {
+    static std::string convert( const nats_monitor::Transition& transition )
+    {
+        return "{" + std::to_string( static_cast<int>( transition.kind ) ) + ", \""
+               + transition.detail.toStdString() + "\", \"" + transition.server.toStdString()
+               + "\"}";
+    }
+};

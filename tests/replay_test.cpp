@@ -68,8 +68,10 @@ using nats_test::replayConfig;
 using nats_test::sessionConfig;
 using nats_test::sessionTempRoot;
 using nats_test::TcpProxy;
+using nats_test::Transitions;
 using nats_test::waitFor;
 using nats_test::withJetStream;
+using Kind = nats_monitor::Transition::Kind;
 
 namespace {
 
@@ -86,11 +88,12 @@ QList<quint64> range( quint64 first, quint64 last )
 /// Start @p session and wait until it ended on its own, the replay complete.
 void replayToTheEnd( NatsSession& session, int timeoutMs = 10000 )
 {
-    int completed = 0;
-    QObject::connect( &session, &NatsSession::completed, [ &completed ] { ++completed; } );
+    Transitions transitions( session );
     REQUIRE( session.start() );
-    REQUIRE( waitFor( [ & ] { return completed == 1; }, timeoutMs ) );
+    REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Completed ) == 1; }, timeoutMs ) );
     REQUIRE_FALSE( session.isRunning() );
+    REQUIRE( transitions.all().last()
+             == nats_monitor::Transition{ Kind::Completed, "replay complete", {} } );
 }
 
 /// Start @p session, a replay that follows live, and wait until it caught up.
@@ -389,8 +392,7 @@ SCENARIO( "a replay may go on live once it has caught up", "[server][replay]" )
         auto config = replayConfig( server.url(), "ORDERS" );
         config.replay.followLive = true;
         NatsSession session( config, sessionTempRoot() );
-        int completed = 0;
-        QObject::connect( &session, &NatsSession::completed, [ &completed ] { ++completed; } );
+        Transitions transitions( session );
         REQUIRE( session.start() );
         const auto caughtUp = [ & ] {
             return Capture::read( session.filePath() ).hasMarker( "caught up, following live" );
@@ -404,7 +406,8 @@ SCENARIO( "a replay may go on live once it has caught up", "[server][replay]" )
             REQUIRE( capture.sequences() == range( 1, 3 ) );
             REQUIRE( capture.last().markerText() == "caught up, following live" );
             REQUIRE( session.isRunning() );
-            REQUIRE( completed == 0 );
+            nats_test::settle( 100 ); // for the transitions posted with the markers
+            REQUIRE( transitions.kinds() == QList<Kind>{ Kind::Connecting, Kind::Running } );
         }
 
         WHEN( "the stream stores two more, one published without JetStream" )
@@ -437,15 +440,16 @@ SCENARIO( "a replay of a stream that does not exist fails, saying why", "[server
     {
         NatsServer server( withJetStream() );
         NatsSession session( replayConfig( server.url(), "NOPE" ), sessionTempRoot() );
-        int finished = 0;
-        QObject::connect( &session, &NatsSession::finished, [ &finished ] { ++finished; } );
+        Transitions transitions( session );
 
-        THEN( "its replay ends on its own, with an error marker naming the stream" )
+        THEN( "its replay fails on its own, saying why in a marker naming the stream" )
         {
             REQUIRE( session.start() );
-            REQUIRE( waitFor( [ & ] { return finished == 1; }, 10000 ) );
+            REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Failed ) == 1; }, 10000 ) );
+            const auto why = transitions.last( Kind::Failed ).detail;
+            REQUIRE( why.startsWith( "replaying stream NOPE failed: " ) );
             const auto capture = Capture::read( session.filePath() );
-            REQUIRE( capture.hasMarkerStartingWith( "replaying stream NOPE failed: " ) );
+            REQUIRE( capture.last().markerText() == why );
         }
     }
 }
@@ -884,10 +888,9 @@ SCENARIO( "a stream that removes what its consumers took is refused or replayed 
         WHEN( "a session replays it" )
         {
             NatsSession session( replayConfig( server.url(), "JOBS" ), sessionTempRoot() );
-            int finished = 0;
-            QObject::connect( &session, &NatsSession::finished, [ &finished ] { ++finished; } );
+            Transitions transitions( session );
             REQUIRE( session.start() );
-            REQUIRE( waitFor( [ & ] { return finished == 1; }, 10000 ) );
+            REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Failed ) == 1; }, 10000 ) );
 
             THEN( "it refuses, saying why, and the jobs are still there, with no consumer" )
             {

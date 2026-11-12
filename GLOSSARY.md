@@ -49,6 +49,20 @@ _Avoid_: Writer (the sink's thread), queue (a part of it)
 A line the plugin writes itself, on the subject `$NATS-MONITOR`: a
 connection event, a count of dropped messages, the end of the capture.
 
+**Transition**:
+A step of a session's life as the session reports it, once, typed:
+connecting, running at a server, reconnecting, failed with a reason,
+completed, stopped (`Transition`), with a detail text for the user. Nothing
+reads a state out of that text.
+_Avoid_: Status change, event (the capture sink's reports)
+
+**Connection status**:
+What Sessions, its one owner, keeps of a connection: the state its
+session's transitions led to, the detail, the server, the file, the counts
+and the msgs/s it samples on its clock (`ConnectionStatus`, read as a
+`SessionStatus`). The tile only shows it.
+_Avoid_: Tile state (the tile's dot, mapped from it)
+
 ### Replay
 
 **Replay**:

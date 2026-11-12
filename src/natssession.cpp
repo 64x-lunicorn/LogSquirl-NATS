@@ -430,7 +430,7 @@ struct Shared {
         for ( const auto& subscription : self->subscriptions ) {
             self->markSlowConsumer( *subscription );
         }
-        self->sink.marker( QStringLiteral( "disconnected" ), Event::Status );
+        self->sink.marker( QStringLiteral( "disconnected" ), Event::Disconnected );
     }
 
     static void onReconnected( natsConnection* connection, void* closure )
@@ -559,33 +559,43 @@ struct NatsSession::Worker {
         post( session, emitter );
     }
 
+    /// Have @p session emit @p transition, of start number @p generation,
+    /// on the GUI thread: unless it was stopped meanwhile.
+    static void postTransition( NatsSession* session, int generation,
+                                const Transition& transition )
+    {
+        post( session, [ generation, transition ]( NatsSession* s ) {
+            s->onWorkerTransition( generation, transition );
+        } );
+    }
+
     /// Forward @p event, which the sink of start number @p generation
-    /// reports on its writer thread, to @p session's signals.
+    /// reports on its writer thread, to @p session's transitions and
+    /// signals: one each, by its kind.
     static void forward( NatsSession* session, int generation, const CaptureSink::Event& event )
     {
+        using Kind = Transition::Kind;
         switch ( event.kind ) {
         case Event::Connected:
-            post( session, [ url = event.text ]( NatsSession* s ) {
-                Q_EMIT s->connected( url );
-                Q_EMIT s->statusChanged( QStringLiteral( "connected to %1" ).arg( url ) );
-            } );
+            postTransition( session, generation,
+                            { Kind::Running, QStringLiteral( "connected to %1" ).arg( event.text ),
+                              event.text } );
             return;
         case Event::Reconnected:
-            post( session, [ url = event.text ]( NatsSession* s ) {
-                Q_EMIT s->connected( url );
-                Q_EMIT s->statusChanged( QStringLiteral( "reconnected to %1" ).arg( url ) );
-            } );
+            postTransition( session, generation,
+                            { Kind::Running,
+                              QStringLiteral( "reconnected to %1" ).arg( event.text ),
+                              event.text } );
+            return;
+        case Event::Disconnected:
+            postTransition( session, generation, { Kind::Reconnecting, event.text, {} } );
             return;
         case Event::Status:
-            post( session,
-                  [ text = event.text ]( NatsSession* s ) { Q_EMIT s->statusChanged( text ); } );
-            return;
+            return; // in the file; the transitions say what it changes
         case Event::Error:
         case Event::FileError:
-            post( session, [ text = event.text ]( NatsSession* s ) {
-                Q_EMIT s->statusChanged( text );
-                Q_EMIT s->errorOccurred( text );
-            } );
+            post( session,
+                  [ text = event.text ]( NatsSession* s ) { Q_EMIT s->errorOccurred( text ); } );
             return;
         case Event::Rotated:
             post( session, [ generation, path = event.text ]( NatsSession* s ) {
@@ -763,17 +773,23 @@ struct NatsSession::Worker {
         return {};
     }
 
-    /// Connect and subscribe; false, after an error marker, if that failed.
+    /// Write the marker of why the session failed, @p why, and return it.
+    /// Reported as the Failed transition once the capture has ended.
+    QString failed( const QString& why )
+    {
+        shared->sink.marker( why, Event::Status );
+        return why;
+    }
+
+    /// Connect and subscribe; why that failed, after its marker, or empty.
     /// @p subscriptions gets one for each of the config's, null for those
     /// not made.
-    bool open( natsOptions** options, natsConnection** connection,
-               std::vector<natsSubscription*>& subscriptions )
+    QString open( natsOptions** options, natsConnection** connection,
+                  std::vector<natsSubscription*>& subscriptions )
     {
         const auto fail = [ this ]( const QString& why ) {
-            shared->sink.marker( QStringLiteral( "connection to %1 failed: %2" )
-                                     .arg( redactUrls( config.url ), why ),
-                                 Event::Error );
-            return false;
+            return failed( QStringLiteral( "connection to %1 failed: %2" )
+                               .arg( redactUrls( config.url ), why ) );
         };
         natsStatus status = createOptions( options );
         if ( status != NATS_OK ) {
@@ -783,15 +799,12 @@ struct NatsSession::Worker {
         // nats.c has its own copy, for reconnecting: no other is kept here.
         config.auth.secret.clear();
         if ( !problem.isEmpty() ) {
-            shared->sink.marker( problem, Event::Error );
-            return false;
+            return failed( problem );
         }
 
         const auto subscribeFailed = [ this ]( const QString& what, natsStatus failure ) {
-            shared->sink.marker( QStringLiteral( "subscribing to %1 failed: %2" )
-                                     .arg( what, describeStatus( failure ) ),
-                                 Event::Error );
-            return false;
+            return failed( QStringLiteral( "subscribing to %1 failed: %2" )
+                               .arg( what, describeStatus( failure ) ) );
         };
         if ( config.replay.enabled() ) {
             // Before subscribing: the messages come at once, after this line.
@@ -803,22 +816,18 @@ struct NatsSession::Worker {
             subscriptions.assign( 1, nullptr );
             const auto error = subscribeReplay( *connection, &subscriptions.front() );
             if ( !error.isEmpty() ) {
-                shared->sink.marker(
-                    QStringLiteral( "replaying %1 failed: %2" ).arg( what, error ), Event::Error );
-                return false;
+                return failed( QStringLiteral( "replaying %1 failed: %2" ).arg( what, error ) );
             }
             int messages = 0;
             int bytes = 0;
             status = natsSubscription_GetPendingLimits( subscriptions.front(), &messages, &bytes );
             if ( status != NATS_OK ) {
-                shared->sink.marker( QStringLiteral( "replaying %1 failed: %2" )
-                                         .arg( what, describeStatus( status ) ),
-                                     Event::Error );
-                return false;
+                return failed( QStringLiteral( "replaying %1 failed: %2" )
+                                   .arg( what, describeStatus( status ) ) );
             }
             shared->limitMessages = messages;
             shared->limitBytes = bytes;
-            return true;
+            return {};
         }
         subscriptions.assign( config.subscriptions.size(), nullptr );
         for ( int i = 0; i < config.subscriptions.size(); ++i ) {
@@ -849,7 +858,7 @@ struct NatsSession::Worker {
         shared->sink.marker(
             QStringLiteral( "connected to %1, subscribed to %2" ).arg( server, subjects ),
             Event::Connected, server );
-        return true;
+        return {};
     }
 
     /// Why the capture ended.
@@ -976,7 +985,8 @@ struct NatsSession::Worker {
         natsConnection* connection = nullptr;
         std::vector<natsSubscription*> subscriptions;
 
-        const bool opened = open( &options, &connection, subscriptions );
+        const auto failure = open( &options, &connection, subscriptions );
+        const bool opened = failure.isEmpty();
         auto end = End::Closed;
         if ( opened ) {
             end = awaitEnd();
@@ -991,35 +1001,27 @@ struct NatsSession::Worker {
 
         // What arrived before the subscriptions ended, the drops not marked
         // yet and the last marker; the sink's writer is joined then, so
-        // every report it posted comes before the one below.
+        // every report it posted comes before the transition below.
         auto& sink = shared->sink;
+        using Kind = Transition::Kind;
+        Transition ended;
         switch ( end ) {
         case End::Stopped:
+            // stop() reports the transition, once it has joined this thread.
             sink.finish( QStringLiteral( "stopped" ), Event::Status );
-            break;
+            return;
         case End::Completed:
-            sink.finish( QStringLiteral( "replay complete" ), Event::Status );
+            ended = { Kind::Completed, QStringLiteral( "replay complete" ), {} };
             break;
         case End::Closed:
-            if ( opened ) {
-                sink.finish( QStringLiteral( "connection closed" ), Event::Error );
-            }
-            else {
-                sink.finish(); // its marker says why it failed
-            }
+            ended = { Kind::Failed, opened ? QStringLiteral( "connection closed" ) : failure, {} };
             break;
         }
-
-        if ( end == End::Completed ) {
-            post( [ generation = generation ]( NatsSession* s ) {
-                s->onWorkerCompleted( generation );
-            } );
-        }
-        else if ( end == End::Closed ) {
-            post( [ generation = generation ]( NatsSession* s ) {
-                s->onWorkerFinished( generation );
-            } );
-        }
+        // Its marker is written already if it never opened.
+        sink.finish( opened ? ended.detail : QString(), Event::Status );
+        post( [ generation = generation, ended ]( NatsSession* s ) {
+            s->onWorkerEnded( generation, ended );
+        } );
     }
 };
 
@@ -1046,8 +1048,7 @@ bool NatsSession::start()
     }
 
     const auto fail = [ this ]( const QString& message ) {
-        Q_EMIT statusChanged( message );
-        Q_EMIT errorOccurred( message );
+        Q_EMIT transitioned( { Transition::Kind::Failed, message, {} } );
         return false;
     };
     // A backstop: Sessions makes the same check first.
@@ -1076,12 +1077,19 @@ bool NatsSession::start()
     auto* raw = worker.get();
     worker->thread = std::thread( [ raw ] { raw->run(); } );
     worker_ = std::move( worker );
+    Q_EMIT transitioned( { Transition::Kind::Connecting,
+                           QStringLiteral( "connecting to %1…" ).arg( redactUrls( config_.url ) ),
+                           {} } );
     return true;
 }
 
 void NatsSession::stop()
 {
+    if ( !worker_ ) {
+        return;
+    }
     releaseWorker();
+    Q_EMIT transitioned( { Transition::Kind::Stopped, QStringLiteral( "stopped" ), {} } );
 }
 
 void NatsSession::releaseWorker()
@@ -1138,22 +1146,21 @@ void NatsSession::onWorkerRotated( int generation, const QString& path )
     Q_EMIT fileRotated( path );
 }
 
-void NatsSession::onWorkerFinished( int generation )
+void NatsSession::onWorkerTransition( int generation, const Transition& transition )
+{
+    if ( !worker_ || generation != generation_ ) {
+        return; // stopped meanwhile: Stopped was the last
+    }
+    Q_EMIT transitioned( transition );
+}
+
+void NatsSession::onWorkerEnded( int generation, const Transition& end )
 {
     if ( !worker_ || generation != generation_ ) {
         return; // stopped meanwhile, or the report of an earlier start
     }
     releaseWorker(); // the thread has ended: joins at once
-    Q_EMIT finished();
-}
-
-void NatsSession::onWorkerCompleted( int generation )
-{
-    if ( !worker_ || generation != generation_ ) {
-        return; // stopped meanwhile, or the report of an earlier start
-    }
-    releaseWorker();
-    Q_EMIT completed();
+    Q_EMIT transitioned( end );
 }
 
 } // namespace nats_monitor
