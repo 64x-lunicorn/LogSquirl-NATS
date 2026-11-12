@@ -31,13 +31,22 @@ if(NOT TARGET nats_static)
     message(FATAL_ERROR "nats.c ${NATSC_PIN_VERSION} defined no target nats_static")
 endif()
 
-# Under UBSan (the CI's ASan and UBSan job), leave out one check for nats.c
-# alone: nonnull-attribute.  nats.c calls memcpy(dst, NULL, 0) when it grows
-# an empty array (_growPool in glib/glib_dispatch_pool.c, on nats_Open);
-# glibc declares memcpy's arguments nonnull, so UBSan aborts there, though
-# copying zero bytes reads nothing (and C2y makes it well-defined).  macOS's
-# libc has no such attribute, so the check never fires there.  Every other
-# UBSan check and ASan stay on for nats.c, and all checks for our own code.
-if(CMAKE_C_FLAGS MATCHES "-fsanitize=[^ ]*(undefined|nonnull-attribute)")
+# Under UBSan (the CI's ASan and UBSan job), leave out two checks for nats.c
+# alone:
+# - nonnull-attribute.  nats.c calls memcpy(dst, NULL, 0) when it grows an
+#   empty array (_growPool in glib/glib_dispatch_pool.c, on nats_Open); glibc
+#   declares memcpy's arguments nonnull, so UBSan aborts there, though copying
+#   zero bytes reads nothing (and C2y makes it well-defined).  macOS's libc has
+#   no such attribute, so the check never fires there.
+# - shift-base.  nats.c's ed25519 (TweetNaCl, src/crypto.c car25519) shifts a
+#   negative carry left (c<<16) when it signs the NKey nonce; every compiler
+#   does this as two's complement, which the algorithm relies on (and C++20
+#   defines it so).
+# Every other UBSan check and ASan stay on for nats.c, and all checks for our
+# own code.
+if(CMAKE_C_FLAGS MATCHES "-fsanitize=[^ ]*undefined")
+    target_compile_options(nats_static PRIVATE
+        -fno-sanitize=nonnull-attribute -fno-sanitize=shift-base)
+elseif(CMAKE_C_FLAGS MATCHES "-fsanitize=[^ ]*nonnull-attribute")
     target_compile_options(nats_static PRIVATE -fno-sanitize=nonnull-attribute)
 endif()
