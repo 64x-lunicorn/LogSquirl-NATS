@@ -46,6 +46,7 @@ qt_standard_project_setup()
 # ── Plugin shared library ─────────────────────────────────────────────────
 set(LOGSQUIRL_NATS_SOURCES
     src/plugin.cpp
+    src/capturesink.cpp
     src/connectiondialog.cpp
     src/connectiontile.cpp
     src/lineformat.cpp

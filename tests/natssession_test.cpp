@@ -984,56 +984,6 @@ SCENARIO( "a session sustains 50k msgs/s at 200 B without drops", "[.benchmark]"
     }
 }
 
-SCENARIO( "when the session's own queue is full, its drops are counted and marked",
-          "[server][session][drops]" )
-{
-    SKIP_WITHOUT_NATS_SERVER();
-
-    GIVEN( "a session whose queue to the writer holds a single message" )
-    {
-        NatsServer server;
-        Publisher publisher( server.url() );
-        auto config = sessionConfig( server.url(), { "flood" } );
-        config.queueLimit = 1;
-        NatsSession session( config, sessionTempRoot() );
-        startAndWaitConnected( session, server.url(), "flood" );
-
-        WHEN( "it is flooded faster than it can write, and stopped" )
-        {
-            qint64 published = 0;
-            for ( int round = 0; round < 20 && session.droppedCount() == 0; ++round ) {
-                flood( publisher, "flood", 5000 );
-                published += 5000;
-                settle( 50 );
-            }
-            waitAccounted( session, "flood", published );
-            session.stop();
-
-            THEN( "the queue-full markers add up to the messages not written, each before the "
-                  "next message written" )
-            {
-                const auto capture = Capture::read( session.filePath() );
-                const auto drops = capture.drops();
-                const qint64 written = capture.messagesOn( "flood" ).size();
-                REQUIRE( drops.unknown == 0 );
-                REQUIRE( drops.queueFull > 0 );
-                REQUIRE( drops.slowConsumer == 0 );
-                REQUIRE( drops.total() == published - written );
-                REQUIRE( session.droppedCount() == static_cast<quint64>( drops.total() ) );
-                REQUIRE( session.receivedCount() == static_cast<quint64>( published ) );
-                const auto flooded = liveFields( "flood", QString( 200, 'x' ) );
-                for ( int i = 0; i + 1 < capture.size(); ++i ) {
-                    if ( capture.at( i ).markerText().endsWith( " (queue full)" ) ) {
-                        const auto next = capture.at( i + 1 ).fields();
-                        INFO( capture.at( i + 1 ).text().toStdString() );
-                        REQUIRE( ( next == flooded || next == markerFields( "stopped" ) ) );
-                    }
-                }
-            }
-        }
-    }
-}
-
 SCENARIO( "without drops no dropped marker is written, and the session counts what it received",
           "[server][session][drops]" )
 {

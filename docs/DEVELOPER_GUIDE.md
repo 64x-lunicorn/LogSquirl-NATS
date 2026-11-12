@@ -21,10 +21,12 @@ plugin.cpp            entry points (logsquirl_plugin_*), each through guarded()
   │    └─ ConnectionTile × N  plain card: summary, details, Start/Stop, Edit, Delete
   ├─ ConnectionDialog edits and saves connections through the store; opened from the tab
   └─ Sessions         one session per connection; state and counts for the tiles
-       └─ NatsSession × N   children of Sessions
-            ├─ nats.c threads   callbacks: format a line, enqueue
-            ├─ queue            bounded, mutex + condition variable
-            └─ writer thread    connects, writes in batches, rotates
+       └─ NatsSession × N   children of Sessions: the nats.c adapter
+            ├─ connection thread  connects, subscribes, waits; drains and closes
+            ├─ nats.c threads     callbacks: format a line, hand it to the sink
+            └─ CaptureSink        everything between a message and the file (capturesink.h)
+                 ├─ queue           bounded, mutex + condition variables; drops, or waits (replay)
+                 └─ writer thread   writes in batches, rotates, ends the capture
 ```
 
 What a session is set up with, `SessionConfig` and the value types in it
@@ -63,55 +65,75 @@ a failure to the host log instead.
 
 ### Threads
 
-A capture session, [`NatsSession`](../src/natssession.h), runs on three
+A capture session, [`NatsSession`](../src/natssession.h), runs on four
 kinds of thread:
 
 | Thread | What it does |
 |---|---|
-| GUI thread | The tab, the dialog, `Sessions` and the `NatsSession` objects. Every signal of a session is emitted here, through queued calls. |
-| The session's writer thread (`std::thread`, one per session) | Connects and subscribes (so `start()` never waits for the network), owns the file, writes, rotates, and on stop drains and closes. |
-| nats.c's threads | Call the message callback of each subscription and the connection callbacks (disconnected, reconnected, closed, async error). They only format the line, with the pure `formatLine()` ([`src/lineformat.h`](../src/lineformat.h)), and enqueue it: they never touch the file or the GUI, and never wait for the writer. |
+| GUI thread | The tab, the dialog, `Sessions` and the `NatsSession` objects. `start()` opens the first file there. Every signal of a session is emitted here, through queued calls. |
+| The session's connection thread (`std::thread`, one per session) | The nats.c adapter: connects and subscribes (so `start()` never waits for the network), waits until stop, the connection closed for good or the replay complete, then drains and closes, and finishes the sink. It never touches the file. |
+| The sink's writer thread (`std::thread`, one per session, in `CaptureSink`) | Owns the file: writes the queued lines in batches, rotates, and reports what it wrote; joined when the sink is finished. |
+| nats.c's threads | Call the message callback of each subscription and the connection callbacks (disconnected, reconnected, closed, async error). They only format the line, with the pure `formatLine()` ([`src/lineformat.h`](../src/lineformat.h)), and hand it to the sink: they never touch the file or the GUI, and in a live capture never wait for the writer. |
 
-What the callbacks use (`Shared` in natssession.cpp) is kept apart from the
-writer: should nats.c not confirm within its timeout that its callbacks are
-over, `Shared` is leaked rather than freed under a running callback.
+The **capture sink** ([`src/capturesink.h`](../src/capturesink.h)) is
+everything between a received message and the file: the bounded queue, the
+accounting of drops, the back-pressure of a replay, the writer thread,
+rotation and the end of the capture. It knows nothing of NATS. It takes
+message lines (`message()`), marker lines (`marker()`) and drops counted
+elsewhere (`dropped()`) from any thread, and reports a typed
+`CaptureSink::Event` for each marker it writes, each rotation and each file
+error; the session forwards them to its signals.
+
+What the callbacks use (`Shared` in natssession.cpp, the sink in it) is kept
+apart from the worker: should nats.c not confirm within its timeout that its
+callbacks are over, `Shared` is leaked rather than freed under a running
+callback. The sink is finished by then (writer joined, file closed) and
+takes nothing more, so a late callback is harmless. Lock order: `Shared`'s
+mutex before the sink's, never the other way; the sink calls its reporter
+without its mutex.
 
 ### The queue
 
-The lines go from nats.c's threads to the writer through a `std::vector`
-guarded by a `std::mutex` and a `std::condition_variable`. It is bounded
-for messages: once it holds `SessionConfig::queueLimit` of them (100,000,
-two seconds at 50k msgs/s), a new message is dropped and counted, and the
-next message queued is preceded by its `dropped=<n> (queue full)` marker.
-Marker lines (connection events, drops) are always queued.
+The lines go from nats.c's threads to the writer through the sink's queue, a
+`std::vector` guarded by a `std::mutex` and condition variables. It is
+bounded for messages: once it holds `SessionConfig::queueLimit` of them
+(100,000, two seconds at 50k msgs/s), a live capture's sink
+(`CaptureSink::Mode::Drop`) drops a new message and counts it, and the next
+message queued is preceded by its `dropped=<n> (queue full)` marker; a
+replay's (`Mode::WaitForRoom`) makes the callback wait until the writer has
+taken the queue. Marker lines (connection events, drops) are always queued.
 
 Before that, nats.c holds up to each subscription's pending limits
 (`SessionConfig::pendingLimits`, 1,000,000 messages and 512 MiB by default,
 set with `natsSubscription_SetPendingLimits`) and drops beyond them as a
 slow consumer. Each message callback, the slow-consumer error and the
-disconnected callback read `natsSubscription_GetDropped` and queue a
-`dropped=<n> (slow consumer)` marker for what is new. Where those markers
+disconnected callback read `natsSubscription_GetDropped` and have the sink
+queue a `dropped=<n> (slow consumer)` marker for what is new
+(`CaptureSink::dropped()`). Where those markers
 land, and how they are tested: [Dropped messages and the
 benchmark](#dropped-messages-and-the-benchmark).
 
 ### The writer
 
-The writer waits on the condition variable until lines are queued, stop is
-requested or the connection is closed for good. It then swaps the whole
-queue out, so it never holds the mutex while writing, writes the batch and
-flushes once: LogSquirl, following the file, sees whole lines. Before each
-line it checks the size limit (below). A write or flush that fails (disk
-full, volume gone) is reported once, on the tile and as a
+The sink's writer waits on its condition variable until lines are queued
+or the sink is finished. It then swaps the whole queue out, so it never
+holds the mutex while writing, writes the batch and flushes once:
+LogSquirl, following the file, sees whole lines. Before each line it checks
+the size limit (below). A write or flush that fails (disk full, volume
+gone) is reported once (`Event::FileError`), on the tile and as a
 notification, and later lines are not written.
 
-**Stopping.** `stop()` asks the writer to end and waits for it. The writer
-lifts the pending limits, so nats.c drops nothing more, and marks the last
-dropped counts. It drains each subscription (`natsSubscription_DrainTimeout`,
-at most 15 s; not connected, it waits up to 5 s until nats.c holds nothing
-for them),
-writing all the while, closes the connection, waits for nats.c's last
-callback, writes what is left and the `stopped` marker, and closes the
-file. Nothing that reached the session before `stop()` is lost uncounted.
+**Stopping.** `stop()` asks the connection thread to end and waits for it.
+That thread lifts the pending limits, so nats.c drops nothing more, and
+marks the last dropped counts. It drains each subscription
+(`natsSubscription_DrainTimeout`, at most 15 s; not connected, it waits up
+to 5 s until nats.c holds nothing for them), the sink writing all the
+while, closes the connection, waits for nats.c's last callback and
+finishes the sink (`CaptureSink::finish()`): the queue-full drops not
+marked yet, what is left, the `stopped` marker, the file closed and the
+writer joined. Nothing that reached the session before `stop()` is lost
+uncounted. A connection closed for good ends the same way with
+`connection closed`, a complete replay with `replay complete`.
 
 **Temporary files.** Each session writes into its own directory
 `logsquirl-nats-<pid>-XXXXXX` ([`src/tempdirs.h`](../src/tempdirs.h)),
@@ -129,18 +151,21 @@ run at the next init.
 ### Rotation at the size limit
 
 `SessionConfig::maxFileBytes` (the dialog's *New file at*, in MiB; default
-256, 0 for no limit) bounds each file of a capture. The writer thread
-rotates by itself, between two lines: before a line that would take the
-file over the limit it opens the next one (`NewOnly`, so it never
-truncates an earlier file), closes the full one and reports the path with
+256, 0 for no limit) bounds each file of a capture. The sink's writer
+thread rotates by itself, between two lines: before a line that would take
+the file over the limit it opens the next one (`NewOnly`, so it never
+truncates an earlier file), closes the full one and reports the path
+(`Event::Rotated`), which the session emits as
 `NatsSession::fileRotated()`, on which `Sessions` opens a new followed tab
 and writes a line to the host log (not a notification, as in
 LogSquirl-Serial: a busy capture rotates often). `filePath()` follows the
 rotation. A session started again goes on in its last file, with what that
-file holds counted against the limit. The rotation tests (`[rotation]`, part
-of the server tests) use limits of a few hundred bytes, and make a rotation
-fail by putting a directory where the next file goes, which works on every
-platform and also for root.
+file holds counted against the limit. The rotation tests (`[rotation]`)
+use limits of a few hundred bytes, and make a rotation fail by putting a
+directory where the next file goes, which works on every platform and also
+for root: those of the sink (`capturesink_test.cpp`) without a server, a
+few at the session's seam (part of the server tests) for what the session
+forwards and a session started again.
 
 The size limit is saved with the connection (its profile, below). The
 profile store also remembers it in `nats.ini` (`capture/maxFileMiB`) in the
@@ -194,7 +219,7 @@ in `plugin_test.cpp`.
 
 With `SessionConfig::replay` set (a `ReplayConfig` with a stream name), a
 session replays the stream instead of subscribing to its subjects
-([`src/natssession.h`](../src/natssession.h), REPLAY). The writer thread
+([`src/natssession.h`](../src/natssession.h), REPLAY). The connection thread
 connects, writes `connected to …, replaying stream ORDERS, …`
 (`describeReplay()`, [`src/replay.h`](../src/replay.h), which also has
 the start positions as one table, `kReplayStarts`, and the checks a replay
@@ -204,7 +229,7 @@ with flow control and heartbeats, which nats.c recreates from the last
 stream sequence after a gap or a reconnect. The filter subject is the
 `ReplayConfig::filterSubject`, or `>` for all of the stream's.
 
-- **The plan.** Before subscribing, the writer reads the stream's state
+- **The plan.** Before subscribing, the connection thread reads the stream's state
   (`js_GetStreamInfo`: retention, first and last sequence, message count,
   as a `StreamState`) and plans the replay: `planReplay()` (replay.h) makes
   a `ReplayPlan` of the config and that state, which says whether it is
@@ -234,8 +259,8 @@ stream sequence after a gap or a reconnect. The filter subject is the
   time (`Timestamp`) and the stream sequence go into `Message`, and the
   reply is cleared (nats.c's is the consumer's; the stream keeps none).
 - **Caught up.** A message with `NumPending` 0 is the last one there was:
-  with `followLive` the writer writes `caught up, following live` and goes
-  on; otherwise the writer ends as on stop, writes `replay complete` and
+  with `followLive` the sink writes `caught up, following live` and goes
+  on; otherwise the capture ends as on stop, with `replay complete`, and
   the session emits `completed()` (not `finished()`, which is a failure),
   on which `Sessions` sets the tile to stopped with *replay complete*. With
   nothing to replay no message comes, so after subscribing the plan (an
@@ -243,8 +268,8 @@ stream sequence after a gap or a reconnect. The filter subject is the
   (`natsSubscription_GetConsumerInfo`: nothing pending, nothing delivered)
   says it (`caughtUpOnSubscribing()`).
 - **No drops by the plugin.** A replay's message callback waits for room in
-  the queue instead of dropping (`Shared::waitForRoom`, woken when the
-  writer takes the queue, and not while stopping): the stream holds the
+  the queue instead of dropping (`CaptureSink::Mode::WaitForRoom`, woken when the
+  writer takes the queue, and not once stopping): the stream holds the
   messages, and while nats.c's delivery thread waits it answers no flow
   control, so the server holds back. A stream of a million messages is
   written whole in about two seconds; stop ends it at once. A writer that
@@ -262,7 +287,7 @@ stream sequence after a gap or a reconnect. The filter subject is the
 - **Stop** drains the subscription like a live one; for a consumer
   nats.c created, the drain (or unsubscribe) also deletes it on the server.
   Unlike a live capture, a replay writes nothing nats.c delivers once
-  stopping (`Shared::discarding`; a callback waiting for room discards its
+  stopping (`CaptureSink::discardMessages()`; a callback waiting for room discards its
   message too): what it holds, up to the pending limits, the stream keeps,
   and writing it held a stop up for seconds under a sanitizer. It is
   neither counted nor marked as dropped, since the user stopped it; what
@@ -626,6 +651,19 @@ options of one with JetStream.
   `capture.sequences()`, `capture.hasMarker( text )`, and `capture.drops()`
   for the counts of the `dropped=` markers. Its own tests
   (`capture_test.cpp`, `[capture]`) read the formatter's lines.
+- **The capture sink** (`capturesink_test.cpp`, `[sink]`), without a
+  server and without sleeps: a sink not started is driven by the test
+  itself, which queues lines and writes them (`writeQueued()`,
+  `finish()`) when it chooses, so what is queued, dropped and written when
+  is deterministic. They cover each drop in exactly one `dropped=` marker
+  at the gap, unmarked drops written before `stopped`, a replay waiting for
+  room instead of dropping (`waitingForRoom()` says when it waits) and
+  discarding once stopped, a line never split across files, a failed
+  rotation retried one limit later (a directory where the next file goes),
+  a write failure reported once (a `QFile` of the test's that fails,
+  through the sink's `FileFactory`), and the writer thread fed from two
+  threads. Only the slow-consumer accounting, which comes from nats.c,
+  needs the server tests.
 - **The formatter** (`lineformat_test.cpp`): `formatLine()` is a pure
   function from a message to one line.
 - **The replay plan** (`replayplan_test.cpp`): `planReplay()` is a pure
@@ -645,10 +683,12 @@ A capture never loses a message silently: nats.c's slow-consumer drops
 (beyond the subscription's pending limits) and the drops of the session's
 own queue (beyond `SessionConfig::queueLimit`) are each counted in one
 marker line, `$NATS-MONITOR - <n> dropped=<count> (slow consumer)` or
-`(queue full)`, and in `NatsSession::droppedCount()`. The stress tests
+`(queue full)`, and in `NatsSession::droppedCount()`. Where the markers go
+is the sink's, tested without a server (`[sink][drops]`). The stress tests
 (`[drops]`, part of the server tests) flood a session with small limits
 and check that the `dropped=` counts (`Capture::drops()`) add up to the
-messages published but not written.
+messages published but not written: nats.c's slow-consumer drops can only
+be seen that way.
 
 Whether v1 keeps up with its target, **50k msgs/s at 200 B** without drops,
 is a benchmark, not run by ctest or CI (its tag is hidden). Run it by hand

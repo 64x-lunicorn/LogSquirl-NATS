@@ -23,6 +23,20 @@ new connection proposes, such as the size limit saved last (`ProfileStore`).
 The dialog and the sidebar both go through it.
 _Avoid_: Settings, config file
 
+### Capture
+
+**Capture sink**:
+Everything between a received message and a capture's files: the bounded
+queue, the accounting of drops, the back-pressure of a replay, the writer
+thread, rotation at the size limit and the end of the capture
+(`CaptureSink`). It takes message and marker lines from any thread and
+reports what it wrote; it knows nothing of NATS. The session feeds it.
+_Avoid_: Writer (the sink's thread), queue (a part of it)
+
+**Marker**:
+A line the plugin writes itself, on the subject `$NATS-MONITOR`: a
+connection event, a count of dropped messages, the end of the capture.
+
 ### Replay
 
 **Replay**:

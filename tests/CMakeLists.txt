@@ -33,6 +33,7 @@ add_executable(logsquirl_nats_tests
     logformat.cpp
     capture.cpp
     capture_test.cpp
+    capturesink_test.cpp
     plugininfo_test.cpp
     plugin_test.cpp
     profiles_test.cpp

@@ -43,19 +43,23 @@
  *
  * THREAD MODEL
  * ────────────
- * The session object lives on the GUI thread.  A writer thread of its own
- * connects (so start() never waits for the network), owns the file and
- * drains the queue of lines in batches, flushing after each.  nats.c calls
- * the message and connection callbacks on its own threads; they only
- * format a line and enqueue it.  Status reaches the session's signals
- * through queued calls, so they are always emitted on the GUI thread.
+ * The session object lives on the GUI thread.  A connection thread of its
+ * own connects and subscribes (so start() never waits for the network),
+ * waits for the end, and drains and closes.  Everything between a message
+ * and the file is the session's capture sink (capturesink.h), whose writer
+ * thread owns the file and writes the queued lines in batches, flushing
+ * after each, and rotates.  nats.c calls the message and connection
+ * callbacks on its own threads; they only format a line and hand it to the
+ * sink, never touching the file nor, in a live capture, waiting for the
+ * writer.  What the sink reports reaches the session's signals through
+ * queued calls, so they are always emitted on the GUI thread.
  *
  * DROPPED MESSAGES
  * ────────────────
  * No message is lost silently.  nats.c drops messages for a slow consumer
- * once a subscription's pending limits are reached; the session's own
- * queue drops new messages once it holds SessionConfig::queueLimit.  Each
- * drop is counted in exactly one marker line,
+ * once a subscription's pending limits are reached; the sink's queue drops
+ * new messages once it holds SessionConfig::queueLimit.  Each drop is
+ * counted in exactly one marker line,
  *
  *     <time> $NATS-MONITOR - <n> dropped=1234 (slow consumer)
  *     <time> $NATS-MONITOR - <n> dropped=87 (queue full)
@@ -78,13 +82,13 @@
  * ROTATION
  * ────────
  * A file grows to SessionConfig::maxFileBytes at most.  When the next line
- * would not fit, the writer closes the file there, at a line boundary, and
- * goes on in the next one: nats_<name>.log, nats_<name>.2.log,
- * nats_<name>.3.log, …, all in the session's temporary directory, and
- * reports it with fileRotated().  A line longer than the limit is written
- * whole, alone in its file.  Should the next file not open, the writer
- * keeps writing the current one, reports the error once and tries again
- * once that file has grown by the limit once more.  0 means no limit.
+ * would not fit, the sink's writer closes the file there, at a line
+ * boundary, and goes on in the next one: nats_<name>.log, nats_<name>.2.log,
+ * nats_<name>.3.log, …, all in the session's temporary directory, and the
+ * session reports it with fileRotated().  A line longer than the limit is
+ * written whole, alone in its file.  Should the next file not open, the
+ * writer keeps writing the current one, reports the error once and tries
+ * again once that file has grown by the limit once more.  0 means no limit.
  *
  * REPLAY
  * ──────
@@ -103,7 +107,8 @@
  * with what the stream stores from then on, until stop().
  *
  * The writer, rotation and drop accounting are those of a live capture,
- * except that a full queue makes the delivery wait instead of dropping: the
+ * except that a full queue makes the delivery wait instead of dropping
+ * (the sink's CaptureSink::Mode::WaitForRoom): the
  * stream holds the messages, and JetStream's flow control holds the server
  * back meanwhile, so a replay of any size is written whole at the speed of
  * the writer.  stop() ends a replay at any point: what was queued is
@@ -170,7 +175,8 @@ public:
     /**
      * Drain the subscription and close the connection, write what was
      * received before and a "stopped" marker, and close the file.  Waits
-     * for the writer thread: a round trip to the server and the writing of
+     * for the connection thread and the sink's writer: a round trip to the
+     * server and the writing of
      * what nats.c held, at most about 15 s should the connection break
      * while draining.  No-op if not running.
      */
@@ -193,7 +199,7 @@ public:
     }
 
     /// How many messages nats.c has handed to the session since start(),
-    /// written or dropped from the session's queue: what a msgs/s is
+    /// written or dropped from its sink's queue: what a msgs/s is
     /// computed from.  Kept after stop().  Any thread may call it, though
     /// it is meant for the GUI thread.
     ///
@@ -247,16 +253,16 @@ Q_SIGNALS:
 private:
     struct Worker;
 
-    /// The writer thread of start number @p generation has ended on its own.
+    /// The connection thread of start number @p generation has ended on its own.
     void onWorkerFinished( int generation );
 
-    /// The replay of start number @p generation is complete: its writer has ended.
+    /// The replay of start number @p generation is complete: its threads have ended.
     void onWorkerCompleted( int generation );
 
-    /// The writer of start number @p generation goes on in @p path.
+    /// The sink of start number @p generation goes on in @p path.
     void onWorkerRotated( int generation, const QString& path );
 
-    /// Stop the writer, wait for it and keep its counts.
+    /// Stop the worker, wait for its threads and keep its counts.
     void releaseWorker();
 
     /// The running worker's counts, or those the last one left.
