@@ -89,6 +89,10 @@ constexpr auto kCallbackTimeout = std::chrono::milliseconds( 5000 );
 /// its own timeout of 10 s, if the connection breaks meanwhile.
 constexpr auto kDrainTimeout = std::chrono::milliseconds( 15000 );
 
+/// How long listStreams() waits for each server to connect, and for the
+/// answer: the dialog waits for it when it closes (at shutdown).
+constexpr int kListTimeoutMs = 2000;
+
 /// What the writer reports to the session along with a line.
 enum class Event {
     None,        ///< A message: nothing to report.
@@ -1278,6 +1282,12 @@ QStringList listStreams( const SessionConfig& config, QString* error )
         problem = configureConnection( options, config );
     }
     if ( problem.isEmpty() ) {
+        status = natsOptions_SetTimeout( options, kListTimeoutMs );
+        if ( status != NATS_OK ) {
+            problem = lastError( status );
+        }
+    }
+    if ( problem.isEmpty() ) {
         status = natsConnection_Connect( &connection, options );
         if ( status != NATS_OK ) {
             problem = QStringLiteral( "connection to %1 failed: %2" )
@@ -1286,7 +1296,10 @@ QStringList listStreams( const SessionConfig& config, QString* error )
         }
     }
     if ( problem.isEmpty() ) {
-        status = natsConnection_JetStream( &js, connection, nullptr );
+        jsOptions jsOptions;
+        jsOptions_Init( &jsOptions );
+        jsOptions.Wait = kListTimeoutMs;
+        status = natsConnection_JetStream( &js, connection, &jsOptions );
         jsErrCode code = static_cast<jsErrCode>( 0 );
         if ( status == NATS_OK ) {
             status = js_StreamNames( &list, js, nullptr, &code );

@@ -244,7 +244,9 @@ struct SessionConfig;
  * The names of the JetStream streams on the server of @p config, sorted
  * ($JS.API.STREAM.NAMES), to choose the one to replay.  Connects with the
  * config's URL, auth and TLS, and waits for the answer: call it off the
- * GUI thread.
+ * GUI thread.  It takes at most 2 s for each server URL to connect to
+ * (one after the other, should several not answer) and 2 s for each
+ * answer of the server.
  *
  * @return the names; empty, with @p error set (for the user), if they
  *         could not be listed.  An empty list without error: no stream.
