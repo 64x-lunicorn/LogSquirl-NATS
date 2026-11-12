@@ -24,8 +24,8 @@
  * The four exported symbols of a LogSquirl plugin:
  *
  *   - logsquirl_plugin_get_info()   → static metadata
- *   - logsquirl_plugin_init()       → store host API, create the dialog, register menu action
- *                                     and status widget
+ *   - logsquirl_plugin_init()       → store host API, create the sessions, the dialog and the
+ *                                     sidebar tab, register the menu action and the tab
  *   - logsquirl_plugin_shutdown()   → stop the sessions, close nats.c, clear state
  *   - logsquirl_plugin_configure()  → plugin settings (none yet)
  *
@@ -43,7 +43,8 @@
 #include "plugin.h"
 
 #include "connectiondialog.h"
-#include "statuswidget.h"
+#include "sessions.h"
+#include "sidebarwidget.h"
 #include "tempdirs.h"
 
 #include <openssl/crypto.h>
@@ -62,6 +63,28 @@ void hostLog( int level, const QString& message )
 {
     if ( g_state.api && g_state.handle ) {
         g_state.api->log_message( g_state.handle, level, message.toUtf8().constData() );
+    }
+}
+
+QString settingsFile()
+{
+    if ( !g_state.api || !g_state.handle || !g_state.api->get_config_dir ) {
+        return {};
+    }
+    const char* dir = g_state.api->get_config_dir( g_state.handle );
+    if ( !dir || !*dir ) {
+        return {};
+    }
+    return QString::fromUtf8( dir ) + QStringLiteral( "/nats.ini" );
+}
+
+void logFailure( const char* what, const char* reason ) noexcept
+{
+    try {
+        hostLog( LOGSQUIRL_LOG_ERROR, QStringLiteral( "NATS Monitor plugin: %1 failed: %2" )
+                                          .arg( what, QString::fromUtf8( reason ) ) );
+    } catch ( ... ) {
+        // Nothing left to report it with.
     }
 }
 
@@ -93,38 +116,11 @@ static const LogSquirlPluginInfo kPluginInfo = {
 
 // ── Internal helpers ─────────────────────────────────────────────────────
 
-/// Log that work for the host failed.
-static void logFailure( const char* what, const char* reason ) noexcept
-{
-    try {
-        nats_monitor::hostLog( LOGSQUIRL_LOG_ERROR,
-                               QStringLiteral( "NATS Monitor plugin: %1 failed: %2" )
-                                   .arg( what, QString::fromUtf8( reason ) ) );
-    } catch ( ... ) {
-        // Nothing left to report it with.
-    }
-}
-
-/// Run work for the host, logging instead of throwing: the host is C, and
-/// an exception escaping into it would terminate LogSquirl.
-/// Returns false if it threw.
-template <typename Work>
-static bool guarded( const char* what, Work&& work ) noexcept
-{
-    try {
-        work();
-        return true;
-    } catch ( const std::exception& e ) {
-        logFailure( what, e.what() );
-    } catch ( ... ) {
-        logFailure( what, "unknown exception" );
-    }
-    return false;
-}
+using nats_monitor::guarded;
 
 // ── Menu action callback ─────────────────────────────────────────────────
 
-/// Show the NATS Monitor dialog, on top of the window whose menu opened it.
+/// Show the connection dialog, on top of the window it was opened from.
 static void showDialog()
 {
     auto* dialog = nats_monitor::g_state.dialog;
@@ -147,10 +143,49 @@ static void showDialog()
     dialog->activateWindow();
 }
 
-/// Called when the user clicks "NATS Monitor…" in the Plugins menu.
+/// Called when the user clicks "NATS Monitor…" in the Plugins menu: the
+/// dialog as it was left, as LogSquirl-Serial's menu entry next to its tab.
 static void showNatsMonitor( void* /* userData */ )
 {
     guarded( "showing the NATS Monitor dialog", [] { showDialog(); } );
+}
+
+/// Create the sidebar tab and connect it to the dialog, which carries out
+/// what is asked in the tab: new, edit and delete.
+static void createSidebar()
+{
+    auto& st = nats_monitor::g_state;
+    st.sidebar = new nats_monitor::SidebarWidget( st.sessions );
+    auto* sidebar = st.sidebar.data();
+    auto* dialog = st.dialog;
+    QObject::connect( sidebar, &nats_monitor::SidebarWidget::newConnectionRequested, dialog,
+                      [ dialog ] {
+                          guarded( "opening a new connection", [ dialog ] {
+                              dialog->newConnection();
+                              showDialog();
+                          } );
+                      } );
+    QObject::connect( sidebar, &nats_monitor::SidebarWidget::editRequested, dialog,
+                      [ dialog ]( const QString& name ) {
+                          guarded( "editing a connection", [ dialog, &name ] {
+                              dialog->editConnection( name );
+                              showDialog();
+                          } );
+                      } );
+    QObject::connect( sidebar, &nats_monitor::SidebarWidget::deleteRequested, dialog,
+                      [ dialog ]( const QString& name ) {
+                          guarded( "deleting a connection", [ dialog, &name ] {
+                              if ( !dialog->deleteConnection( name ) ) {
+                                  nats_monitor::hostNotify(
+                                      QStringLiteral( "NATS Monitor: the connection %1 could not "
+                                                      "be deleted." )
+                                          .arg( name ) );
+                              }
+                          } );
+                      } );
+    QObject::connect(
+        dialog, &nats_monitor::ConnectionDialog::profilesChanged, sidebar,
+        [ sidebar ] { guarded( "showing the connections", [ sidebar ] { sidebar->reload(); } ); } );
 }
 
 // ── Exported C entry points ──────────────────────────────────────────────
@@ -175,8 +210,8 @@ LOGSQUIRL_PLUGIN_EXPORT const LogSquirlPluginInfo* logsquirl_plugin_get_info( vo
  * @param handle  Opaque handle — pass back to every host API call.
  * @return 0 on success, non-zero on failure.
  *
- * Registers the "NATS Monitor…" menu action.  A failure is logged and
- * undone (shutdown()), and init returns 1.
+ * Registers the sidebar tab "NATS" and the "NATS Monitor…" menu action.
+ * A failure is logged and undone (shutdown()), and init returns 1.
  */
 LOGSQUIRL_PLUGIN_EXPORT int logsquirl_plugin_init( const LogSquirlHostApi* api, void* handle )
 {
@@ -195,26 +230,25 @@ LOGSQUIRL_PLUGIN_EXPORT int logsquirl_plugin_init( const LogSquirlHostApi* api, 
         // e.g. after a crash: no tab can show them any more.
         nats_monitor::removeStaleTempDirs( nats_monitor::tempRoot() );
 
-        nats_monitor::g_state.dialog = new nats_monitor::ConnectionDialog();
+        auto& st = nats_monitor::g_state;
+        st.sessions = new nats_monitor::Sessions();
+        st.dialog = new nats_monitor::ConnectionDialog( st.sessions );
 
         // The host shuts the plugin down both when LogSquirl quits (after
         // aboutToQuit) and when the plugin is disabled or updated at
         // runtime, with the tabs left open; only in the first case may the
         // temporary files go.
         if ( auto* app = QCoreApplication::instance() ) {
-            QObject::connect( app, &QCoreApplication::aboutToQuit, nats_monitor::g_state.dialog,
+            QObject::connect( app, &QCoreApplication::aboutToQuit, st.sessions,
                               [] { nats_monitor::g_state.quitting = true; } );
         }
 
         api->register_menu_action( handle, "Plugins", "NATS Monitor…", &showNatsMonitor, nullptr );
 
-        // Running sessions, msgs/s and drops, in the status bar.
-        auto& st = nats_monitor::g_state;
-        st.statusWidget = new nats_monitor::StatusWidget( st.dialog );
-        if ( api->register_status_widget ) {
-            api->register_status_widget( handle, static_cast<void*>( st.statusWidget.data() ) );
-            st.statusWidgetRegistered = true;
-        }
+        // The saved connections as tiles, started and stopped there.
+        createSidebar();
+        api->register_sidebar_tab( handle, "NATS", static_cast<void*>( st.sidebar.data() ) );
+        st.sidebarRegistered = true;
 
         // Which nats.c and OpenSSL the plugin carries: both are linked in.
         nats_monitor::hostLog(
@@ -243,28 +277,32 @@ LOGSQUIRL_PLUGIN_EXPORT void logsquirl_plugin_shutdown( void )
         nats_monitor::hostLog( LOGSQUIRL_LOG_INFO, "NATS Monitor plugin shutting down…" );
     } );
 
-    // The host must let go of the widget before it is deleted; it goes
-    // before the dialog, whose totals it shows.  Gone already (a host
-    // window deleted it), there is nothing to unregister or delete.
-    if ( st.statusWidgetRegistered && st.statusWidget ) {
-        guarded( "unregistering the status widget", [ &st ] {
-            if ( st.api && st.handle && st.api->unregister_status_widget ) {
-                st.api->unregister_status_widget( st.handle,
-                                                  static_cast<void*>( st.statusWidget.data() ) );
+    // The host must let go of the tab before it is deleted; it goes before
+    // the sessions it shows.  Gone already (a host window deleted it),
+    // there is nothing to unregister or delete.
+    if ( st.sidebarRegistered && st.sidebar ) {
+        guarded( "unregistering the sidebar tab", [ &st ] {
+            if ( st.api && st.handle ) {
+                st.api->unregister_sidebar_tab( st.handle,
+                                                static_cast<void*>( st.sidebar.data() ) );
             }
         } );
     }
-    st.statusWidgetRegistered = false;
-    if ( st.statusWidget ) {
-        guarded( "shutdown", [ &st ] { delete st.statusWidget.data(); } );
+    st.sidebarRegistered = false;
+    if ( st.sidebar ) {
+        guarded( "shutdown", [ &st ] { delete st.sidebar.data(); } );
     }
-    st.statusWidget = nullptr;
+    st.sidebar = nullptr;
 
     if ( st.dialog ) {
-        // Stops the sessions: their files are flushed and kept for the tabs.
-        guarded( "stopping the NATS sessions", [ &st ] { st.dialog->stopAll(); } );
         guarded( "shutdown", [ &st ] { delete st.dialog; } );
         st.dialog = nullptr;
+    }
+    if ( st.sessions ) {
+        // Stops the sessions: their files are flushed and kept for the tabs.
+        guarded( "stopping the NATS sessions", [ &st ] { st.sessions->stopAll(); } );
+        guarded( "shutdown", [ &st ] { delete st.sessions; } );
+        st.sessions = nullptr;
     }
 
     // The tabs close with LogSquirl: remove the files of every instance of
@@ -289,7 +327,8 @@ LOGSQUIRL_PLUGIN_EXPORT void logsquirl_plugin_shutdown( void )
 }
 
 /**
- * Open the plugin's settings.  It has none yet.
+ * Open the plugin's settings.  It has none yet: the connections are set up
+ * in the sidebar tab.
  *
  * @param parent_widget  Cast of a QWidget* the plugin can use as dialog parent.
  */

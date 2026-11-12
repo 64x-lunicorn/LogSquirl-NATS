@@ -22,7 +22,8 @@
  * @brief BDD tests for the plugin's lifecycle through its C entry points.
  *
  * Drives logsquirl_plugin_init() / logsquirl_plugin_shutdown() against a
- * FakeHost, and clicks the menu entry the plugin registers.
+ * FakeHost, and clicks the menu entry, the dialog and the sidebar tab the
+ * plugin registers.
  */
 
 // First: on Windows nats.h includes winsock2.h, which must come before any
@@ -45,14 +46,19 @@
 #include <QDirIterator>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSpinBox>
 #include <QTemporaryDir>
+#include <QTimer>
+
+#include <functional>
+#include <optional>
 
 using nats_test::FakeHost;
 using nats_test::NatsServer;
@@ -130,14 +136,6 @@ QString subjectsWarning( QDialog* dialog )
     return label->text();
 }
 
-/// The list of the running sessions.
-QListWidget* sessionList( QDialog* dialog )
-{
-    auto* list = dialog ? dialog->findChild<QListWidget*>( "sessions" ) : nullptr;
-    REQUIRE( list );
-    return list;
-}
-
 QString statusText( QDialog* dialog )
 {
     auto* label = dialog ? dialog->findChild<QLabel*>( "status" ) : nullptr;
@@ -194,14 +192,137 @@ struct ConfiguredServer {
     std::unique_ptr<NatsServer> server;
 };
 
-/// Open the dialog from the menu, enter @p url and @p subject and click Start.
-void startFromDialog( FakeHost& host, const QString& url, const QString& subject )
+/// The plugin's sidebar tab.
+QWidget* sidebar( const FakeHost& host )
+{
+    REQUIRE( host.sidebarTabs.size() == 1 );
+    return host.sidebarTabs.first().widget;
+}
+
+/// The sidebar's button @p name.
+QPushButton* sidebarButton( const FakeHost& host, const char* name )
+{
+    auto* pushButton = sidebar( host )->findChild<QPushButton*>( name );
+    REQUIRE( pushButton );
+    return pushButton;
+}
+
+/// The names of the tiles in the sidebar, top to bottom.
+QStringList tileNames( const FakeHost& host )
+{
+    // In the order they were added: children() keeps it.
+    QStringList names;
+    for ( auto* tile : sidebar( host )->findChildren<QWidget*>( "tile" ) ) {
+        names << tile->findChild<QLabel*>( "title" )->text();
+    }
+    return names;
+}
+
+/// The tile of the connection @p name.
+QWidget* tile( const FakeHost& host, const QString& name )
+{
+    for ( auto* widget : sidebar( host )->findChildren<QWidget*>( "tile" ) ) {
+        if ( widget->findChild<QLabel*>( "title" )->text() == name ) {
+            return widget;
+        }
+    }
+    FAIL( "no tile " << name.toStdString() );
+    return nullptr;
+}
+
+/// The button @p button of the tile of @p name.
+QPushButton* tileButton( const FakeHost& host, const QString& name, const char* button )
+{
+    auto* pushButton = tile( host, name )->findChild<QPushButton*>( button );
+    REQUIRE( pushButton );
+    return pushButton;
+}
+
+/// What the tile of @p name says about the connection.
+QString tileSummary( const FakeHost& host, const QString& name )
+{
+    return tile( host, name )->findChild<QLabel*>( "summary" )->text();
+}
+
+/// What the tile of @p name says its session does or did.
+QString tileDetails( const FakeHost& host, const QString& name )
+{
+    return tile( host, name )->findChild<QLabel*>( "details" )->text();
+}
+
+/// Have @p act deal with the next modal dialog once it is open.
+void onNextModal( std::function<void( QWidget* )> act )
+{
+    auto* timer = new QTimer;
+    timer->setInterval( 10 );
+    QObject::connect( timer, &QTimer::timeout, [ timer, act ] {
+        if ( auto* modal = QApplication::activeModalWidget() ) {
+            timer->stop();
+            timer->deleteLater();
+            act( modal );
+        }
+    } );
+    timer->start();
+}
+
+/// Answer the next password or token prompt with @p secret, or cancel it.
+void answerSecret( const std::optional<QString>& secret )
+{
+    onNextModal( [ secret ]( QWidget* modal ) {
+        auto* input = qobject_cast<QInputDialog*>( modal );
+        REQUIRE( input );
+        if ( secret ) {
+            input->setTextValue( *secret );
+            input->accept();
+        }
+        else {
+            input->reject();
+        }
+    } );
+}
+
+/// Answer the next question with @p button.
+void answerQuestion( QMessageBox::StandardButton button )
+{
+    onNextModal( [ button ]( QWidget* modal ) {
+        auto* box = qobject_cast<QMessageBox*>( modal );
+        REQUIRE( box );
+        box->button( button )->click();
+    } );
+}
+
+/// Save the settings in @p dialog as the connection @p name.
+void saveAs( QDialog* dialog, const QString& name )
+{
+    comboBox( dialog, "profile" )->setEditText( name );
+    button( dialog, "saveProfile" )->click();
+}
+
+/// Click Start on the tile of @p name, answering a prompt for the password
+/// or token with @p secret.
+void startTile( FakeHost& host, const QString& name, const std::optional<QString>& secret = {} )
+{
+    if ( secret ) {
+        answerSecret( secret );
+    }
+    tileButton( host, name, "startStop" )->click();
+}
+
+/// Open the dialog from the menu, enter @p url and @p subject, save the
+/// settings as the connection @p name and start it from its tile,
+/// answering a prompt for the password or token with @p secret.
+void startFromDialog( FakeHost& host, const QString& url, const QString& subject,
+                      const std::optional<QString>& secret = {},
+                      const QString& name = QStringLiteral( "test" ) )
 {
     host.menuActions.first().trigger();
     auto* dialog = openDialog();
     field( dialog, "url" )->setText( url );
     subjectsField( dialog )->setPlainText( subject );
-    button( dialog, "start" )->click();
+    saveAs( dialog, name );
+    INFO( "dialog: " << statusText( dialog ).toStdString() );
+    REQUIRE( tileNames( host ).contains( name ) );
+    startTile( host, name, secret );
 }
 
 /// Whether the last line of @p path is the stopped marker.
@@ -260,17 +381,14 @@ SCENARIO( "the plugin adds NATS Monitor to the Plugins menu", "[plugin]" )
                     REQUIRE_FALSE( host.logs.join( '\n' ).contains( "failed" ) );
                 }
 
-                AND_WHEN( "Start is clicked without a subject" )
+                AND_WHEN( "the settings are saved without a subject" )
                 {
-                    button( openDialog(), "start" )->click();
+                    saveAs( openDialog(), "x" );
 
-                    THEN( "nothing is opened, and the dialog says why" )
+                    THEN( "nothing is saved, and the dialog says why" )
                     {
-                        REQUIRE( host.openedFiles.isEmpty() );
-                        REQUIRE( openDialog()
-                                     ->findChild<QLabel*>( "status" )
-                                     ->text()
-                                     .contains( "subject" ) );
+                        REQUIRE( tileNames( host ).isEmpty() );
+                        REQUIRE( statusText( openDialog() ).contains( "subject" ) );
                     }
                 }
             }
@@ -324,7 +442,7 @@ SCENARIO( "configure and shutdown are safe without a running session", "[plugin]
     }
 }
 
-SCENARIO( "capturing from the dialog: Start, Stop, Start", "[plugin][server]" )
+SCENARIO( "capturing from a tile: Start, Stop, Start", "[plugin][server]" )
 {
     SKIP_WITHOUT_NATS_SERVER();
 
@@ -334,7 +452,7 @@ SCENARIO( "capturing from the dialog: Start, Stop, Start", "[plugin][server]" )
         FakeHost host;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
 
-        WHEN( "the user starts a capture from the dialog" )
+        WHEN( "the user saves a connection in the dialog and starts it from its tile" )
         {
             startFromDialog( host, server.url(), "orders.>" );
 
@@ -359,7 +477,7 @@ SCENARIO( "capturing from the dialog: Start, Stop, Start", "[plugin][server]" )
                 REQUIRE( host.openedFiles.size() == 1 );
                 const auto first = host.openedFiles.first();
                 REQUIRE( waitSubscribed( first ) );
-                button( openDialog(), "stop" )->click();
+                startTile( host, "test" ); // Stop
 
                 THEN( "the first file is kept and ends with the stopped marker, and the second "
                       "capture opens a new tab" )
@@ -367,7 +485,7 @@ SCENARIO( "capturing from the dialog: Start, Stop, Start", "[plugin][server]" )
                     REQUIRE( waitFor( [ & ] { return endsStopped( first ); } ) );
                     REQUIRE( host.notifications.last()
                              == QStringLiteral( "NATS capture of orders.> stopped." ) );
-                    button( openDialog(), "start" )->click();
+                    startTile( host, "test" );
                     REQUIRE( host.openedFiles.size() == 2 );
                     const auto second = host.openedFiles.last();
                     REQUIRE( second != first );
@@ -454,7 +572,7 @@ SCENARIO( "the pending limits are set in the dialog", "[plugin][server]" )
                     publisher.publish( "flood", payload, {}, {}, i == 49999 );
                 }
             }
-            button( openDialog(), "stop" )->click();
+            startTile( host, "test" ); // Stop
 
             THEN( "the capture drops as a slow consumer, and says so in the file" )
             {
@@ -531,12 +649,13 @@ SCENARIO( "the size limit is remembered between sessions", "[plugin][server][rot
         host.menuActions.first().trigger();
         spinBox( openDialog(), "maxFileMiB" )->setValue( 7 );
         startFromDialog( host, server.url(), "x" );
-        button( openDialog(), "stop" )->click();
+        startTile( host, "test" ); // Stop
         logsquirl_plugin_shutdown();
 
         WHEN( "the plugin is initialised again and its dialog opened" )
         {
             host.menuActions.clear();
+            host.sidebarTabs.clear();
             REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
             host.menuActions.first().trigger();
 
@@ -569,7 +688,7 @@ SCENARIO( "a capture that fails is notified", "[plugin][server]" )
         {
             startFromDialog( host, url, "x" );
 
-            THEN( "the host shows a notification saying why" )
+            THEN( "the host shows a notification saying why, and so does the tile" )
             {
                 REQUIRE( waitFor(
                     [ & ] {
@@ -578,7 +697,10 @@ SCENARIO( "a capture that fails is notified", "[plugin][server]" )
                     },
                     10000 ) );
                 REQUIRE( host.notifications.last().contains( url ) );
-                REQUIRE_FALSE( button( openDialog(), "stop" )->isEnabled() );
+                REQUIRE( waitFor(
+                    [ & ] { return tileDetails( host, "test" ).startsWith( "failed: " ); } ) );
+                REQUIRE( tileDetails( host, "test" ).contains( url ) );
+                REQUIRE( tileButton( host, "test", "startStop" )->text().contains( "Start" ) );
             }
         }
 
@@ -634,7 +756,7 @@ SCENARIO( "unloading the plugin or quitting LogSquirl while capturing stops clea
     }
 }
 
-SCENARIO( "a wrong credential or certificate is explained in the dialog", "[plugin][server][auth]" )
+SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin][server][auth]" )
 {
     SKIP_WITHOUT_NATS_SERVER();
 
@@ -648,43 +770,44 @@ SCENARIO( "a wrong credential or certificate is explained in the dialog", "[plug
         chooseAuth( dialog, "User and password" );
         field( dialog, "user" )->setText( "alice" );
 
-        WHEN( "the user starts a capture with a wrong password" )
+        WHEN( "the user starts a capture and enters a wrong password" )
         {
-            field( dialog, "secret" )->setText( "wrong" );
-            startFromDialog( host, server.server->url(), "x" );
+            startFromDialog( host, server.server->url(), "x", QStringLiteral( "wrong" ) );
 
-            THEN( "the dialog says the server refused the user name or password" )
+            THEN( "the tile says the server refused the user name or password" )
             {
                 REQUIRE( waitFor(
                     [ & ] {
-                        return statusText( dialog ).contains(
-                            "the server refused the user name or password" );
+                        return tileDetails( host, "test" ).startsWith( "failed: " )
+                               && tileDetails( host, "test" )
+                                      .contains( "the server refused the user name or password" );
                     },
                     10000 ) );
-                REQUIRE( button( dialog, "start" )->isEnabled() );
+                REQUIRE( tileButton( host, "test", "startStop" )->text().contains( "Start" ) );
             }
         }
 
-        WHEN( "the user starts a capture with the right password" )
+        WHEN( "the user starts a capture and enters the right password" )
         {
-            field( dialog, "secret" )->setText( "s3cret" );
-            startFromDialog( host, server.server->url(), "x" );
+            startFromDialog( host, server.server->url(), "x", QStringLiteral( "s3cret" ) );
 
-            THEN( "the capture runs" )
+            THEN( "the capture runs, and the password is in no file of the configuration" )
             {
                 REQUIRE( host.openedFiles.size() == 1 );
                 REQUIRE( waitSubscribed( host.openedFiles.first() ) );
+                REQUIRE_FALSE( anyFileContains( host.configDir(), "s3cret" ) );
             }
         }
 
-        WHEN( "the user starts a capture without a password" )
+        WHEN( "the user starts a capture and cancels the password prompt" )
         {
+            answerSecret( std::nullopt );
             startFromDialog( host, server.server->url(), "x" );
 
-            THEN( "nothing is started, and the dialog asks for the password" )
+            THEN( "nothing is started" )
             {
                 REQUIRE( host.openedFiles.isEmpty() );
-                REQUIRE( statusText( dialog ).contains( "Enter the password" ) );
+                REQUIRE( tileButton( host, "test", "startStop" )->text().contains( "Start" ) );
             }
         }
 
@@ -716,12 +839,12 @@ SCENARIO( "a wrong credential or certificate is explained in the dialog", "[plug
             field( dialog, "caFile" )->setText( certs + "/other-ca-cert.pem" );
             startFromDialog( host, server.server->url(), "x" );
 
-            THEN( "the dialog says the server's certificate is not trusted" )
+            THEN( "the tile says the server's certificate is not trusted" )
             {
                 REQUIRE( waitFor(
                     [ & ] {
-                        return statusText( dialog ).contains(
-                            "the server's certificate is not trusted" );
+                        return tileDetails( host, "test" )
+                            .contains( "the server's certificate is not trusted" );
                     },
                     10000 ) );
             }
@@ -733,10 +856,27 @@ SCENARIO( "a wrong credential or certificate is explained in the dialog", "[plug
             field( dialog, "caFile" )->setText( certs + "/ca-cert.pem" );
             startFromDialog( host, server.server->url(), "x" );
 
-            THEN( "the capture runs" )
+            THEN( "the capture runs, and the tile says to which server" )
             {
                 REQUIRE( host.openedFiles.size() == 1 );
                 REQUIRE( waitSubscribed( host.openedFiles.first() ) );
+                REQUIRE( tileSummary( host, "test" ).contains( "TLS on" ) );
+                REQUIRE( waitFor(
+                    [ & ] { return tileDetails( host, "test" ).contains( "connected to " ); } ) );
+            }
+        }
+
+        WHEN( "the user starts a capture over TLS skipping the verification" )
+        {
+            checkBox( dialog, "tls" )->setChecked( true );
+            checkBox( dialog, "skipVerify" )->setChecked( true );
+            startFromDialog( host, server.server->url(), "x" );
+
+            THEN( "the capture runs, and the host log says the certificate is not verified" )
+            {
+                REQUIRE( host.openedFiles.size() == 1 );
+                REQUIRE( waitSubscribed( host.openedFiles.first() ) );
+                REQUIRE( host.logs.join( '\n' ).contains( "is not verified (insecure)" ) );
             }
         }
 
@@ -763,16 +903,21 @@ SCENARIO( "a wrong credential or certificate is explained in the dialog", "[plug
 
 namespace {
 
-/// Start a capture from @p dialog on @p url and wait until its status line
-/// says @p text.
-void requireStatusAfterStart( FakeHost& host, QDialog* dialog, const QString& url,
-                              const QString& text )
+/// Save the dialog's settings with @p url, start the connection, entering
+/// @p secret if asked, and wait until its tile says @p text.
+void requireStatusAfterStart( FakeHost& host, const QString& url, const QString& text,
+                              const std::optional<QString>& secret = {} )
 {
-    startFromDialog( host, url, "x" );
-    REQUIRE( waitFor( [ & ] { return statusText( dialog ).contains( text ); }, 10000 ) );
-    INFO( "status: " << statusText( dialog ).toStdString() );
-    REQUIRE( statusText( dialog ).contains( text ) );
-    REQUIRE( button( dialog, "start" )->isEnabled() );
+    startFromDialog( host, url, "x", secret );
+    REQUIRE( waitFor(
+        [ & ] {
+            const auto details = tileDetails( host, "test" );
+            return details.startsWith( "failed: " ) && details.contains( text );
+        },
+        10000 ) );
+    INFO( "tile: " << tileDetails( host, "test" ).toStdString() );
+    REQUIRE( tileDetails( host, "test" ).contains( text ) );
+    REQUIRE( tileButton( host, "test", "startStop" )->text().contains( "Start" ) );
 }
 
 /// The content of the fixture file @p path, trimmed.
@@ -785,7 +930,7 @@ QString fixtureText( const QString& path )
 
 } // namespace
 
-SCENARIO( "a wrong token, NKey, .creds or client certificate is explained in the dialog",
+SCENARIO( "a wrong token, NKey, .creds or client certificate is explained on the tile",
           "[plugin][server][auth]" )
 {
     SKIP_WITHOUT_NATS_SERVER();
@@ -801,14 +946,12 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained in the
         auto* dialog = openDialog();
         chooseAuth( dialog, "Token" );
 
-        WHEN( "the user starts a capture with a wrong token" )
+        WHEN( "the user starts a capture and enters a wrong token" )
         {
-            field( dialog, "secret" )->setText( "wrong" );
-
-            THEN( "the dialog says the server refused the token" )
+            THEN( "the tile says the server refused the token" )
             {
-                requireStatusAfterStart( host, dialog, server.server->url(),
-                                         "the server refused the token" );
+                requireStatusAfterStart( host, server.server->url(), "the server refused the token",
+                                         QStringLiteral( "wrong" ) );
             }
         }
 
@@ -829,9 +972,9 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained in the
         {
             field( dialog, "authFile" )->setText( auth + "/other.seed" );
 
-            THEN( "the dialog says the server refused the NKey in that file" )
+            THEN( "the tile says the server refused the NKey in that file" )
             {
-                requireStatusAfterStart( host, dialog, server.server->url(),
+                requireStatusAfterStart( host, server.server->url(),
                                          "the server refused the NKey in " + auth + "/other.seed" );
             }
         }
@@ -852,9 +995,9 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained in the
         {
             field( dialog, "authFile" )->setText( auth + "/other.creds" );
 
-            THEN( "the dialog says the server refused the credentials in that file" )
+            THEN( "the tile says the server refused the credentials in that file" )
             {
-                requireStatusAfterStart( host, dialog, server.server->url(),
+                requireStatusAfterStart( host, server.server->url(),
                                          "the server refused the credentials in " + auth
                                              + "/other.creds" );
             }
@@ -883,10 +1026,10 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained in the
 
         WHEN( "the user starts a capture without a client certificate" )
         {
-            THEN( "the dialog says the server requires (or may require) one" )
+            THEN( "the tile says the server requires (or may require) one" )
             {
                 // "may": with TLS 1.3 the server closes without saying why.
-                requireStatusAfterStart( host, dialog, server.server->url(),
+                requireStatusAfterStart( host, server.server->url(),
                                          "a client certificate, and none is set" );
             }
         }
@@ -896,76 +1039,11 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained in the
             field( dialog, "certFile" )->setText( certs + "/other-client-cert.pem" );
             field( dialog, "keyFile" )->setText( certs + "/other-client-key.pem" );
 
-            THEN( "the dialog says the server does not (or may not) accept it" )
+            THEN( "the tile says the server does not (or may not) accept it" )
             {
-                requireStatusAfterStart( host, dialog, server.server->url(),
+                requireStatusAfterStart( host, server.server->url(),
                                          "accept the client certificate " + certs
                                              + "/other-client-cert.pem" );
-            }
-        }
-
-        logsquirl_plugin_shutdown();
-    }
-}
-
-SCENARIO( "a password in the URL is never written to the log, the status or the file",
-          "[plugin][server][auth]" )
-{
-    SKIP_WITHOUT_NATS_SERVER();
-
-    GIVEN( "an initialised plugin and a server that requires a user and password" )
-    {
-        ConfiguredServer server( "authorization { user: alice, password: s3cret }\n" );
-        FakeHost host;
-        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
-        host.menuActions.first().trigger();
-        auto* dialog = openDialog();
-
-        WHEN( "the user starts a capture on a URL with a wrong password in it, skipping the "
-              "verification of the certificate" )
-        {
-            checkBox( dialog, "tls" )->setChecked( true );
-            checkBox( dialog, "skipVerify" )->setChecked( true );
-            const auto url = server.server->url().replace( "nats://", "nats://alice:wr0ng-pw@" );
-            startFromDialog( host, url, "x" );
-
-            THEN( "the connection fails, and neither the status, the log, the notifications nor "
-                  "the file show the password" )
-            {
-                REQUIRE( host.openedFiles.size() == 1 );
-                const auto path = host.openedFiles.first();
-                REQUIRE(
-                    waitFor( [ & ] { return readLines( path ).join( '\n' ).contains( "failed" ); },
-                             10000 ) );
-                REQUIRE( waitFor( [ & ] { return button( dialog, "start" )->isEnabled(); } ) );
-                const auto everything
-                    = QStringList{ statusText( dialog ), host.logs.join( '\n' ),
-                                   host.notifications.join( '\n' ), readLines( path ).join( '\n' ) }
-                          .join( '\n' );
-                INFO( everything.toStdString() );
-                REQUIRE( everything.contains( "is not verified" ) );
-                REQUIRE( everything.contains( "connection to nats://alice:***@" ) );
-                REQUIRE_FALSE( everything.contains( "wr0ng-pw" ) );
-            }
-        }
-
-        WHEN( "the user starts a capture on a URL with the right password in it" )
-        {
-            const auto url = server.server->url().replace( "nats://", "nats://alice:s3cret@" );
-            startFromDialog( host, url, "x" );
-
-            THEN( "the capture runs, and its connected marker does not show the password" )
-            {
-                REQUIRE( host.openedFiles.size() == 1 );
-                const auto path = host.openedFiles.first();
-                REQUIRE( waitSubscribed( path ) );
-                const auto everything
-                    = QStringList{ statusText( dialog ), host.logs.join( '\n' ),
-                                   host.notifications.join( '\n' ), readLines( path ).join( '\n' ) }
-                          .join( '\n' );
-                INFO( everything.toStdString() );
-                REQUIRE( everything.contains( "connected to nats://alice:***@" ) );
-                REQUIRE_FALSE( everything.contains( "s3cret" ) );
             }
         }
 
@@ -1049,29 +1127,29 @@ SCENARIO( "the dialog warns when the subjects of a session overlap", "[plugin][s
             }
         }
 
-        WHEN( "a line has more than a subject and a queue group, and Start is clicked" )
+        WHEN( "a line has more than a subject and a queue group, and Save is clicked" )
         {
             subjectsField( dialog )->setPlainText( "orders.>\nbilling.> workers extra" );
-            button( dialog, "start" )->click();
+            saveAs( dialog, "x" );
 
-            THEN( "nothing starts, and the dialog says which line is wrong" )
+            THEN( "nothing is saved, and the dialog says which line is wrong" )
             {
-                REQUIRE( host.openedFiles.isEmpty() );
+                REQUIRE( tileNames( host ).isEmpty() );
                 REQUIRE( statusText( dialog ).contains( "billing.> workers extra" ) );
             }
         }
 
-        WHEN( "a subject is not one NATS takes, and Start is clicked" )
+        WHEN( "a subject is not one NATS takes, and Save is clicked" )
         {
             const auto* subject = GENERATE( "a.>.b", "a..b", ".a", "a.", "a.b*", "a.>x" );
             subjectsField( dialog )->setPlainText( QStringLiteral( "a.>\n%1" ).arg( subject ) );
-            button( dialog, "start" )->click();
+            saveAs( dialog, "x" );
 
-            THEN( "nothing starts, the dialog says which subject is wrong, and gives no "
+            THEN( "nothing is saved, the dialog says which subject is wrong, and gives no "
                   "overlap warning for it" )
             {
                 INFO( subject );
-                REQUIRE( host.openedFiles.isEmpty() );
+                REQUIRE( tileNames( host ).isEmpty() );
                 REQUIRE( statusText( dialog ).contains(
                     QStringLiteral( "%1 is not a valid subject" ).arg( subject ) ) );
                 REQUIRE( subjectsWarning( dialog ).isEmpty() );
@@ -1082,40 +1160,265 @@ SCENARIO( "the dialog warns when the subjects of a session overlap", "[plugin][s
     }
 }
 
-SCENARIO( "several sessions run side by side, each in its own file and tab",
-          "[plugin][server][subjects]" )
+namespace {
+
+/// The number before @p word in @p text, whatever the locale groups its
+/// digits with; -1 if there is none.
+qint64 numberBefore( const QString& text, const QString& word )
+{
+    const auto match = QRegularExpression( QStringLiteral( "(\\d[\\d.,' \\x{a0}\\x{202f}]*) " )
+                                           + QRegularExpression::escape( word ) )
+                           .match( text );
+    if ( !match.hasMatch() ) {
+        return -1;
+    }
+    return match.captured( 1 ).remove( QRegularExpression( "\\D" ) ).toLongLong();
+}
+
+/// The number after @p word in @p text, as numberBefore().
+qint64 numberAfter( const QString& text, const QString& word )
+{
+    const auto match = QRegularExpression( QRegularExpression::escape( word )
+                                           + QStringLiteral( " (\\d[\\d.,'\\x{a0}\\x{202f}]*)" ) )
+                           .match( text );
+    if ( !match.hasMatch() ) {
+        return -1;
+    }
+    return match.captured( 1 ).remove( QRegularExpression( "\\D" ) ).toLongLong();
+}
+
+/// Open a new connection from the sidebar, enter @p url and @p subjects and
+/// save it as @p name.
+void saveConnection( FakeHost& host, const QString& name, const QString& url,
+                     const QString& subjects )
+{
+    sidebarButton( host, "newConnection" )->click();
+    auto* dialog = openDialog();
+    REQUIRE( dialog );
+    field( dialog, "url" )->setText( url );
+    subjectsField( dialog )->setPlainText( subjects );
+    saveAs( dialog, name );
+    INFO( "dialog: " << statusText( dialog ).toStdString() );
+    REQUIRE( tileNames( host ).contains( name ) );
+}
+
+} // namespace
+
+SCENARIO( "the plugin has a sidebar tab NATS, from init to shutdown", "[plugin][sidebar]" )
+{
+    GIVEN( "a host" )
+    {
+        FakeHost host;
+
+        WHEN( "the plugin is initialised" )
+        {
+            REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+
+            THEN( "it registers one sidebar tab, NATS, and no status bar widget" )
+            {
+                REQUIRE( host.sidebarTabs.size() == 1 );
+                REQUIRE( host.sidebarTabs.first().label == "NATS" );
+                REQUIRE( host.statusWidgets.isEmpty() );
+            }
+
+            THEN( "without a saved connection, the tab has no tile and says how to add one" )
+            {
+                REQUIRE( tileNames( host ).isEmpty() );
+                auto* empty = sidebar( host )->findChild<QLabel*>( "empty" );
+                REQUIRE( empty );
+                REQUIRE( empty->text().contains( "New connection" ) );
+                REQUIRE_FALSE( sidebarButton( host, "stopAll" )->isEnabled() );
+            }
+
+            AND_WHEN( "the host's window, which parents the tab, goes before shutdown" )
+            {
+                {
+                    QWidget window;
+                    sidebar( host )->setParent( &window );
+                } // deletes its children, the tab too
+
+                THEN( "shutdown neither hands the host the deleted tab nor deletes it again" )
+                {
+                    logsquirl_plugin_shutdown();
+                    REQUIRE( host.unregisteredSidebarTabs.isEmpty() );
+                }
+            }
+
+            AND_WHEN( "the plugin is shut down" )
+            {
+                auto* widget = sidebar( host );
+                logsquirl_plugin_shutdown();
+
+                THEN( "it has unregistered the tab" )
+                {
+                    REQUIRE( host.sidebarTabs.isEmpty() );
+                    REQUIRE( host.unregisteredSidebarTabs == QList<QWidget*>{ widget } );
+                }
+            }
+
+            logsquirl_plugin_shutdown();
+        }
+    }
+}
+
+SCENARIO( "each saved connection is a tile in the sidebar", "[plugin][sidebar]" )
+{
+    GIVEN( "an initialised plugin" )
+    {
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+
+        WHEN( "New connection… is clicked" )
+        {
+            sidebarButton( host, "newConnection" )->click();
+
+            THEN( "the dialog opens, without a name and with the default server" )
+            {
+                auto* dialog = openDialog();
+                REQUIRE( dialog );
+                REQUIRE( comboBox( dialog, "profile" )->currentText().isEmpty() );
+                REQUIRE( field( dialog, "url" )->text() == "nats://localhost:4222" );
+                REQUIRE( subjectsField( dialog )->toPlainText().isEmpty() );
+            }
+        }
+
+        WHEN( "two connections are saved, prod with a user and TLS, then dev" )
+        {
+            sidebarButton( host, "newConnection" )->click();
+            auto* dialog = openDialog();
+            field( dialog, "url" )->setText( "nats://a:4222, nats://b:4222" );
+            chooseAuth( dialog, "User and password" );
+            field( dialog, "user" )->setText( "alice" );
+            checkBox( dialog, "tls" )->setChecked( true );
+            subjectsField( dialog )->setPlainText( "orders.>\njobs.* workers" );
+            saveAs( dialog, "prod" );
+            saveConnection( host, "dev", "nats://localhost:4222", "metrics.>" );
+
+            THEN( "each has a tile, in the order saved, saying what it connects to" )
+            {
+                REQUIRE( tileNames( host ) == QStringList{ "prod", "dev" } );
+                REQUIRE_FALSE( sidebar( host )->findChild<QLabel*>( "empty" )->isVisibleTo(
+                    sidebar( host ) ) );
+                const auto prod = tileSummary( host, "prod" );
+                REQUIRE( prod.contains( "nats://a:4222, nats://b:4222" ) );
+                REQUIRE( prod.contains( "User and password" ) );
+                REQUIRE( prod.contains( "TLS on" ) );
+                REQUIRE( prod.contains( "orders.>, jobs.* (queue workers)" ) );
+                const auto dev = tileSummary( host, "dev" );
+                REQUIRE( dev.contains( "No credentials" ) );
+                REQUIRE( dev.contains( "TLS off" ) );
+                REQUIRE( dev.contains( "metrics.>" ) );
+                REQUIRE( tileButton( host, "dev", "startStop" )->text().contains( "Start" ) );
+                REQUIRE( tileDetails( host, "dev" ).isEmpty() );
+            }
+
+            AND_WHEN( "Edit is clicked on prod" )
+            {
+                openDialog()->hide();
+                tileButton( host, "prod", "edit" )->click();
+
+                THEN( "the dialog opens with prod's settings" )
+                {
+                    auto* again = openDialog();
+                    REQUIRE( again );
+                    REQUIRE( comboBox( again, "profile" )->currentText() == "prod" );
+                    REQUIRE( field( again, "url" )->text() == "nats://a:4222, nats://b:4222" );
+                    REQUIRE( field( again, "user" )->text() == "alice" );
+                    REQUIRE( subjectsField( again )->toPlainText() == "orders.>\njobs.* workers" );
+                }
+
+                AND_WHEN( "its subjects are changed and saved" )
+                {
+                    subjectsField( openDialog() )->setPlainText( "billing.>" );
+                    button( openDialog(), "saveProfile" )->click();
+
+                    THEN( "the same tile shows them" )
+                    {
+                        REQUIRE( tileNames( host ) == QStringList{ "prod", "dev" } );
+                        REQUIRE( tileSummary( host, "prod" ).contains( "billing.>" ) );
+                        REQUIRE_FALSE( tileSummary( host, "prod" ).contains( "orders" ) );
+                    }
+                }
+            }
+
+            AND_WHEN( "Delete is clicked on dev, and the question cancelled" )
+            {
+                answerQuestion( QMessageBox::Cancel );
+                tileButton( host, "dev", "delete" )->click();
+
+                THEN( "dev stays" )
+                {
+                    REQUIRE( tileNames( host ) == QStringList{ "prod", "dev" } );
+                }
+            }
+
+            AND_WHEN( "Delete is clicked on dev, and confirmed" )
+            {
+                answerQuestion( QMessageBox::Yes );
+                tileButton( host, "dev", "delete" )->click();
+
+                THEN( "its tile goes, and so does the saved connection" )
+                {
+                    REQUIRE( tileNames( host ) == QStringList{ "prod" } );
+                    REQUIRE( comboBox( openDialog(), "profile" )->findText( "dev" ) < 0 );
+                    logsquirl_plugin_shutdown();
+                    host.menuActions.clear();
+                    host.sidebarTabs.clear();
+                    REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+                    REQUIRE( tileNames( host ) == QStringList{ "prod" } );
+                }
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+}
+
+SCENARIO( "several connections run side by side, each in its own file and tab",
+          "[plugin][server][sidebar]" )
 {
     SKIP_WITHOUT_NATS_SERVER();
 
-    GIVEN( "an initialised plugin and a server" )
+    GIVEN( "an initialised plugin, a server and two saved connections" )
     {
         NatsServer server;
         FakeHost host;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        saveConnection( host, "orders", server.url(), "orders.>\nbilling.* auditors" );
+        saveConnection( host, "metrics", server.url(), "metrics.>" );
 
-        WHEN( "the user starts a session of two subjects, then one of another subject" )
+        WHEN( "both are started from their tiles" )
         {
-            startFromDialog( host, server.url(), "orders.>\nbilling.* auditors" );
-            auto* dialog = openDialog();
-            subjectsField( dialog )->setPlainText( "metrics.>" );
-            button( dialog, "start" )->click();
+            startTile( host, "orders" );
+            startTile( host, "metrics" );
             REQUIRE( host.openedFiles.size() == 2 );
             const auto first = host.openedFiles.at( 0 );
             const auto second = host.openedFiles.at( 1 );
             REQUIRE( waitSubscribed( first ) );
             REQUIRE( waitSubscribed( second ) );
 
-            THEN( "both are listed, each tab follows its own file, and each captures its "
-                  "subjects only" )
+            THEN( "each tab follows its own file, each captures its subjects only, and each "
+                  "tile says it runs, with nothing received or dropped yet" )
             {
                 REQUIRE( first != second );
                 REQUIRE( host.openedFollow == QList<bool>{ true, true } );
-                REQUIRE( sessionList( dialog )->count() == 2 );
-                REQUIRE( sessionList( dialog )->item( 0 )->text().contains(
-                    "orders.>, billing.* (queue auditors)" ) );
-                REQUIRE( sessionList( dialog )->item( 1 )->text().contains( "metrics.>" ) );
                 REQUIRE( readLines( first ).first().contains(
                     "subscribed to orders.>, billing.* (queue auditors)" ) );
+                for ( const auto* name : { "orders", "metrics" } ) {
+                    REQUIRE( waitFor(
+                        [ & ] { return tileDetails( host, name ).startsWith( "running" ); } ) );
+                    const auto details = tileDetails( host, name );
+                    INFO( details.toStdString() );
+                    REQUIRE( numberAfter( details, "received" ) == 0 );
+                    REQUIRE( numberAfter( details, "dropped" ) == 0 );
+                    REQUIRE( details.contains( "connected to " + server.url() ) );
+                    REQUIRE( details.contains(
+                        QFileInfo( name == QStringLiteral( "orders" ) ? first : second )
+                            .fileName() ) );
+                    REQUIRE( tileButton( host, name, "startStop" )->text().contains( "Stop" ) );
+                    REQUIRE_FALSE( tileButton( host, name, "delete" )->isEnabled() );
+                }
+                REQUIRE( sidebarButton( host, "stopAll" )->isEnabled() );
                 {
                     Publisher publisher( server.url() );
                     publisher.publish( "orders.eu", "o" );
@@ -1131,18 +1434,45 @@ SCENARIO( "several sessions run side by side, each in its own file and tab",
                 REQUIRE_FALSE( readLines( second ).join( '\n' ).contains( "orders" ) );
             }
 
-            AND_WHEN( "the user selects the first session and clicks Stop" )
+            AND_WHEN( "messages arrive steadily" )
             {
-                sessionList( dialog )->setCurrentRow( 0 );
-                button( dialog, "stop" )->click();
+                Publisher publisher( server.url() );
+                const bool shown = waitFor(
+                    [ & ] {
+                        for ( int i = 0; i < 20; ++i ) {
+                            publisher.publish( "orders.eu", "x", {}, {}, i == 19 );
+                        }
+                        return numberBefore( tileDetails( host, "orders" ), "msgs/s" ) > 0;
+                    },
+                    5000 );
 
-                THEN( "it stops, and the other runs on" )
+                THEN( "the tile shows the rate and how many it received" )
+                {
+                    REQUIRE( shown );
+                    const auto details = tileDetails( host, "orders" );
+                    INFO( details.toStdString() );
+                    REQUIRE( numberAfter( details, "received" ) > 0 );
+                    REQUIRE( numberAfter( details, "dropped" ) == 0 );
+                    REQUIRE( numberBefore( tileDetails( host, "metrics" ), "msgs/s" ) == 0 );
+                }
+            }
+
+            AND_WHEN( "Stop is clicked on the first" )
+            {
+                startTile( host, "orders" ); // Stop
+
+                THEN( "it stops, its tile says so, and the other runs on" )
                 {
                     REQUIRE( endsStopped( first ) );
                     REQUIRE( host.notifications.last()
                              == "NATS capture of orders.>, billing.* (queue auditors) stopped." );
-                    REQUIRE( sessionList( dialog )->count() == 1 );
-                    REQUIRE( sessionList( dialog )->item( 0 )->text().contains( "metrics.>" ) );
+                    REQUIRE( tileDetails( host, "orders" ).startsWith( "stopped" ) );
+                    REQUIRE(
+                        tileButton( host, "orders", "startStop" )->text().contains( "Start" ) );
+                    REQUIRE( tileButton( host, "orders", "delete" )->isEnabled() );
+                    REQUIRE( waitFor( [ & ] {
+                        return tileDetails( host, "metrics" ).startsWith( "running" );
+                    } ) );
                     {
                         Publisher publisher( server.url() );
                         publisher.publish( "metrics.mem", "still" );
@@ -1155,17 +1485,46 @@ SCENARIO( "several sessions run side by side, each in its own file and tab",
                 }
             }
 
-            AND_WHEN( "the user clicks Stop all" )
+            AND_WHEN( "Stop all is clicked" )
             {
-                button( dialog, "stopAll" )->click();
+                sidebarButton( host, "stopAll" )->click();
 
-                THEN( "both stop, each file ends with its stopped marker" )
+                THEN( "both stop, each file ends with its stopped marker, each tile says so" )
                 {
                     REQUIRE( endsStopped( first ) );
                     REQUIRE( endsStopped( second ) );
-                    REQUIRE( sessionList( dialog )->count() == 0 );
-                    REQUIRE_FALSE( button( dialog, "stop" )->isEnabled() );
-                    REQUIRE_FALSE( button( dialog, "stopAll" )->isEnabled() );
+                    REQUIRE( tileDetails( host, "orders" ).startsWith( "stopped" ) );
+                    REQUIRE( tileDetails( host, "metrics" ).startsWith( "stopped" ) );
+                    REQUIRE_FALSE( sidebarButton( host, "stopAll" )->isEnabled() );
+                }
+            }
+
+            AND_WHEN( "a connection that runs is edited and saved" )
+            {
+                tileButton( host, "metrics", "edit" )->click();
+                subjectsField( openDialog() )->setPlainText( "metrics.cpu" );
+                button( openDialog(), "saveProfile" )->click();
+
+                THEN( "the tile shows the new subjects, and the dialog says the capture runs on "
+                      "with the old ones until started again" )
+                {
+                    REQUIRE( tileSummary( host, "metrics" ).contains( "metrics.cpu" ) );
+                    REQUIRE( statusText( openDialog() ).contains( "runs on" ) );
+                    REQUIRE(
+                        tileButton( host, "metrics", "startStop" )->text().contains( "Stop" ) );
+                }
+            }
+
+            AND_WHEN( "the dialog is asked to delete a connection that runs" )
+            {
+                host.menuActions.first().trigger();
+                chooseProfile( openDialog(), "orders" );
+                button( openDialog(), "deleteProfile" )->click();
+
+                THEN( "it refuses, and the tile stays" )
+                {
+                    REQUIRE( statusText( openDialog() ).contains( "stop it" ) );
+                    REQUIRE( tileNames( host ) == QStringList{ "orders", "metrics" } );
                 }
             }
 
@@ -1197,163 +1556,27 @@ SCENARIO( "several sessions run side by side, each in its own file and tab",
             }
         }
 
-        logsquirl_plugin_shutdown();
-    }
-}
-
-namespace {
-
-/// What the plugin's status bar widget reads.
-QString statusBarText( const FakeHost& host )
-{
-    REQUIRE( host.statusWidgets.size() == 1 );
-    auto* label = qobject_cast<QLabel*>( host.statusWidgets.first() );
-    REQUIRE( label );
-    return label->text();
-}
-
-/// The number before @p word in @p text, whatever the locale groups its
-/// digits with; -1 if there is none.
-qint64 numberBefore( const QString& text, const QString& word )
-{
-    const auto match = QRegularExpression( QStringLiteral( "(\\d[\\d.,' \\x{a0}\\x{202f}]*) " )
-                                           + QRegularExpression::escape( word ) )
-                           .match( text );
-    if ( !match.hasMatch() ) {
-        return -1;
-    }
-    return match.captured( 1 ).remove( QRegularExpression( "\\D" ) ).toLongLong();
-}
-
-} // namespace
-
-SCENARIO( "the plugin has a status bar widget, from init to shutdown", "[plugin][status]" )
-{
-    GIVEN( "a host" )
-    {
-        FakeHost host;
-
-        WHEN( "the plugin is initialised" )
+        WHEN( "a connection drops as a slow consumer" )
         {
-            REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
-
-            THEN( "it registers one status widget, which says that nothing is captured" )
-            {
-                REQUIRE( statusBarText( host ) == "NATS: no capture" );
-            }
-
-            AND_WHEN( "the host's window, which parents the widget, goes before shutdown" )
-            {
-                {
-                    QWidget window;
-                    host.statusWidgets.value( 0 )->setParent( &window );
-                } // deletes its children, the widget too
-
-                THEN( "shutdown neither hands the host the deleted widget nor deletes it again" )
-                {
-                    logsquirl_plugin_shutdown();
-                    REQUIRE( host.unregisteredStatusWidgets.isEmpty() );
-                }
-            }
-
-            AND_WHEN( "the plugin is shut down" )
-            {
-                auto* widget = host.statusWidgets.value( 0 );
-                logsquirl_plugin_shutdown();
-
-                THEN( "it has unregistered the widget" )
-                {
-                    REQUIRE( host.statusWidgets.isEmpty() );
-                    REQUIRE( host.unregisteredStatusWidgets == QList<QWidget*>{ widget } );
-                }
-            }
-
-            logsquirl_plugin_shutdown();
-        }
-    }
-}
-
-SCENARIO( "the status bar shows the running sessions, msgs/s and drops",
-          "[plugin][server][status]" )
-{
-    SKIP_WITHOUT_NATS_SERVER();
-
-    GIVEN( "an initialised plugin and a server" )
-    {
-        NatsServer server;
-        FakeHost host;
-        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
-
-        WHEN( "two sessions are started" )
-        {
-            startFromDialog( host, server.url(), "a" );
-            auto* dialog = openDialog();
-            subjectsField( dialog )->setPlainText( "b" );
-            button( dialog, "start" )->click();
-            REQUIRE( host.openedFiles.size() == 2 );
-            REQUIRE( waitSubscribed( host.openedFiles.at( 0 ) ) );
-            REQUIRE( waitSubscribed( host.openedFiles.at( 1 ) ) );
-
-            THEN( "it says so at once, with nothing received or dropped" )
-            {
-                REQUIRE( numberBefore( statusBarText( host ), "sessions" ) == 2 );
-                REQUIRE( numberBefore( statusBarText( host ), "msgs/s" ) == 0 );
-                REQUIRE( numberBefore( statusBarText( host ), "dropped" ) == 0 );
-            }
-
-            AND_WHEN( "messages arrive steadily" )
-            {
-                Publisher publisher( server.url() );
-                const bool shown = waitFor(
-                    [ & ] {
-                        for ( int i = 0; i < 20; ++i ) {
-                            publisher.publish( i % 2 ? "a" : "b", "x", {}, {}, i == 19 );
-                        }
-                        return numberBefore( statusBarText( host ), "msgs/s" ) > 0;
-                    },
-                    5000 );
-
-                THEN( "it shows the rate the sessions receive" )
-                {
-                    REQUIRE( shown );
-                    INFO( statusBarText( host ).toStdString() );
-                    REQUIRE( numberBefore( statusBarText( host ), "dropped" ) == 0 );
-                }
-            }
-
-            AND_WHEN( "one is stopped, then the other" )
-            {
-                sessionList( dialog )->setCurrentRow( 0 );
-                button( dialog, "stop" )->click();
-
-                THEN( "it counts one, then says that nothing is captured" )
-                {
-                    REQUIRE( statusBarText( host ).contains( "1 session " ) );
-                    button( dialog, "stop" )->click();
-                    REQUIRE( statusBarText( host ) == "NATS: no capture" );
-                }
-            }
-        }
-
-        WHEN( "a session drops as a slow consumer" )
-        {
-            host.menuActions.first().trigger();
+            tileButton( host, "metrics", "edit" )->click();
             spinBox( openDialog(), "pendingMessages" )->setValue( 1 );
-            startFromDialog( host, server.url(), "flood" );
+            button( openDialog(), "saveProfile" )->click();
+            startTile( host, "metrics" );
+            REQUIRE( host.openedFiles.size() == 1 );
             REQUIRE( waitSubscribed( host.openedFiles.first() ) );
             {
                 Publisher publisher( server.url() );
                 const QByteArray payload( 200, 'x' );
                 for ( int i = 0; i < 50000; ++i ) {
-                    publisher.publish( "flood", payload, {}, {}, i == 49999 );
+                    publisher.publish( "metrics.flood", payload, {}, {}, i == 49999 );
                 }
             }
 
-            THEN( "it shows how many were dropped" )
+            THEN( "its tile shows how many were dropped" )
             {
-                REQUIRE(
-                    waitFor( [ & ] { return numberBefore( statusBarText( host ), "dropped" ) > 0; },
-                             10000 ) );
+                REQUIRE( waitFor(
+                    [ & ] { return numberAfter( tileDetails( host, "metrics" ), "dropped" ) > 0; },
+                    10000 ) );
             }
         }
 
@@ -1363,7 +1586,7 @@ SCENARIO( "the status bar shows the running sessions, msgs/s and drops",
 
 SCENARIO( "connections are saved as profiles, without passwords or tokens", "[plugin]" )
 {
-    GIVEN( "the dialog filled in with a user, password and TLS, saved as the profile prod" )
+    GIVEN( "the dialog filled in with a user and TLS, saved as the connection prod" )
     {
         FakeHost host;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
@@ -1372,90 +1595,91 @@ SCENARIO( "connections are saved as profiles, without passwords or tokens", "[pl
         field( dialog, "url" )->setText( "nats://a:4222, nats://b:4222" );
         chooseAuth( dialog, "User and password" );
         field( dialog, "user" )->setText( "alice" );
-        field( dialog, "secret" )->setText( "s3cret-password" );
         checkBox( dialog, "tls" )->setChecked( true );
         field( dialog, "caFile" )->setText( "/etc/nats/ca.pem" );
         field( dialog, "certFile" )->setText( "/etc/nats/client.pem" );
         field( dialog, "keyFile" )->setText( "/etc/nats/client-key.pem" );
         field( dialog, "serverName" )->setText( "nats.example.com" );
-        comboBox( dialog, "profile" )->setEditText( "prod" );
-        button( dialog, "saveProfile" )->click();
+        subjectsField( dialog )->setPlainText( "orders.>" );
+        spinBox( dialog, "maxBinaryBytes" )->setValue( 64 );
+        spinBox( dialog, "pendingMessages" )->setValue( 5000 );
+        spinBox( dialog, "pendingMegabytes" )->setValue( 32 );
+        spinBox( dialog, "maxFileMiB" )->setValue( 9 );
+        saveAs( dialog, "prod" );
 
-        THEN( "the dialog says it is saved, without the password" )
+        THEN( "the dialog says it is saved, without the password, and to start it in the "
+              "sidebar" )
         {
             REQUIRE( statusText( dialog ).contains( "prod" ) );
-            REQUIRE( statusText( dialog ).contains( "saved" ) );
-        }
-
-        THEN( "no file of the plugin's configuration holds the password" )
-        {
-            REQUIRE_FALSE( anyFileContains( host.configDir(), "s3cret-password" ) );
+            REQUIRE( statusText( dialog ).contains( "saved, without the password" ) );
+            REQUIRE( statusText( dialog ).contains( "sidebar" ) );
             REQUIRE( anyFileContains( host.configDir(), "nats.example.com" ) );
         }
 
-        AND_GIVEN( "a second profile, dev, with a token" )
+        AND_GIVEN( "a second connection, dev, with a token" )
         {
             field( dialog, "url" )->setText( "nats://localhost:4222" );
             chooseAuth( dialog, "Token" );
-            field( dialog, "secret" )->setText( "s3cret-token" );
             checkBox( dialog, "tls" )->setChecked( false );
-            comboBox( dialog, "profile" )->setEditText( "dev" );
-            button( dialog, "saveProfile" )->click();
-
-            THEN( "the token is not saved either" )
-            {
-                REQUIRE_FALSE( anyFileContains( host.configDir(), "s3cret-token" ) );
-            }
+            saveAs( dialog, "dev" );
 
             AND_WHEN( "the plugin is initialised again and prod chosen in its dialog" )
             {
                 logsquirl_plugin_shutdown();
                 host.menuActions.clear();
+                host.sidebarTabs.clear();
                 REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
                 host.menuActions.first().trigger();
                 dialog = openDialog();
                 chooseProfile( dialog, "prod" );
 
-                THEN( "its settings are back, the password empty and asked for" )
+                THEN( "its settings are back, and the password is asked for at Start" )
                 {
+                    REQUIRE( tileNames( host ) == QStringList{ "prod", "dev" } );
                     REQUIRE( comboBox( dialog, "profile" )->count() == 2 );
                     REQUIRE( field( dialog, "url" )->text() == "nats://a:4222, nats://b:4222" );
                     REQUIRE( comboBox( dialog, "authMethod" )->currentText()
                              == "User and password" );
                     REQUIRE( field( dialog, "user" )->text() == "alice" );
-                    REQUIRE( field( dialog, "secret" )->text().isEmpty() );
                     REQUIRE( checkBox( dialog, "tls" )->isChecked() );
                     REQUIRE( field( dialog, "caFile" )->text() == "/etc/nats/ca.pem" );
                     REQUIRE( field( dialog, "certFile" )->text() == "/etc/nats/client.pem" );
                     REQUIRE( field( dialog, "keyFile" )->text() == "/etc/nats/client-key.pem" );
                     REQUIRE( field( dialog, "serverName" )->text() == "nats.example.com" );
                     REQUIRE_FALSE( checkBox( dialog, "skipVerify" )->isChecked() );
-                    REQUIRE( statusText( dialog ).contains( "Enter the password" ) );
+                    REQUIRE( subjectsField( dialog )->toPlainText() == "orders.>" );
+                    REQUIRE( spinBox( dialog, "maxBinaryBytes" )->value() == 64 );
+                    REQUIRE( spinBox( dialog, "pendingMessages" )->value() == 5000 );
+                    REQUIRE( spinBox( dialog, "pendingMegabytes" )->value() == 32 );
+                    REQUIRE( spinBox( dialog, "maxFileMiB" )->value() == 9 );
+                    REQUIRE( statusText( dialog ).contains( "password is asked for at Start" ) );
                 }
 
                 AND_WHEN( "dev is chosen" )
                 {
                     chooseProfile( dialog, "dev" );
 
-                    THEN( "its settings are back, the token asked for" )
+                    THEN( "its settings are back, the token asked for at Start" )
                     {
                         REQUIRE( field( dialog, "url" )->text() == "nats://localhost:4222" );
                         REQUIRE( comboBox( dialog, "authMethod" )->currentText() == "Token" );
-                        REQUIRE( field( dialog, "secret" )->text().isEmpty() );
                         REQUIRE_FALSE( checkBox( dialog, "tls" )->isChecked() );
-                        REQUIRE( statusText( dialog ).contains( "Enter the token" ) );
+                        REQUIRE( statusText( dialog ).contains( "token is asked for at Start" ) );
                     }
                 }
 
-                AND_WHEN( "prod is deleted" )
+                AND_WHEN( "prod is deleted in the dialog" )
                 {
                     button( dialog, "deleteProfile" )->click();
 
-                    THEN( "only dev is left, also after the plugin is initialised again" )
+                    THEN( "only dev is left, in the dialog and the sidebar, also after the "
+                          "plugin is initialised again" )
                     {
                         REQUIRE( comboBox( dialog, "profile" )->findText( "prod" ) < 0 );
+                        REQUIRE( tileNames( host ) == QStringList{ "dev" } );
                         logsquirl_plugin_shutdown();
                         host.menuActions.clear();
+                        host.sidebarTabs.clear();
                         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
                         host.menuActions.first().trigger();
                         auto* again = openDialog();
@@ -1469,12 +1693,13 @@ SCENARIO( "connections are saved as profiles, without passwords or tokens", "[pl
         logsquirl_plugin_shutdown();
     }
 
-    GIVEN( "the dialog without a profile name" )
+    GIVEN( "the dialog without a connection name" )
     {
         FakeHost host;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
         auto* dialog = openDialog();
+        subjectsField( dialog )->setPlainText( "orders.>" );
 
         WHEN( "Save is clicked" )
         {
@@ -1483,15 +1708,15 @@ SCENARIO( "connections are saved as profiles, without passwords or tokens", "[pl
             THEN( "nothing is saved, and the dialog asks for a name" )
             {
                 REQUIRE( comboBox( dialog, "profile" )->count() == 0 );
+                REQUIRE( tileNames( host ).isEmpty() );
                 REQUIRE( statusText( dialog ).contains( "name" ) );
             }
         }
 
-        WHEN( "a URL with a password in it is saved as a profile" )
+        WHEN( "a URL with a password in it is saved as a connection" )
         {
             field( dialog, "url" )->setText( "nats://a:4222, nats://bob:s3cret-url@b:4222" );
-            comboBox( dialog, "profile" )->setEditText( "url" );
-            button( dialog, "saveProfile" )->click();
+            saveAs( dialog, "url" );
 
             THEN( "nothing is saved, and the dialog says to use the authentication fields" )
             {

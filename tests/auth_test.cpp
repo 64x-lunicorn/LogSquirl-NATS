@@ -572,3 +572,47 @@ SCENARIO( "a session connects to one of several server URLs", "[server][auth]" )
         }
     }
 }
+
+SCENARIO( "a password in a session's URL is never written to its file or its errors",
+          "[server][auth]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a server that requires the user alice with the password s3cret" )
+    {
+        auto server
+            = ConfiguredServer::withText( "authorization { user: alice, password: s3cret }\n" );
+
+        WHEN( "a session starts on a URL with a wrong password in it" )
+        {
+            Run run(
+                configFor( QString( server.url() ).replace( "nats://", "nats://alice:wr0ng-pw@" ),
+                           "auth.>" ) );
+
+            THEN( "it fails, and neither its error nor its file shows the password" )
+            {
+                REQUIRE( run.finished );
+                const auto everything
+                    = run.error() + '\n' + readLines( run.session.filePath() ).join( '\n' );
+                INFO( everything.toStdString() );
+                REQUIRE( everything.contains( "connection to nats://alice:***@" ) );
+                REQUIRE_FALSE( everything.contains( "wr0ng-pw" ) );
+            }
+        }
+
+        WHEN( "a session starts on a URL with the right password in it" )
+        {
+            Run run( configFor(
+                QString( server.url() ).replace( "nats://", "nats://alice:s3cret@" ), "auth.>" ) );
+
+            THEN( "it runs, and its connected marker does not show the password" )
+            {
+                requireSubscribed( run );
+                const auto lines = readLines( run.session.filePath() ).join( '\n' );
+                INFO( lines.toStdString() );
+                REQUIRE( lines.contains( "connected to nats://alice:***@" ) );
+                REQUIRE_FALSE( lines.contains( "s3cret" ) );
+            }
+        }
+    }
+}

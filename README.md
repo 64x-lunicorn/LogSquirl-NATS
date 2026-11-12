@@ -43,9 +43,9 @@ already are.
 
 | Less setup | More signal |
 | :--- | :--- |
-| **Every capture its own tab.** Each Start opens a followed LogSquirl tab; run as many sessions side by side as you like. | **One message, one line.** Timestamp, subject, reply subject, size, headers and payload, so a regex finds a message and the line shows all of it. |
-| **Saved connections.** Server URLs, authentication and TLS saved as named profiles — never a password or token. | **Columns in the Table View.** A Log Format ships with the plugin: *timestamp, subject, reply, size, body*. |
-| **Several subjects per session.** Wildcards, queue groups, and a warning when two subjects overlap. | **Nothing dropped silently.** A `dropped=` line marks every gap, and the status bar counts them. |
+| **Every capture its own tab.** Each Start opens a followed LogSquirl tab; run as many connections side by side as you like. | **One message, one line.** Timestamp, subject, reply subject, size, headers and payload, so a regex finds a message and the line shows all of it. |
+| **Saved connections, one tile each.** Server URLs, authentication, TLS and subjects saved by name, started and watched from the NATS sidebar tab — never a password or token saved. | **Columns in the Table View.** A Log Format ships with the plugin: *timestamp, subject, reply, size, body*. |
+| **Several subjects per session.** Wildcards, queue groups, and a warning when two subjects overlap. | **Nothing dropped silently.** A `dropped=` line marks every gap, and the connection's tile counts them. |
 | **Nothing to install.** nats.c and OpenSSL are linked in: no NATS CLI, no system OpenSSL. | **Bounded files.** A capture goes on in a new file and tab at a size limit you choose. |
 
 ## Install
@@ -89,35 +89,38 @@ After installing, restart LogSquirl or re-scan via *Plugins → Manage Plugins�
 
 ## Usage
 
-<!-- screenshot: docs/images/dialog.png — the NATS Monitor dialog with a
-     profile loaded, two subjects (one with a queue group), TLS on, and two
-     sessions in the Running list. -->
+<!-- screenshot: docs/images/sidebar.png — the NATS sidebar tab with two
+     tiles: one running (state, msgs/s, received, dropped, server, file),
+     one stopped. -->
 
-> **Screenshot pending:** the NATS Monitor dialog. The screenshots of this
+> **Screenshot pending:** the NATS sidebar tab. The screenshots of this
 > README are taken when the plugin is first tried in LogSquirl 26.12.
 
 1. **Enable the plugin** in *Plugins → Manage Plugins…* — check
-   "NATS Monitor" and click OK.
+   "NATS Monitor" and click OK. The sidebar gets a tab **NATS**.
 
-2. **Open the dialog** with *Plugins → NATS Monitor…*. It is not modal: keep
-   it open beside the tabs.
+2. **New connection…** in the tab opens the connection dialog (so does
+   *Plugins → NATS Monitor…*). It is not modal: keep it open beside the
+   tabs.
+
+   <!-- screenshot: docs/images/dialog.png — the connection dialog with a
+        connection loaded, two subjects (one with a queue group) and TLS on. -->
+
+   > **Screenshot pending:** the connection dialog.
 
 3. **Connect.**
+   - **Name** — what the connection is called on its tile.
    - **Server** — `nats://localhost:4222` by default. Several URLs,
      comma-separated, are the seeds of a cluster. A `tls://` URL connects
      with TLS.
    - **Authentication** — *No credentials*, *User and password*, *Token*,
      *Credentials file (.creds)* or *NKey seed file*. A password or token is
-     entered in the dialog for each Start and never saved; a `.creds` file is
-     the way to keep credentials without typing them.
+     asked for each time the connection is started, and never saved; a
+     `.creds` file is the way to keep credentials without typing them.
    - **TLS** — check *Use TLS* (or use a `tls://` URL) to set the CA file, a
      client certificate and its key, and the server name the certificate
      must be for, if not the URL's host. *Skip the verification of the
      server's certificate* accepts any certificate: for testing only.
-   - **Profile** — enter a name and **Save** to keep these settings; choose a
-     profile from the list to fill them in again, **Delete** to remove it.
-     Profiles are saved in `nats.ini` in the plugin's configuration
-     directory, without passwords or tokens.
 
 4. **Subjects** — one a line, with the wildcards `*` (one token) and `>`
    (the rest of the subject). A word after a subject is a queue group:
@@ -141,32 +144,37 @@ After installing, restart LogSquirl or re-scan via *Plugins → Manage Plugins�
      subject before it drops as a slow consumer (1,000,000 and 512 MiB).
    - **New file at** — the size, in MiB, at which the capture goes on in a
      new file, opened in a new tab and noted in LogSquirl's log (256 MiB;
-     *No limit* turns it off). A message line is never split. Remembered
-     between sessions.
+     *No limit* turns it off). A message line is never split. A new
+     connection proposes the last one saved.
 
-6. **▶ Start** — connects, subscribes, and opens the capture in a new tab in
-   follow mode. Every Start adds a session beside those running, with its own
-   connection, file and tab; the settings stay editable for the next one.
-   The status line below shows each session's connection events and, when a
-   connection fails, why, in words you can act on (the server refused the
-   password, the server's certificate is not trusted, …).
+6. **Save** — the connection gets a tile in the NATS tab, or its tile is
+   updated. Choose a saved connection in the *Name* list to change it,
+   **Delete** to remove it. Connections are saved in `nats.ini` in the
+   plugin's configuration directory, without passwords or tokens.
 
-7. **■ Stop** stops the session selected in *Running*, **Stop all** every
-   one. The tabs keep what was captured.
+7. **The tiles.** Each saved connection is a tile, showing its server, how
+   it logs in, whether it uses TLS, and its subjects.
+   - **▶ Start** connects, subscribes and opens the capture in a new tab in
+     follow mode; it asks for the password or token first, if the
+     connection uses one. Several tiles can run at a time, each with its
+     own connection, file and tab.
+   - While it runs, the tile shows its state (*connecting*, *running*),
+     the messages it receives a second, how many it received and dropped,
+     the server it is connected to, and its file: name, size, and which
+     file it is after a rotation. The dropped count is also in the file, a
+     `dropped=` line where each gap is.
+   - **■ Stop** stops it; the tab keeps what was captured, and the tile
+     what it counted. **■ Stop all** at the top stops every tile.
+   - A connection that fails says why on its tile, in words you can act on
+     (the server refused the password, the server's certificate is not
+     trusted, …), and in a notification.
+   - **Edit…** opens the dialog with the connection, **Delete** removes it
+     (after asking; not while it runs).
 
    <!-- screenshot: docs/images/capture-tab.png — a followed capture tab with
         live messages, headers and a highlighter on one subject. -->
 
    > **Screenshot pending:** a capture tab following live traffic.
-
-8. **The status bar** shows what runs:
-   `NATS: 2 sessions · 1,234 msgs/s · 5 dropped`, or `NATS: no capture`. The
-   dropped count is that of the running sessions; their files mark where.
-
-   <!-- screenshot: docs/images/status-widget.png — LogSquirl's status bar
-        with the NATS widget during a capture. -->
-
-   > **Screenshot pending:** the status bar widget.
 
 **Where the files are.** A capture is written to
 `nats_<subjects>.log` (then `nats_<subjects>.2.log`, … after the size
@@ -175,7 +183,7 @@ while LogSquirl runs, also after Stop, and are removed when it quits; copy
 one elsewhere to keep it.
 
 *Plugins → Manage Plugins… → Configure* has no settings yet: everything is in
-the dialog.
+the NATS tab and its dialog.
 
 ### Screenshots still to take
 
@@ -184,9 +192,9 @@ until then each has a marked placeholder above or below:
 
 | File | Shows |
 |------|-------|
-| `docs/images/dialog.png` | The dialog: a profile loaded, two subjects (one with a queue group), TLS on, two sessions running |
+| `docs/images/sidebar.png` | The NATS sidebar tab: two tiles, one running with its details, one stopped |
+| `docs/images/dialog.png` | The connection dialog: a connection loaded, two subjects (one with a queue group), TLS on |
 | `docs/images/capture-tab.png` | A followed capture tab with live messages, headers and a highlighter |
-| `docs/images/status-widget.png` | The status bar widget during a capture |
 | `docs/images/table-view.png` | The Table View with the plugin's columns |
 
 ## Line Format
@@ -314,24 +322,27 @@ for the options, the test seams and the benchmark.
 graph TD
     subgraph LogSquirl Host
         H[MainWindow]
-        SB[Status bar]
+        SBT[Sidebar]
     end
 
     subgraph Plugin — C ABI Boundary
         P[plugin.cpp<br/>get_info / init /<br/>shutdown / configure]
-        D[ConnectionDialog<br/>profiles, subjects, limits,<br/>running sessions]
-        SW[StatusWidget<br/>sessions · msgs/s · dropped]
+        T[SidebarWidget<br/>one ConnectionTile<br/>per saved connection]
+        D[ConnectionDialog<br/>edits and saves<br/>connections]
+        SS[Sessions<br/>one per connection]
         S1[NatsSession #1<br/>orders.>]
         S2[NatsSession #2<br/>jobs.* workers]
     end
 
     H -- "register_menu_action<br/>Plugins → NATS Monitor…" --> P
-    P -- creates --> D
-    P -- register_status_widget --> SW
-    SW --> SB
-    SW -- totals --> D
-    D -- starts --> S1
-    D -- starts --> S2
+    P -- "register_sidebar_tab NATS" --> T
+    T --> SBT
+    T -- "New connection… / Edit" --> D
+    D -- "saves nats.ini" --> T
+    T -- "Start / Stop" --> SS
+    SS -- state, counts --> T
+    SS -- starts --> S1
+    SS -- starts --> S2
     S1 -- writes --> F1[nats_orders._.log]
     S2 -- writes --> F2[nats_jobs._.log]
     F1 -- open_file follow=1 --> H
@@ -343,18 +354,20 @@ graph TD
 ```mermaid
 sequenceDiagram
     participant User
-    participant D as ConnectionDialog
+    participant T as Tile (sidebar)
+    participant SS as Sessions
     participant S as NatsSession
     participant W as Writer thread
     participant N as nats.c threads
     participant F as Log file
     participant LS as LogSquirl Tab
 
-    User->>D: Click Start
-    D->>S: start()
+    User->>T: Click Start (password asked if needed)
+    T->>SS: start(profile)
+    SS->>S: start()
     S->>F: create file
     S->>W: start
-    D-->>LS: open_file(path, follow=1)
+    SS-->>LS: open_file(path, follow=1)
     W->>N: connect, subscribe
     W->>F: connected marker
     loop Streaming
@@ -363,8 +376,9 @@ sequenceDiagram
         W->>F: write batch + flush
         LS->>F: tail/follow reads
     end
-    User->>D: Click Stop
-    D->>S: stop()
+    User->>T: Click Stop
+    T->>SS: stop(name)
+    SS->>S: stop()
     S->>W: drain subscriptions, close
     W->>F: last lines + stopped marker
     Note over LS: Tab stays open with captured output
@@ -374,7 +388,7 @@ sequenceDiagram
 
 | Decision | Rationale |
 |----------|-----------|
-| **Plugin type = UI** | Several sessions, each with its own tab, a dialog and a status widget; as LogSquirl-Serial. |
+| **Plugin type = UI** | A sidebar tab with a tile per saved connection, a dialog for its settings, and a tab per capture; as LogSquirl-Serial and LogSquirl-tcpdump. |
 | **open_file() instead of push_line()** | Each session writes its own file, which the host follows: LogSquirl's indexing of large growing files does the heavy lifting, and the capture survives Stop. |
 | **nats.c, linked in statically** | The official C client: headers, NKeys and `.creds`, TLS, and JetStream for replay; no CLI to install. |
 | **OpenSSL built by the plugin** | Static and the same on every platform, no system OpenSSL; [ADR 1](docs/adr/0001-static-openssl-built-by-the-plugin.md). |
@@ -413,7 +427,10 @@ LogSquirl-NATS/
 │   └── logsquirl_plugin_api.h  # Vendored SDK header (MIT license)
 ├── src/
 │   ├── plugin.h, plugin.cpp    # C ABI entry points, global state
-│   ├── connectiondialog.*      # The dialog: connection, subjects, sessions
+│   ├── connectiondialog.*      # The dialog: a connection's settings, saved by name
+│   ├── sidebarwidget.*         # The NATS sidebar tab: a tile per saved connection
+│   ├── connectiontile.*        # One tile: plain, knows nothing of NATS
+│   ├── sessions.*              # The captures, one session per connection
 │   ├── natssession.*           # A capture: connection, subscriptions, queue, writer
 │   ├── natsoptions.*           # Settings → nats.c options; failures in words
 │   ├── authmethods.h           # The authentication methods, one table
@@ -421,7 +438,6 @@ LogSquirl-NATS/
 │   ├── profiles.*              # Saved connection profiles
 │   ├── subjects.*              # Subjects as entered, overlap check
 │   ├── lineformat.*            # One message → one line
-│   ├── statuswidget.*          # The status bar widget
 │   └── tempdirs.*              # Temporary directories per process
 ├── tests/                      # Catch2 tests, most against a real nats-server
 │   ├── certs/, auth/           # TLS and NATS credential fixtures

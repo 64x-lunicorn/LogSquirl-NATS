@@ -4,7 +4,7 @@ A LogSquirl plugin that subscribes to NATS subjects and writes every message as
 one line to a growing file that LogSquirl follows, so live traffic can be
 searched, filtered and highlighted like any log — also at high message rates.
 
-Status: 0.1.0, live capture (#1–#8), is implemented and not yet released;
+Status: 0.1.0, live capture (#1–#8, #20), is implemented and not yet released;
 JetStream replay (0.2.0) is next. How the code works:
 [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md#architecture). Tickets: see
 [Tickets](#tickets).
@@ -20,6 +20,8 @@ JetStream replay (0.2.0) is next. How the code works:
 | Saved connections | **Profiles in `nats.ini`** (URLs, auth method, user name, file paths, TLS settings); **passwords and tokens never saved**, entered at Start (#6) | Nothing secret in a plain-text file; a `.creds` file is the way to keep credentials without typing them. A keychain is not needed for v1. |
 | Overlapping subjects in a session | **One line per subscription**, no deduplication; the dialog warns and, when one subject covers the other, suggests dropping the narrower one (#7) | nats.c delivers a matching message once per subscription (checked by a test against the pinned nats.c); deduplicating would hide what the server actually delivers. |
 | Queue groups | **Off by default**, per subject (#7) | A session in a queue group takes messages away from the group's other members. |
+| Where the plugin lives in LogSquirl | **A sidebar tab "NATS" with one tile (card) per saved connection**; the connection settings stay in a **dialog**, opened from the tab (*New connection…*, a tile's *Edit*) and from *Plugins → NATS Monitor…*; no status bar widget (#20) | The maintainer chose it after trying the status bar widget in the 26.12 beta. A tile shows what a connection is and, while it runs, what it does (state, msgs/s, received, dropped, server, file), so one glance covers every connection; Start / Stop is on the tile, several run at a time, one session each. The settings (profile, URLs, auth, TLS, subjects, limits) are too many for a sidebar's width, so they stay a dialog, as tcpdump's *Start live capture…* opens one; Serial's few settings fit into its tab. Both Serial and tcpdump keep a menu entry next to their tab, so the plugin does too. The tile widget (`ConnectionTile`) knows nothing of NATS, so that Serial and tcpdump can take the same pattern later. |
+| What a connection saves | **Everything but the secret**: URLs, auth method, user, file paths, TLS, subjects and limits (#20) | A tile starts from its saved connection alone; the password or token is asked for at Start. |
 
 ## Architecture
 
@@ -27,15 +29,17 @@ Modelled on LogSquirl-Serial (`src/serialprocess.*`, `src/portwidget.*`,
 `src/tempdirs.*`, `guarded()` in `src/plugin.cpp`):
 
 ```
-Plugins ▸ NATS Monitor…               (register_menu_action)
-        │
+Sidebar tab "NATS"                    (register_sidebar_tab) SidebarWidget:
+        │                             one ConnectionTile per saved connection;
+        │                             New connection… / Edit ──▶ ConnectionDialog
+        │                             (QDialog, also Plugins ▸ NATS Monitor…):
+        │                             URL(s), auth, TLS, subjects (each with an
+        │                             optional queue group), limits; Save
+        │ Start / Stop on a tile
         ▼
-ConnectionDialog (QDialog)            server URL(s), auth, subjects (each with an
-        │                             optional queue group), size limit; Start adds
-        │                             a session, Stop / Stop all; running sessions listed
-        │ ──▶ StatusWidget            status bar (register_status_widget): sessions,
-        │                             msgs/s, dropped
-        ▼  one per Start, side by side
+Sessions                              one session per connection, side by side;
+        │                             state and counts for the tiles
+        ▼
 NatsSession                           one natsConnection, N natsSubscriptions
   ├─ nats.c delivery thread(s)        message callback: format line, enqueue — never block
   ├─ queue (bounded, mutex + condvar)
@@ -55,7 +59,7 @@ temp file  logsquirl-nats-<pid>-XXXXXX/nats_<subjects>.log  → open_file(follow
   error `NATS_SLOW_CONSUMER`, read `natsSubscription_GetDropped`, and write a
   marker line (`… $NATS-MONITOR - 28 dropped=1234 (slow consumer)`, the drops
   since the last marker) so gaps are visible in the log itself, plus a
-  counter in the status widget (#7).
+  counter on the connection's tile (#7, #20).
   If the plugin's own queue overflows, it drops too and counts the same way.
   nats.c reports how many it dropped, not where: a slow-consumer marker may
   land up to the pending-message limit earlier in the file than the actual
@@ -66,13 +70,14 @@ temp file  logsquirl-nats-<pid>-XXXXXX/nats_<subjects>.log  → open_file(follow
   or more subjects, each optionally in a queue group, and writes all of them
   into its one file. Overlapping subjects (`orders.>` and `orders.eu.*`)
   give one line per subscription, as the server delivers them; the dialog
-  warns. Each Start adds a session beside those running, with its own
-  connection, file and tab, as Serial's sessions per port; shutdown stops
-  them all. The status widget shows how many run, the msgs/s they receive
-  and how many the running sessions dropped.
+  warns. Each saved connection runs one session at a time, beside those
+  of the others, with its own connection, file and tab, as Serial's
+  sessions per port; shutdown stops them all. Each tile shows the msgs/s
+  its session receives, and how many it received and dropped (#20).
 - **Limits.** Size limit with rotation, as Serial does (#33 there): set in
-  the dialog in MiB, default 256 MiB, 0 = no limit, remembered between
-  sessions (`nats.ini` in the plugin's configuration directory). Before a
+  the dialog in MiB, default 256 MiB, 0 = no limit, saved with the
+  connection (`nats.ini` in the plugin's configuration directory); a new
+  connection proposes the last one saved. Before a
   line that would take the file over the limit, the writer goes on in the
   next file, so a message line is never split: `nats_<subjects>.log`,
   `nats_<subjects>.2.log`, … Each opens in a new followed tab and is logged to
@@ -120,7 +125,7 @@ truth, this plan only gives the overview:
 [milestone 0.1.0](https://github.com/64x-lunicorn/LogSquirl-NATS/milestone/1)
 (live capture: #1 scaffold, #2 subscribe and line format, #3 Log Format,
 #4 drops, #5 rotation, #6 auth and TLS, #7 several subjects and sessions,
-#8 docs) and
+#8 docs, #20 sidebar tab) and
 [milestone 0.2.0](https://github.com/64x-lunicorn/LogSquirl-NATS/milestone/2)
 (JetStream: #9 replay, #10 consumer cleanup and permissions).
 
