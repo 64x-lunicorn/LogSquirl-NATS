@@ -14,13 +14,16 @@ decisions behind it are in [PLAN.md](PLAN.md); what the user sees is in the
 
 ```
 plugin.cpp            entry points (logsquirl_plugin_*), each through guarded()
-  │  registers        Plugins → NATS Monitor…  (register_menu_action)
-  ├─ ConnectionDialog the one dialog: settings, profiles, Start / Stop / Stop all
-  │    └─ NatsSession × N   one per Start, children of the dialog
-  │         ├─ nats.c threads   callbacks: format a line, enqueue
-  │         ├─ queue            bounded, mutex + condition variable
-  │         └─ writer thread    connects, writes in batches, rotates
-  └─ StatusWidget     register_status_widget; polls ConnectionDialog::totals()
+  │  registers        the sidebar tab "NATS" (register_sidebar_tab) and
+  │                   Plugins → NATS Monitor…  (register_menu_action)
+  ├─ SidebarWidget    the tab: New connection…, Stop all, a tile per saved connection
+  │    └─ ConnectionTile × N  plain card: summary, details, Start/Stop, Edit, Delete
+  ├─ ConnectionDialog edits and saves connections (profiles.h); opened from the tab
+  └─ Sessions         one session per connection; state and counts for the tiles
+       └─ NatsSession × N   children of Sessions
+            ├─ nats.c threads   callbacks: format a line, enqueue
+            ├─ queue            bounded, mutex + condition variable
+            └─ writer thread    connects, writes in batches, rotates
 ```
 
 ### The plugin's lifetime
@@ -30,18 +33,21 @@ may leave one or a host callback (the host is C), so their work runs through
 `guarded()`, which logs a failure to the host log instead.
 
 - **init** removes the temporary directories of LogSquirl processes that no
-  longer run, creates the dialog (parentless: it must not die with a main
-  window), registers the menu action and the status widget, and logs which
-  nats.c and OpenSSL it carries. A failure is undone by shutdown, and init
-  returns 1.
-- **shutdown** unregisters and deletes the status widget (before the dialog,
-  whose totals it reads), stops every session (`stopAll()`: files flushed
-  and kept for the tabs) and deletes the dialog. Only when LogSquirl quits
+  longer run, creates `Sessions`, the dialog (parentless: it must not die
+  with a main window) and the sidebar tab, connects the tab's requests (new,
+  edit, delete) to the dialog and the dialog's saves back to the tab,
+  registers the menu action and the tab, and logs which nats.c and OpenSSL
+  it carries. A failure is undone by shutdown, and init returns 1.
+- **shutdown** unregisters and deletes the sidebar tab (before the sessions
+  it shows; `PluginState` holds it in a `QPointer`, since the host parents
+  it and a host window deleted first takes it along), deletes the dialog,
+  stops every session (`Sessions::stopAll()`: files flushed and kept for
+  the tabs) and deletes `Sessions`. Only when LogSquirl quits
   (it saw `aboutToQuit`), not when the plugin is disabled or updated with
   its tabs still open, does it remove this process's temporary directories.
   Last, `nats_CloseAndWait()` (5 s) waits for nats.c's threads, which run
   code of this library, to end before the host unloads it.
-- **configure** has no settings yet; everything is in the dialog.
+- **configure** has no settings yet; everything is in the tab and its dialog.
 
 ### Threads
 
@@ -50,7 +56,7 @@ kinds of thread:
 
 | Thread | What it does |
 |---|---|
-| GUI thread | The dialog, the status widget and the `NatsSession` objects. Every signal of a session is emitted here, through queued calls. |
+| GUI thread | The tab, the dialog, `Sessions` and the `NatsSession` objects. Every signal of a session is emitted here, through queued calls. |
 | The session's writer thread (`std::thread`, one per session) | Connects and subscribes (so `start()` never waits for the network), owns the file, writes, rotates, and on stop drains and closes. |
 | nats.c's threads | Call the message callback of each subscription and the connection callbacks (disconnected, reconnected, closed, async error). They only format the line, with the pure `formatLine()` ([`src/lineformat.h`](../src/lineformat.h)), and enqueue it: they never touch the file or the GUI, and never wait for the writer. |
 
@@ -83,7 +89,7 @@ requested or the connection is closed for good. It then swaps the whole
 queue out, so it never holds the mutex while writing, writes the batch and
 flushes once: LogSquirl, following the file, sees whole lines. Before each
 line it checks the size limit (below). A write or flush that fails (disk
-full, volume gone) is reported once, in the status line and as a
+full, volume gone) is reported once, on the tile and as a
 notification, and later lines are not written.
 
 **Stopping.** `stop()` asks the writer to end and waits for it. The writer
@@ -97,8 +103,8 @@ file. Nothing that reached the session before `stop()` is lost uncounted.
 
 **Temporary files.** Each session writes into its own directory
 `logsquirl-nats-<pid>-XXXXXX` in the system's temporary directory
-([`src/tempdirs.h`](../src/tempdirs.h)), named `nats_<subjects>.log`. The
-dialog calls `preserveFile()` when a session ends, so the tab keeps its
+([`src/tempdirs.h`](../src/tempdirs.h)), named `nats_<subjects>.log`.
+`Sessions` calls `preserveFile()` when a session ends, so the tab keeps its
 file; the plugin removes its directories when LogSquirl quits, and those of
 processes that no longer run at the next init.
 
@@ -109,7 +115,7 @@ processes that no longer run at the next init.
 rotates by itself, between two lines: before a line that would take the
 file over the limit it opens the next one (`NewOnly`, so it never
 truncates an earlier file), closes the full one and reports the path with
-`NatsSession::fileRotated()`, on which the dialog opens a new followed tab
+`NatsSession::fileRotated()`, on which `Sessions` opens a new followed tab
 and writes a line to the host log (not a notification, as in
 LogSquirl-Serial: a busy capture rotates often). `filePath()` follows the
 rotation. A session started again goes on in its last file, with what that
@@ -118,12 +124,12 @@ of the server tests) use limits of a few hundred bytes, and make a rotation
 fail by putting a directory where the next file goes, which works on every
 platform and also for root.
 
-The dialog saves the size limit on Start, to
-`nats.ini` (`capture/maxFileMiB`) in the directory the host's
-`get_config_dir` gives (next to the connection profiles); the dialog reads it when it is created. The tests'
+The size limit is saved with the connection (its profile, below). Save
+also writes it to `nats.ini` (`capture/maxFileMiB`) in the directory the
+host's `get_config_dir` gives, and a new connection proposes it. The tests'
 `FakeHost` gives each host a configuration directory of its own.
 
-### Several subjects, several sessions, the status widget
+### Several subjects, several sessions
 
 `SessionConfig::subscriptions` lists what a session subscribes to: one or
 more `Subscription`s, a subject and an optional queue group (empty, the
@@ -148,27 +154,53 @@ overlap (some subject matches both); when one covers the other (every
 subject the narrower matches, the wider matches too) it suggests dropping
 the narrower one.
 
-**Each Start adds a session** beside those running, with its own
-connection, file and tab, as LogSquirl-Serial does per port. The dialog
-lists them; Stop stops the one selected, Stop all every one, and shutdown
-stops them all. Its settings stay editable while sessions run, for the
-next. The status line prefixes each event with its session's subjects.
+**One session per saved connection.** `Sessions`
+([`src/sessions.h`](../src/sessions.h)) starts a session for a connection's
+profile, beside those of the other connections, with its own connection,
+file and tab, as LogSquirl-Serial does per port; shutdown stops them all.
+It keeps what the tile shows: the state (`SessionState`: connecting,
+running, failed, stopped), the last connection event or why it failed, the
+server it is connected to, its file and how many files it rotated into,
+and the counts. That stays after the session ended, until the connection
+is started again.
 
-**The status widget** ([`src/statuswidget.h`](../src/statuswidget.h)) is
-registered with `register_status_widget` at init and unregistered (then
-deleted, before the dialog) at shutdown; `PluginState` holds it in a
-`QPointer`, since the host parents it and a host window deleted first
-takes it along. It reads
-`NATS: 2 sessions · 1,234 msgs/s · 5 dropped`, or `NATS: no capture`: it
-samples `ConnectionDialog::totals()` once a second for the rate, and
-updates the session count at once when a session starts or ends. The
-dropped count is that of the running sessions; their files mark where.
+The tests (`[subjects]`) are at the main seam: two subjects and the overlap
+in `natssession_test.cpp` (and a queue group shared with another member);
+several connections and the overlap warning through the tab and the dialog
+in `plugin_test.cpp`.
 
-The tests (`[subjects]` and `[status]`) are at the main seam: two subjects
-and the overlap in `natssession_test.cpp` (and a queue group shared with
-another member), several sessions, the overlap warning and the widget
-through the dialog in `plugin_test.cpp`; `FakeHost` records the status
-widgets registered.
+### The sidebar tab and its tiles
+
+The tab "NATS" ([`src/sidebarwidget.h`](../src/sidebarwidget.h)) is
+registered with `register_sidebar_tab` at init and unregistered at
+shutdown. It holds *New connection…*, *Stop all*, and one tile per saved
+connection in the order they were saved, rebuilt when the dialog saves or
+deletes one (`ConnectionDialog::profilesChanged`).
+
+- **The tile** ([`src/connectiontile.h`](../src/connectiontile.h)) is a
+  plain `QFrame` that knows nothing of NATS: a title, a summary, details,
+  Start / Stop, Edit and Delete, with a signal for each button. The tab sets
+  its texts. It is meant for Serial and tcpdump too.
+- **Summary**: the URLs, the authentication method, TLS on or off (as
+  `usesTls()`), the subjects.
+- **Details**, polled once a second and updated at once on a state change
+  (`Sessions::changed`): while running, `running · <n> msgs/s` (the rate
+  over the last second), `received · dropped`, the file's name, size and
+  number after a rotation, and `connected to <server>`; while connecting,
+  the last event; after a failure, `failed: <why>`; after Stop, what it
+  captured.
+- **Start** reads the profile from `nats.ini` and, when its method takes a
+  password or token, asks for it (`QInputDialog`, password echo); it is
+  never saved, and an empty answer starts nothing. **Delete** asks
+  (`QMessageBox`) and is disabled while the connection runs; the dialog
+  refuses to delete a running connection too.
+
+The tests (`[sidebar]`) drive the tab through `FakeHost`, which records the
+sidebar tabs registered and unregistered: tiles created, updated and
+deleted, Start and Stop, the details of a running tile, two tiles at once,
+and drops on a tile. They answer the password prompt and the delete
+question by finding the modal dialog from a timer (`onNextModal()` in
+`plugin_test.cpp`).
 
 ### The Log Format
 
@@ -197,7 +229,7 @@ explains a failed connect in words the user can act on ("the server
 refused the user name or password", "the server's certificate is not
 trusted: set the CA file …"), followed by nats.c's own text. The session
 writes that into its `connection to … failed:` marker and reports it, so
-the dialog shows it in its status line.
+the connection's tile shows it (`failed: …`) and a notification says it.
 
 - What each method is (its name in a profile, its label in the dialog,
   whether it takes a user, a secret or a file, what the server refusing it
@@ -223,7 +255,7 @@ the dialog shows it in its status line.
   OpenSSL version: after updating OpenSSL, run the `[auth]` tests, which
   fail when a pattern no longer matches.
 - A URL may hold credentials (`nats://bob:s3cret@host`). Wherever a URL is
-  shown or written (the status line, the host log and notifications, the
+  shown or written (the tile, the host log and notifications, the
   capture file's markers, including nats.c's connected URL) it goes
   through `redactUrls()`, which replaces the password, or a user
   information without one (a token), by `***`.
@@ -231,17 +263,19 @@ the dialog shows it in its status line.
   options hold it; `NatsSession` keeps its own, which `start()` needs
   again.
 
-The dialog saves the connection settings as named **profiles**
+The dialog saves each connection as a named **profile**
 ([`src/profiles.h`](../src/profiles.h)) in `nats.ini`, array `profiles`:
-URLs, method, user name, file paths and the TLS settings. Never a password
-or token: those are entered at Start; a URL with credentials in it is not
-saved.
+URLs, method, user name, file paths, the TLS settings, and in the group
+`capture` the subjects and limits (a profile saved without them gets the
+defaults). Never a password or token: those are asked for at Start; a URL
+with credentials in it is not saved. `startProblem()` says what a profile
+lacks to start; the dialog checks it at Save, `Sessions` again at Start.
 
 The tests (`[auth]`, part of the server tests) are at the main seam,
 `auth_test.cpp`: a server started with a fixture configuration, a session
 with the right and with a wrong credential or certificate, and the
-message it gives; `plugin_test.cpp` checks the same messages in the
-dialog, and the profiles.
+message it gives, and that a password in a URL is never written;
+`plugin_test.cpp` checks the same messages on the tile, and the profiles.
 
 ## Building
 
@@ -387,7 +421,8 @@ a stopped server back for a reconnect test.
 ### The test seams
 
 - **A capture session against a real `nats-server`** (`natssession_test.cpp`,
-  and through the dialog in `plugin_test.cpp`): start a `NatsSession`,
+  and through the tab and the dialog in `plugin_test.cpp`, driven against
+  `FakeHost`): start a `NatsSession`,
   publish with `nats_test::Publisher`, and assert on the lines of
   `session.filePath()` (`nats_test::readLines`, `nats_test::waitFor` from
   [`tests/sessiontest.h`](../tests/sessiontest.h)). A session is subscribed
