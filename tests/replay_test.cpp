@@ -45,14 +45,11 @@
 #include "tcpproxy.h"
 
 #include <QCoreApplication>
-#include <QDateTime>
 #include <QElapsedTimer>
 #include <QProcess>
 #include <QProcessEnvironment>
 
-#include <chrono>
 #include <iostream>
-#include <thread>
 
 using nats_monitor::NatsSession;
 using nats_monitor::ReplayStart;
@@ -61,7 +58,6 @@ using nats_test::CaptureLine;
 using nats_test::JetStream;
 using nats_test::LineFields;
 using nats_test::NatsServer;
-using nats_test::NatsServerOptions;
 using nats_test::Publisher;
 using nats_test::readLines;
 using nats_test::replayConfig;
@@ -161,6 +157,12 @@ SCENARIO( "a stream is replayed into the session's file", "[server][replay]" )
     }
 }
 
+// One test for each deliver policy nats.c is given: where the consumer
+// starts, and what the replay writes of it.  The decisions behind it (the
+// last N, a start after the last sequence, an empty stream, a start time
+// early in its second, the last N on a subject) are the plan's and the
+// step's, tested without a server (replayplan_test.cpp); the stream from
+// its start (DeliverFrom::All) is the scenario above.
 SCENARIO( "a replay starts where it is told to", "[server][replay]" )
 {
     SKIP_WITHOUT_NATS_SERVER();
@@ -179,35 +181,20 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
         }
         auto config = replayConfig( server.url(), "ORDERS" );
 
-        WHEN( "it replays the last 3 messages" )
+        WHEN( "it replays orders.us from sequence 7" )
         {
-            config.replay.start = ReplayStart::Last;
-            config.replay.lastMessages = 3;
-            NatsSession session( config, sessionTempRoot() );
-            replayToTheEnd( session );
-
-            THEN( "it writes 8, 9 and 10, and says so first" )
-            {
-                const auto capture = Capture::read( session.filePath() );
-                REQUIRE( capture.sequences() == range( 8, 10 ) );
-                REQUIRE(
-                    capture.first().markerText().endsWith( "stream ORDERS, the last 3 messages" ) );
-            }
-        }
-
-        WHEN( "it replays from sequence 7" )
-        {
+            config.replay.filterSubject = "orders.us";
             config.replay.start = ReplayStart::Sequence;
             config.replay.sequence = 7;
             NatsSession session( config, sessionTempRoot() );
             replayToTheEnd( session );
 
-            THEN( "it writes 7 to 10" )
+            THEN( "it writes the even ones from 7 on, 8 and 10" )
             {
                 const auto capture = Capture::read( session.filePath() );
-                REQUIRE( capture.sequences() == range( 7, 10 ) );
-                REQUIRE(
-                    capture.first().markerText().endsWith( "stream ORDERS, from sequence 7" ) );
+                REQUIRE( capture.sequences() == QList<quint64>{ 8, 10 } );
+                REQUIRE( capture.first().markerText().endsWith(
+                    "stream ORDERS, subject orders.us, from sequence 7" ) );
             }
         }
 
@@ -224,153 +211,6 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
                 REQUIRE( capture.sequences() == range( 6, 10 ) );
                 REQUIRE( capture.first().markerText().endsWith(
                     ", from " + capture.messages().first().timestamp() ) );
-            }
-        }
-
-        WHEN( "it replays only orders.us" )
-        {
-            config.replay.filterSubject = "orders.us";
-            NatsSession session( config, sessionTempRoot() );
-            replayToTheEnd( session );
-
-            THEN( "it writes the even ones" )
-            {
-                const auto capture = Capture::read( session.filePath() );
-                REQUIRE( capture.sequences() == QList<quint64>{ 2, 4, 6, 8, 10 } );
-                REQUIRE(
-                    capture.first().markerText().endsWith( "stream ORDERS, subject orders.us" ) );
-            }
-        }
-
-        WHEN( "it replays the last 2 messages on orders.eu" )
-        {
-            config.replay.filterSubject = "orders.eu";
-            config.replay.start = ReplayStart::Last;
-            config.replay.lastMessages = 2;
-            NatsSession session( config, sessionTempRoot() );
-            replayToTheEnd( session );
-
-            THEN( "it writes the last two odd ones, 7 and 9" )
-            {
-                REQUIRE( Capture::read( session.filePath() ).sequences()
-                         == QList<quint64>{ 7, 9 } );
-            }
-        }
-
-        WHEN( "it replays from sequence 11, after the last" )
-        {
-            config.replay.start = ReplayStart::Sequence;
-            config.replay.sequence = 11;
-            NatsSession session( config, sessionTempRoot() );
-            replayToTheEnd( session );
-
-            THEN( "it writes no message and is complete at once" )
-            {
-                const auto capture = Capture::read( session.filePath() );
-                REQUIRE( capture.sequences().isEmpty() );
-                REQUIRE( capture.last().markerText() == "replay complete" );
-            }
-        }
-
-        WHEN( "it has been replayed in full" )
-        {
-            NatsSession session( config, sessionTempRoot() );
-            replayToTheEnd( session );
-
-            THEN( "the stream still holds its ten messages" )
-            {
-                REQUIRE( js.messageCount( "ORDERS" ) == 10 );
-            }
-        }
-    }
-
-    GIVEN( "an empty stream" )
-    {
-        NatsServer server( withJetStream() );
-        Publisher publisher( server.url() );
-        JetStream js( publisher );
-        js.addStream( "EMPTY", { "empty.>" } );
-
-        THEN( "its replay is complete at once, with no message" )
-        {
-            NatsSession session( replayConfig( server.url(), "EMPTY" ), sessionTempRoot() );
-            replayToTheEnd( session );
-            const auto capture = Capture::read( session.filePath() );
-            REQUIRE( capture.messages().isEmpty() );
-            REQUIRE( capture.unreadable().isEmpty() );
-        }
-    }
-}
-
-SCENARIO( "a replay from a time early in its second starts at that time", "[server][replay]" )
-{
-    SKIP_WITHOUT_NATS_SERVER();
-
-    // nats.c 3.14 writes a start time's fraction of a second without its
-    // leading zeros: 12:00:00.025 goes to the server as 12:00:00.25, past
-    // messages stored in that quarter of a second.
-    GIVEN( "five messages from just after the start of a second, one of them (k) stored after "
-           "an earlier one of the same second, before its first tenth is over" )
-    {
-        NatsServer server( withJetStream() );
-        Publisher publisher( server.url() );
-        JetStream js( publisher );
-        // Until the clock is 2 to 12 ms into a second: sleeps to just
-        // before, then spins, as a sleep of a few milliseconds may last far
-        // longer (macOS coalesces timers).
-        const auto waitForNextSecond = [] {
-            for ( ;; ) {
-                const auto into = static_cast<int>( QDateTime::currentMSecsSinceEpoch() % 1000 );
-                if ( into >= 2 && into < 12 ) {
-                    return;
-                }
-                const auto until = ( 2 - into + 1000 ) % 1000;
-                if ( until > 3 ) {
-                    std::this_thread::sleep_for( std::chrono::milliseconds( until - 3 ) );
-                }
-                else {
-                    std::this_thread::yield();
-                }
-            }
-        };
-        // Message k > 1 is the latest stored in the first tenth of the
-        // second of message 1, and later than message k - 1.  However slow
-        // the machine, the publishing is not timed; a stream where no such k
-        // exists is tried again, in a new stream.
-        QByteArray stream;
-        int k = 0;
-        qint64 kUs = 0;
-        for ( int attempt = 1; attempt <= 10 && k == 0; ++attempt ) {
-            stream = "ORDERS" + QByteArray::number( attempt );
-            const auto subjects = "orders" + QByteArray::number( attempt );
-            js.addStream( stream.constData(), { ( subjects + ".>" ).constData() } );
-            waitForNextSecond();
-            for ( int i = 1; i <= 5; ++i ) {
-                js.publish( ( subjects + ".eu" ).constData(), QByteArray::number( i ) );
-            }
-            const auto firstSecond = js.storedUs( stream.constData(), 1 ) / 1000000;
-            for ( int i = 5; i >= 2 && k == 0; --i ) {
-                const auto us = js.storedUs( stream.constData(), i );
-                if ( us / 1000000 == firstSecond && us % 1000000 < 100000
-                     && us > js.storedUs( stream.constData(), i - 1 ) ) {
-                    k = i;
-                    kUs = us;
-                }
-            }
-        }
-        REQUIRE( k != 0 );
-
-        WHEN( "it replays from the time message k was stored" )
-        {
-            auto config = replayConfig( server.url(), QString::fromLatin1( stream ) );
-            config.replay.start = ReplayStart::Time;
-            config.replay.timeUs = kUs;
-            NatsSession session( config, sessionTempRoot() );
-            replayToTheEnd( session );
-
-            THEN( "it writes k to 5, none before" )
-            {
-                REQUIRE( Capture::read( session.filePath() ).sequences() == range( k, 5 ) );
             }
         }
     }

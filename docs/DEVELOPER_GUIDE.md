@@ -355,11 +355,13 @@ The plan and the step are tested without a server and without the clock
 (`[plan]`, `replayplan_test.cpp`): tables of a config and a stream's state
 with the plan expected (each start position, *last N* with a filter,
 sub-second start times, an empty stream, the work queue refused and the
-interest warning), and of the (pending, stored time) of each message with
-what the step makes of it. The other tests (`[replay]`) are at the main
-seam, `replay_test.cpp`, against a server started with `-js`
-(`NatsServerOptions::jetStream`), replaying each deliver policy at least
-once to see nats.c called as the plan says; `nats_test::JetStream`
+interest warning), of the (pending, stored time) of each message with
+what the step makes of it, and of the names `describeReplay()` gives. The
+other tests (`[replay]`) are at the main seam, `replay_test.cpp`, against a
+server started with `-js` (`NatsServerOptions::jetStream`), replaying each
+deliver policy once to see nats.c called as the plan says, and what only a
+server shows: the retention read from a stream's info, following live, a
+stream that does not exist, stop and back-pressure, the consumers left; `nats_test::JetStream`
 ([`tests/sessiontest.h`](../tests/sessiontest.h)) adds memory streams,
 publishes into them and reads their message count, stored times and
 consumers. The million-message test (`[large]`) takes about ten seconds.

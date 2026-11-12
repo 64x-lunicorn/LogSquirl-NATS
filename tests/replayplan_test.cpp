@@ -37,6 +37,7 @@
 
 using nats_monitor::caughtUpOnSubscribing;
 using nats_monitor::DeliverFrom;
+using nats_monitor::describeReplay;
 using nats_monitor::planReplay;
 using nats_monitor::ReplayConfig;
 using nats_monitor::ReplayPlan;
@@ -311,6 +312,36 @@ SCENARIO( "a replay plan refuses a work queue and warns of interest retention",
                      == "Enter one subject to replay, or none for all." );
             REQUIRE( planReplay( last( 2, "orders.>.eu" ), stream( 1, 3 ) ).refusal
                      == "orders.>.eu is not a valid subject: > must be the last token." );
+        }
+    }
+}
+
+SCENARIO( "a replay is named by its stream, subject, start and what follows", "[replay][plan]" )
+{
+    struct Row {
+        const char* what;
+        ReplayConfig config;
+        const char* name;
+    };
+    auto onSubject = replay();
+    onSubject.filterSubject = "orders.us";
+    auto live = last( 100, "orders.eu.>" );
+    live.followLive = true;
+    const std::vector<Row> rows{
+        { "all messages", replay(), "stream ORDERS" },
+        { "all on a subject", onSubject, "stream ORDERS, subject orders.us" },
+        { "the last 3", last( 3 ), "stream ORDERS, the last 3 messages" },
+        { "the last one", last( 1 ), "stream ORDERS, the last message" },
+        { "from sequence 7", fromSequence( 7 ), "stream ORDERS, from sequence 7" },
+        { "from a time, as the lines write it", fromTime( kSecondUs + 25000 ),
+          "stream ORDERS, from 2026-11-11 10:00:00.025000Z" },
+        { "the last 100 on a subject, then live", live,
+          "stream ORDERS, subject orders.eu.>, the last 100 messages, then live" },
+    };
+    for ( const auto& row : rows ) {
+        DYNAMIC_SECTION( row.what )
+        {
+            REQUIRE( describeReplay( row.config ) == QString::fromUtf8( row.name ) );
         }
     }
 }
