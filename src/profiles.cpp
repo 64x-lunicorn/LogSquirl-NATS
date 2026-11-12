@@ -30,6 +30,7 @@
 #include "subjects.h"
 
 #include <QSettings>
+#include <QUrl>
 
 #include <algorithm>
 #include <array>
@@ -201,47 +202,73 @@ bool ConnectionProfile::usesTls() const
     return nats_monitor::usesTls( url, tls.enabled );
 }
 
-QString startProblem( const ConnectionProfile& profile )
+namespace {
+
+/// The rules of startProblem() on @p config, whose subscriptions were made
+/// of a text with the error @p subjectsError (empty if none, or no text).
+QString firstStartProblem( const SessionConfig& config, const QString& subjectsError )
 {
-    if ( profile.url.isEmpty() ) {
+    if ( config.url.isEmpty() ) {
         return QStringLiteral( "Enter the server URL." );
     }
-    if ( profile.replay.enabled() ) {
-        if ( const auto problem = replayProblem( profile.replay ); !problem.isEmpty() ) {
+    if ( config.replay.enabled() ) {
+        if ( const auto problem = replayProblem( config.replay ); !problem.isEmpty() ) {
             return problem;
-        }
-        const auto filter = profile.replay.filterSubject;
-        if ( !filter.isEmpty() ) {
-            const auto parsed = parseSubscriptions( filter );
-            if ( !parsed.error.isEmpty() ) {
-                return parsed.error;
-            }
-            if ( parsed.subscriptions.size() != 1
-                 || !parsed.subscriptions.front().queueGroup.isEmpty() ) {
-                return QStringLiteral( "Enter one subject to replay, or none for all." );
-            }
         }
     }
     else {
-        const auto subjects = parseSubscriptions( profile.subjects );
-        if ( !subjects.error.isEmpty() ) {
-            return subjects.error;
+        if ( !subjectsError.isEmpty() ) {
+            return subjectsError;
         }
-        if ( subjects.subscriptions.isEmpty() ) {
+        const auto blank = []( const Subscription& s ) { return s.subject.trimmed().isEmpty(); };
+        if ( config.subscriptions.isEmpty()
+             || std::any_of( config.subscriptions.begin(), config.subscriptions.end(), blank ) ) {
             return QStringLiteral( "Enter the subject to capture." );
         }
     }
-    const auto& method = authMethodInfo( profile.auth.method );
-    if ( method.takesUser && profile.auth.user.isEmpty() ) {
+    const auto& method = authMethodInfo( config.auth.method );
+    if ( method.takesUser && config.auth.user.isEmpty() ) {
         return QStringLiteral( "Enter the user name." );
     }
-    if ( method.file && profile.auth.file.isEmpty() ) {
+    if ( method.file && config.auth.file.isEmpty() ) {
         return QStringLiteral( "Choose the %1." ).arg( QLatin1String( method.file ) );
     }
-    if ( profile.usesTls() && profile.tls.certFile.isEmpty() != profile.tls.keyFile.isEmpty() ) {
+    if ( usesTls( config.url, config.tls.enabled )
+         && config.tls.certFile.isEmpty() != config.tls.keyFile.isEmpty() ) {
         return QStringLiteral( "Choose both the client certificate and its key, or neither." );
     }
     return {};
+}
+
+} // namespace
+
+QString startProblem( const ConnectionProfile& profile )
+{
+    return firstStartProblem( sessionConfig( profile ),
+                              parseSubscriptions( profile.subjects ).error );
+}
+
+QString startProblem( const SessionConfig& config )
+{
+    return firstStartProblem( config, QString() );
+}
+
+QString saveProblem( const ConnectionProfile& profile )
+{
+    if ( profile.name.isEmpty() ) {
+        return QStringLiteral( "Enter a name for the connection to save." );
+    }
+    if ( profile.replayChosen && !profile.replay.enabled() ) {
+        return QStringLiteral(
+            "Enter the stream to replay, or List the server's streams to choose it." );
+    }
+    for ( const auto& url : profile.url.split( ',' ) ) {
+        if ( !QUrl( url.trimmed() ).userInfo().isEmpty() ) {
+            return QStringLiteral( "The URL holds credentials, which a connection never saves: "
+                                   "enter them under Authentication instead." );
+        }
+    }
+    return startProblem( profile );
 }
 
 SessionConfig sessionConfig( const ConnectionProfile& profile )
@@ -292,6 +319,7 @@ QList<ConnectionProfile> ProfileStore::list() const
         profile.tls = readTls( settings );
         readCapture( settings, profile );
         profile.replay = readReplay( settings );
+        profile.replayChosen = profile.replay.enabled();
         profiles << profile;
     }
     settings.endArray();
@@ -322,8 +350,8 @@ ConnectionProfile ProfileStore::newProfile() const
 
 QString ProfileStore::upsert( const ConnectionProfile& profile )
 {
-    if ( profile.name.isEmpty() ) {
-        return QStringLiteral( "Enter a name for the connection to save." );
+    if ( const auto problem = saveProblem( profile ); !problem.isEmpty() ) {
+        return problem;
     }
     auto profiles = list();
     const auto existing = std::find_if( profiles.begin(), profiles.end(),

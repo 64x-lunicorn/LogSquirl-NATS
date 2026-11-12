@@ -281,6 +281,17 @@ SCENARIO( "a replay plan refuses a work queue and warns of interest retention",
                      == "A stream's sequences start at 1." );
         }
     }
+
+    GIVEN( "a replay filtered on two subjects, or on one that is not a subject" )
+    {
+        THEN( "the plan refuses it as replayProblem() does" )
+        {
+            REQUIRE( planReplay( last( 2, "orders.eu\norders.us" ), stream( 1, 3 ) ).refusal
+                     == "Enter one subject to replay, or none for all." );
+            REQUIRE( planReplay( last( 2, "orders.>.eu" ), stream( 1, 3 ) ).refusal
+                     == "orders.>.eu is not a valid subject: > must be the last token." );
+        }
+    }
 }
 
 SCENARIO( "a replay's step skips and catches up message by message", "[replay][plan]" )

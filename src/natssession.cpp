@@ -69,6 +69,7 @@
 
 #include "capturesink.h"
 #include "natsoptions.h"
+#include "profiles.h"
 #include "replay.h"
 #include "tempdirs.h"
 
@@ -1049,20 +1050,11 @@ bool NatsSession::start()
         Q_EMIT errorOccurred( message );
         return false;
     };
+    // A backstop: Sessions makes the same check first.
+    if ( const auto problem = startProblem( config_ ); !problem.isEmpty() ) {
+        return fail( problem );
+    }
     const auto& replay = config_.replay;
-    const auto blank = []( const Subscription& s ) { return s.subject.trimmed().isEmpty(); };
-    if ( replay.enabled() ) {
-        // A backstop: the dialog and the sidebar check this first
-        // (startProblem(), profiles.h).
-        if ( const auto problem = replayProblem( replay ); !problem.isEmpty() ) {
-            return fail( problem );
-        }
-    }
-    else if ( config_.subscriptions.isEmpty()
-              || std::any_of( config_.subscriptions.begin(), config_.subscriptions.end(),
-                              blank ) ) {
-        return fail( QStringLiteral( "No subject to subscribe to." ) );
-    }
     if ( !tempDir_.isValid() ) {
         return fail( QStringLiteral( "Cannot create a temporary directory: %1" )
                          .arg( tempDir_.errorString() ) );

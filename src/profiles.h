@@ -42,6 +42,16 @@
  * settings or its replay were gets their defaults.  Tested on temporary
  * files (profiles_test.cpp), and through the dialog and the sidebar
  * (plugin_test.cpp).
+ *
+ * CAN IT BE SAVED, CAN IT BE STARTED
+ * ──────────────────────────────────
+ * Two checks hold the rules, each saying why not in words for the user:
+ * saveProblem() (the store's upsert() makes it, so the dialog's Save does)
+ * and startProblem() (Sessions makes it at Start, the session again on its
+ * config before it starts).  The rules of a replay are the Replay module's
+ * (replayProblem(), replay.h).  The session's check is a free function on a
+ * SessionConfig, so natssession.cpp needs this header and no store.  Each
+ * rule is a row of profiles_test.cpp ([checks]).
  */
 
 #pragma once
@@ -76,6 +86,10 @@ struct ConnectionProfile {
     /// The stream the connection replays instead of capturing the subjects,
     /// if replay.enabled().
     ReplayConfig replay;
+    /// Replay was chosen (the dialog's Replay checked), even with no stream
+    /// entered, which saveProblem() refuses.  Not saved: a loaded profile
+    /// has it if it has a stream.
+    bool replayChosen = false;
 
     /// The subscriptions of subjects; those before an error if a line is wrong.
     QList<Subscription> subscriptions() const;
@@ -84,10 +98,22 @@ struct ConnectionProfile {
     bool usesTls() const;
 };
 
-/// What is missing for @p profile to start a capture, in words for the
-/// user; empty if nothing.  The secret is not checked: it is asked for at
-/// Start.
+/// Why @p profile cannot start, in words for the user; empty if it can: no
+/// URL, the replay's problem (replayProblem(), replay.h), the subjects', the
+/// user name or file its authentication needs, a client certificate without
+/// its key.  The first of these, in that order.  The secret is not checked:
+/// it is asked for at Start.
 QString startProblem( const ConnectionProfile& profile );
+
+/// The same check of a session's @p config, as the session makes it before
+/// it starts (NatsSession::start()): the rules of the profile's, but the
+/// text of the subjects is not there to tell what is wrong with it.
+QString startProblem( const SessionConfig& config );
+
+/// Why @p profile cannot be saved, in words for the user; empty if it can:
+/// no name, replay chosen without a stream, credentials in a URL (never
+/// saved), then whatever keeps it from starting (startProblem()).
+QString saveProblem( const ConnectionProfile& profile );
 
 /// The session configuration of @p profile, with its auth.secret as is.
 SessionConfig sessionConfig( const ConnectionProfile& profile );
@@ -123,7 +149,7 @@ public:
     /// Save @p profile under its name, replacing the profile of that name
     /// where it is in the list, or after the others, and remember its size
     /// limit for newProfile().  Never its auth.secret.  Empty if it was
-    /// saved, else why not.
+    /// saved, else why not: its saveProblem(), or the file.
     QString upsert( const ConnectionProfile& profile );
 
     /// Delete the profile named @p name, unless it runs.  Empty if it was

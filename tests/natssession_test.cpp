@@ -35,6 +35,7 @@
 #include "capture.h"
 #include "natsserver.h"
 #include "natssession.h"
+#include "profiles.h"
 #include "sessiontest.h"
 
 #include <QDir>
@@ -368,10 +369,36 @@ SCENARIO( "a session without a subject does not start", "[session][subjects]" )
         QObject::connect( &session, &NatsSession::errorOccurred,
                           [ & ]( const QString& message ) { errors << message; } );
 
-        THEN( "start() refuses, and says why" )
+        THEN( "start() refuses, and says why as the start check does" )
         {
             REQUIRE_FALSE( session.start() );
-            REQUIRE( errors.join( '\n' ).contains( "subject" ) );
+            REQUIRE( errors == QStringList{ "Enter the subject to capture." } );
+        }
+    }
+
+    GIVEN( "a session whose config the start check refuses otherwise: a replay from "
+           "sequence 0, a user and password without the user" )
+    {
+        auto config = sessionConfig( "nats://127.0.0.1:1", { "x" } );
+        const bool replays = GENERATE( true, false );
+        if ( replays ) {
+            config.replay.stream = "ORDERS";
+            config.replay.start = nats_monitor::ReplayStart::Sequence;
+            config.replay.sequence = 0;
+        }
+        else {
+            config.auth.method = nats_monitor::AuthMethod::UserPassword;
+        }
+        NatsSession session( config, sessionTempRoot() );
+        QStringList errors;
+        QObject::connect( &session, &NatsSession::errorOccurred,
+                          [ & ]( const QString& message ) { errors << message; } );
+
+        THEN( "start() refuses with the start check's reason" )
+        {
+            REQUIRE_FALSE( session.start() );
+            REQUIRE( errors == QStringList{ nats_monitor::startProblem( config ) } );
+            REQUIRE_FALSE( errors.first().isEmpty() );
         }
     }
 }

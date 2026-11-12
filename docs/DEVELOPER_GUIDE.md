@@ -223,7 +223,8 @@ session replays the stream instead of subscribing to its subjects
 connects, writes `connected to …, replaying stream ORDERS, …`
 (`describeReplay()`, [`src/replay.h`](../src/replay.h), which also has
 the start positions as one table, `kReplayStarts`, and the checks a replay
-must pass, `replayProblem()`) and subscribes with `js_Subscribe` and
+must pass, `replayProblem()`, filter subject included, which a
+connection's start check makes) and subscribes with `js_Subscribe` and
 `jsSubOptions::Ordered`: nats.c's ordered push consumer, ephemeral, AckNone,
 with flow control and heartbeats, which nats.c recreates from the last
 stream sequence after a gap or a reconnect. The filter subject is the
@@ -457,8 +458,23 @@ URLs, method, user name, file paths, the TLS settings, in the group
 `capture` the subjects and limits, and in the group `replay` the stream
 (a profile saved without them, as 0.1.0 did, gets the defaults). Never a
 password or token: those are asked for at Start; a URL with credentials in
-it is not saved. `startProblem()` says what a profile lacks to start; the
-dialog checks it at Save, `Sessions` again at Start.
+it is not saved.
+
+Two checks in profiles.h hold the rules of a connection, each returning
+why not in words for the user, empty if nothing: `startProblem()` (no URL,
+the replay's problem, the subjects', the user name or file the
+authentication needs, a client certificate without its key, the first in
+that order) and `saveProblem()` (no name, Replay checked without a stream,
+credentials in a URL, then the start problem). `upsert()` makes the save
+check, so the dialog's Save does; `Sessions` makes the start check at
+Start, and `NatsSession::start()` again as a backstop on its
+`SessionConfig` (an overload of `startProblem()`, so the session needs no
+store). The replay's rules are `replayProblem()`'s (replay.h). Replay
+checked without a stream is told by a profile's `replayChosen`, which the
+dialog sets when Replay is checked, stream or not (a loaded profile has it
+if it has a stream). Each rule is a row of the
+tables in `profiles_test.cpp` (`[checks]`), with its exact text, checked
+without the dialog.
 
 The **profile store** (`ProfileStore`, in profiles.h) is the only code that
 reads or writes `nats.ini`. It is opened on a file path, and told by a
@@ -466,7 +482,7 @@ function which connections run, so it needs neither the host nor
 `Sessions` to be tested. `list()`, `find()`, `upsert()` (replace the
 profile of that name where it is, or add it at the end) and `remove()`;
 `upsert()` and `remove()` return why they could not, in words for the user,
-and empty when they did. `newProfile()` gives a new connection's settings,
+and empty when they did; `upsert()` refuses a profile with a save problem. `newProfile()` gives a new connection's settings,
 with the size limit saved last. It reads the file on each call, and emits
 `changed()` after each save or delete, which the dialog's list and the tab
 follow. `profiles_test.cpp` (`[profiles]`) tests it on temporary files:

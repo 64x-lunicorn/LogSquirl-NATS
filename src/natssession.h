@@ -168,7 +168,8 @@ public:
      * errorOccurred() and finished().
      *
      * @return false, after errorOccurred(), if the session could not start
-     *         (no subject or a blank one, the file cannot be created).
+     *         (its config has a startProblem(), profiles.h, such as no
+     *         subject or a blank one; the file cannot be created).
      */
     bool start();
 

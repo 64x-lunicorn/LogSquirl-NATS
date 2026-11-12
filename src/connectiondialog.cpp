@@ -48,7 +48,6 @@
 #include <QRegularExpressionValidator>
 #include <QSpinBox>
 #include <QTimeZone>
-#include <QUrl>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -390,7 +389,8 @@ ConnectionProfile ConnectionDialog::currentProfile() const
     profile.pendingLimits = { pendingMessagesSpin_->value(),
                               static_cast<int>( pendingMegabytesSpin_->value() * kBytesPerMiB ) };
     profile.maxFileMiB = maxFileSpin_->value();
-    if ( replayCheck_->isChecked() ) {
+    profile.replayChosen = replayCheck_->isChecked();
+    if ( profile.replayChosen ) {
         auto& replay = profile.replay;
         replay.stream = replayStreamCombo_->currentText().trimmed();
         replay.filterSubject = replayFilterEdit_->text().trimmed();
@@ -489,27 +489,7 @@ void ConnectionDialog::loadProfile( int index )
 void ConnectionDialog::saveProfile()
 {
     const auto profile = currentProfile();
-    if ( profile.name.isEmpty() ) {
-        statusLabel_->setText( QStringLiteral( "Enter a name for the connection to save." ) );
-        return;
-    }
-    if ( replayCheck_->isChecked() && !profile.replay.enabled() ) {
-        statusLabel_->setText( QStringLiteral( "Enter the stream to replay, or List the server's "
-                                               "streams to choose it." ) );
-        return;
-    }
-    for ( const auto& url : profile.url.split( ',' ) ) {
-        if ( !QUrl( url.trimmed() ).userInfo().isEmpty() ) {
-            statusLabel_->setText(
-                QStringLiteral( "The URL holds credentials, which a connection never saves: "
-                                "enter them under Authentication instead." ) );
-            return;
-        }
-    }
-    if ( const auto problem = startProblem( profile ); !problem.isEmpty() ) {
-        statusLabel_->setText( problem );
-        return;
-    }
+    // The store refuses what cannot be saved (saveProblem(), profiles.h).
     // The list follows the store (ProfileStore::changed), the name chosen.
     if ( const auto problem = profiles_->upsert( profile ); !problem.isEmpty() ) {
         statusLabel_->setText( problem );

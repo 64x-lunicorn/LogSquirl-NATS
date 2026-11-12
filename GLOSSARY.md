@@ -23,6 +23,18 @@ new connection proposes, such as the size limit saved last (`ProfileStore`).
 The dialog and the sidebar both go through it.
 _Avoid_: Settings, config file
 
+**Start problem**:
+Why a connection cannot be started, in words for the user, or none: the one
+check of its rules, made by Sessions at Start and by the session again on
+its config (`startProblem()`). A replay's rules in it are the replay
+module's (`replayProblem()`).
+_Avoid_: Validation error
+
+**Save problem**:
+Why a connection cannot be saved, or none: no name, Replay checked without a
+stream, credentials in a URL, then its start problem (`saveProblem()`). The
+profile store refuses to save a profile with one.
+
 ### Capture
 
 **Capture sink**:

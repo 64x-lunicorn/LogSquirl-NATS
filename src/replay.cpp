@@ -26,6 +26,7 @@
 #include "replay.h"
 
 #include "lineformat.h"
+#include "subjects.h"
 
 namespace nats_monitor {
 
@@ -75,6 +76,16 @@ QString replayProblem( const ReplayConfig& replay )
     }
     if ( replay.start == ReplayStart::Sequence && replay.sequence == 0 ) {
         return QStringLiteral( "A stream's sequences start at 1." );
+    }
+    if ( !replay.filterSubject.isEmpty() ) {
+        const auto parsed = parseSubscriptions( replay.filterSubject );
+        if ( !parsed.error.isEmpty() ) {
+            return parsed.error;
+        }
+        if ( parsed.subscriptions.size() != 1
+             || !parsed.subscriptions.front().queueGroup.isEmpty() ) {
+            return QStringLiteral( "Enter one subject to replay, or none for all." );
+        }
     }
     return {};
 }

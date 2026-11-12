@@ -20,7 +20,8 @@
 /**
  * @file profiles_test.cpp
  * @brief BDD tests for the profile store, round trips on a temporary
- *        settings file (issue #31).
+ *        settings file (issue #31), and for whether a connection can be
+ *        saved and started, one row a rule (issue #32).
  *
  * The store is opened on a file path and told which connections run by a
  * function, so it is tested without the plugin, its host or a server.  The
@@ -36,6 +37,9 @@
 #include <QStringList>
 #include <QTemporaryDir>
 
+#include <functional>
+#include <vector>
+
 using nats_monitor::AuthMethod;
 using nats_monitor::ConnectionProfile;
 using nats_monitor::kDefaultMaxBinaryBytes;
@@ -43,6 +47,9 @@ using nats_monitor::kDefaultMaxFileMiB;
 using nats_monitor::kDefaultPendingLimits;
 using nats_monitor::ProfileStore;
 using nats_monitor::ReplayStart;
+using nats_monitor::saveProblem;
+using nats_monitor::SessionConfig;
+using nats_monitor::startProblem;
 
 namespace {
 
@@ -492,7 +499,276 @@ SCENARIO( "profiles saved by earlier versions still load", "[profiles]" )
             REQUIRE( audit->replay.start == ReplayStart::Last );
             REQUIRE( audit->replay.lastMessages == 2 );
             REQUIRE( audit->replay.followLive );
+            REQUIRE( audit->replayChosen );
+            REQUIRE_FALSE( prod->replayChosen );
             REQUIRE( store.newProfile().maxFileMiB == 9 );
+        }
+    }
+}
+
+// ── Can it be started, can it be saved ───────────────────────────────────
+
+namespace {
+
+/// A change to the profile() of "prod", which can be saved and started.
+using Change = std::function<void( ConnectionProfile& )>;
+
+/// The profile() of "prod" with @p change made.
+ConnectionProfile changed( const Change& change )
+{
+    auto p = profile( "prod" );
+    change( p );
+    return p;
+}
+
+/// Replay the stream ORDERS instead of capturing the subjects.
+void replays( ConnectionProfile& p )
+{
+    p.replay.stream = "ORDERS";
+}
+
+struct ProblemRow {
+    const char* what;
+    Change change;
+    const char* problem; ///< Empty: none.
+    /// The text of the subjects is wrong, which a session config, holding
+    /// only the subscriptions before the error, cannot tell.
+    bool inSubjectsText = false;
+};
+
+} // namespace
+
+SCENARIO( "whether a connection can be started is one check, with a reason for the user",
+          "[profiles][checks]" )
+{
+    const std::vector<ProblemRow> rows{
+        { "subjects and a URL", []( ConnectionProfile& ) {}, "" },
+        { "no URL", []( ConnectionProfile& p ) { p.url.clear(); }, "Enter the server URL." },
+        { "no URL and no subject: the URL first",
+          []( ConnectionProfile& p ) {
+              p.url.clear();
+              p.subjects.clear();
+          },
+          "Enter the server URL." },
+        // The replay's rules are the Replay module's (replayProblem()).
+        { "a replay without subjects", []( ConnectionProfile& p ) {
+              replays( p );
+              p.subjects.clear();
+          },
+          "" },
+        { "a replay of a blank stream name",
+          []( ConnectionProfile& p ) { p.replay.stream = "  "; }, "No stream to replay." },
+        { "a replay of the last 0 messages",
+          []( ConnectionProfile& p ) {
+              replays( p );
+              p.replay.start = ReplayStart::Last;
+              p.replay.lastMessages = 0;
+          },
+          "Replaying the last 0 messages replays nothing." },
+        { "a replay from sequence 0",
+          []( ConnectionProfile& p ) {
+              replays( p );
+              p.replay.start = ReplayStart::Sequence;
+              p.replay.sequence = 0;
+          },
+          "A stream's sequences start at 1." },
+        { "a replay whose filter is not a subject",
+          []( ConnectionProfile& p ) {
+              replays( p );
+              p.replay.filterSubject = "orders..eu";
+          },
+          "orders..eu is not a valid subject: a token is empty (\"..\", or a '.' at either "
+          "end)." },
+        { "a replay filtered on two subjects",
+          []( ConnectionProfile& p ) {
+              replays( p );
+              p.replay.filterSubject = "orders.eu\norders.us";
+          },
+          "Enter one subject to replay, or none for all." },
+        { "a replay filtered on a subject in a queue group",
+          []( ConnectionProfile& p ) {
+              replays( p );
+              p.replay.filterSubject = "orders.eu workers";
+          },
+          "Enter one subject to replay, or none for all." },
+        { "a replay with a wrong filter and no user: the replay first",
+          []( ConnectionProfile& p ) {
+              replays( p );
+              p.replay.filterSubject = "orders.eu workers";
+              p.auth.method = AuthMethod::UserPassword;
+          },
+          "Enter one subject to replay, or none for all." },
+        { "a line of subjects with more than a queue group",
+          []( ConnectionProfile& p ) { p.subjects = "orders.>\nbilling.> workers extra"; },
+          "\"billing.> workers extra\" is more than a subject and a queue group: enter one "
+          "subject a line.",
+          true },
+        { "a subject that is not one",
+          []( ConnectionProfile& p ) { p.subjects = "orders.>\norders.>x"; },
+          "orders.>x is not a valid subject: * and > must each be a token of their own.",
+          true },
+        { "no subject", []( ConnectionProfile& p ) { p.subjects = " \n "; },
+          "Enter the subject to capture." },
+        { "no subject and no user: the subject first",
+          []( ConnectionProfile& p ) {
+              p.subjects.clear();
+              p.auth.method = AuthMethod::UserPassword;
+          },
+          "Enter the subject to capture." },
+        { "a user and password without the user",
+          []( ConnectionProfile& p ) { p.auth.method = AuthMethod::UserPassword; },
+          "Enter the user name." },
+        { "a user and password, the password not given: it is asked for at Start",
+          []( ConnectionProfile& p ) {
+              p.auth.method = AuthMethod::UserPassword;
+              p.auth.user = "alice";
+          },
+          "" },
+        { "a token, not given", []( ConnectionProfile& p ) { p.auth.method = AuthMethod::Token; },
+          "" },
+        { "a credentials file not chosen",
+          []( ConnectionProfile& p ) { p.auth.method = AuthMethod::Credentials; },
+          "Choose the credentials file." },
+        { "an NKey seed file not chosen",
+          []( ConnectionProfile& p ) { p.auth.method = AuthMethod::NKey; },
+          "Choose the NKey seed file." },
+        { "no user and a certificate without its key: the user first",
+          []( ConnectionProfile& p ) {
+              p.auth.method = AuthMethod::UserPassword;
+              p.tls.enabled = true;
+              p.tls.certFile = "/etc/nats/client.pem";
+          },
+          "Enter the user name." },
+        { "TLS with a certificate without its key",
+          []( ConnectionProfile& p ) {
+              p.tls.enabled = true;
+              p.tls.certFile = "/etc/nats/client.pem";
+          },
+          "Choose both the client certificate and its key, or neither." },
+        { "a tls:// URL with a key without its certificate",
+          []( ConnectionProfile& p ) {
+              p.url = "tls://localhost:4222";
+              p.tls.keyFile = "/etc/nats/client-key.pem";
+          },
+          "Choose both the client certificate and its key, or neither." },
+        { "no TLS, a certificate without its key left in the fields: not used",
+          []( ConnectionProfile& p ) { p.tls.certFile = "/etc/nats/client.pem"; }, "" },
+        { "TLS with both the certificate and its key",
+          []( ConnectionProfile& p ) {
+              p.tls.enabled = true;
+              p.tls.certFile = "/etc/nats/client.pem";
+              p.tls.keyFile = "/etc/nats/client-key.pem";
+          },
+          "" },
+    };
+    for ( const auto& row : rows ) {
+        GIVEN( row.what )
+        {
+            const auto p = changed( row.change );
+
+            THEN( "the profile, and the session config made of it, get that reason" )
+            {
+                REQUIRE( startProblem( p ) == QString::fromUtf8( row.problem ) );
+                if ( !row.inSubjectsText ) {
+                    REQUIRE( startProblem( nats_monitor::sessionConfig( p ) )
+                             == QString::fromUtf8( row.problem ) );
+                }
+            }
+        }
+    }
+}
+
+SCENARIO( "a session config's subscriptions must name a subject", "[profiles][checks]" )
+{
+    GIVEN( "a config with no subscription, or a blank subject" )
+    {
+        auto config = SessionConfig{};
+        const bool blank = GENERATE( false, true );
+        if ( blank ) {
+            config.subscriptions = { { "  ", {} } };
+        }
+
+        THEN( "it cannot start, for want of a subject" )
+        {
+            REQUIRE( startProblem( config ) == "Enter the subject to capture." );
+        }
+    }
+}
+
+SCENARIO( "whether a connection can be saved is one check, with a reason for the user",
+          "[profiles][checks]" )
+{
+    const std::vector<ProblemRow> rows{
+        { "a name, subjects and a URL", []( ConnectionProfile& ) {}, "" },
+        { "no name", []( ConnectionProfile& p ) { p.name.clear(); },
+          "Enter a name for the connection to save." },
+        { "no name and a URL with a password: the name first",
+          []( ConnectionProfile& p ) {
+              p.name.clear();
+              p.url = "nats://bob:s3cret@localhost:4222";
+          },
+          "Enter a name for the connection to save." },
+        { "replay chosen with no stream",
+          []( ConnectionProfile& p ) { p.replayChosen = true; },
+          "Enter the stream to replay, or List the server's streams to choose it." },
+        { "replay chosen with a stream", []( ConnectionProfile& p ) {
+              p.replayChosen = true;
+              replays( p );
+          },
+          "" },
+        { "replay chosen with no stream and a URL with a password: the stream first",
+          []( ConnectionProfile& p ) {
+              p.replayChosen = true;
+              p.url = "nats://bob:s3cret@localhost:4222";
+          },
+          "Enter the stream to replay, or List the server's streams to choose it." },
+        { "a URL with a user and password",
+          []( ConnectionProfile& p ) { p.url = "nats://bob:s3cret@localhost:4222"; },
+          "The URL holds credentials, which a connection never saves: enter them under "
+          "Authentication instead." },
+        { "the second of two URLs with a token",
+          []( ConnectionProfile& p ) { p.url = "nats://a:4222, nats://t0ken@b:4222"; },
+          "The URL holds credentials, which a connection never saves: enter them under "
+          "Authentication instead." },
+        { "a URL with a password and no subject: the URL first",
+          []( ConnectionProfile& p ) {
+              p.url = "nats://bob:s3cret@localhost:4222";
+              p.subjects.clear();
+          },
+          "The URL holds credentials, which a connection never saves: enter them under "
+          "Authentication instead." },
+        // Then whatever keeps it from starting.
+        { "no subject", []( ConnectionProfile& p ) { p.subjects.clear(); },
+          "Enter the subject to capture." },
+        { "a replay from sequence 0",
+          []( ConnectionProfile& p ) {
+              p.replayChosen = true;
+              replays( p );
+              p.replay.start = ReplayStart::Sequence;
+              p.replay.sequence = 0;
+          },
+          "A stream's sequences start at 1." },
+        { "a credentials file not chosen",
+          []( ConnectionProfile& p ) { p.auth.method = AuthMethod::Credentials; },
+          "Choose the credentials file." },
+    };
+    for ( const auto& row : rows ) {
+        GIVEN( row.what )
+        {
+            const auto p = changed( row.change );
+
+            THEN( "it gets that reason" )
+            {
+                REQUIRE( saveProblem( p ) == QString::fromUtf8( row.problem ) );
+            }
+
+            THEN( "the store saves it only without one, and says the same reason" )
+            {
+                QTemporaryDir dir;
+                ProfileStore store( dir.filePath( "nats.ini" ) );
+                REQUIRE( store.upsert( p ) == QString::fromUtf8( row.problem ) );
+                REQUIRE( store.find( p.name ).has_value() == QString( row.problem ).isEmpty() );
+            }
         }
     }
 }

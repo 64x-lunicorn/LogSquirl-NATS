@@ -75,10 +75,11 @@ inline const ReplayStartInfo& replayStartInfo( ReplayStart start )
 /// subject orders.eu.>, the last 100 messages, then live".
 QString describeReplay( const ReplayConfig& replay );
 
-/// Why @p replay, enabled, cannot start, for the user; empty if it can.
+/// Why @p replay, enabled, cannot start, for the user; empty if it can: no
+/// stream, the last 0 messages, sequence 0, a filter that is not one subject.
 /// What the config alone tells: the stream's own rules are the plan's
-/// (ReplayPlan::refusal).  The filter subject is checked where it is
-/// entered (profiles.cpp).
+/// (ReplayPlan::refusal).  The start check of a connection makes it
+/// (startProblem(), profiles.h).
 QString replayProblem( const ReplayConfig& replay );
 
 /// How a stream keeps its messages (js_RetentionPolicy).
