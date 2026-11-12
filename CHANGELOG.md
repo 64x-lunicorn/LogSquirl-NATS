@@ -28,6 +28,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the least NATS permissions for live capture and for replay, which
   cannot change the stream's messages (#10).
 
+### Changed
+- **The connection tile is a card.** A rounded frame, in the accent colour
+  while the connection runs; a dot before the name for its state (grey
+  stopped, amber connecting, green running, red failed); the subjects
+  labelled; the details muted below a thin line. Delete is hidden, not
+  only disabled, while the connection runs. Light and dark themes both
+  work (#23).
+- **Readable file names.** A wildcard in a subject is spelled out in the
+  file's name and so in the tab's title: `>` gives `nats_all.log`,
+  `orders.>` `nats_orders.all.log` and `billing.*` `nats_billing.any.log`,
+  where they were `nats__.log`, `nats_orders._.log` and
+  `nats_billing._.log` (#23).
+
 ## [0.1.0]
 
 ### Added
