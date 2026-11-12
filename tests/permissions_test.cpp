@@ -35,6 +35,7 @@
 
 #include "natsserver.h"
 #include "natssession.h"
+#include "replay.h"
 #include "sessiontest.h"
 
 #include <QFile>

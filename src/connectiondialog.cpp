@@ -29,6 +29,7 @@
 #include "natssession.h"
 #include "plugin.h"
 #include "profiles.h"
+#include "replay.h"
 #include "sessions.h"
 #include "subjects.h"
 
@@ -253,14 +254,9 @@ ConnectionDialog::ConnectionDialog( const Sessions* sessions, QWidget* parent )
         QStringLiteral( "Replay only the messages on this subject; * and > match as in a "
                         "subscription" ) );
     replayStartCombo_->setObjectName( "replayStart" );
-    replayStartCombo_->addItem( QStringLiteral( "All messages" ),
-                                static_cast<int>( ReplayStart::All ) );
-    replayStartCombo_->addItem( QStringLiteral( "Last messages" ),
-                                static_cast<int>( ReplayStart::Last ) );
-    replayStartCombo_->addItem( QStringLiteral( "From sequence" ),
-                                static_cast<int>( ReplayStart::Sequence ) );
-    replayStartCombo_->addItem( QStringLiteral( "From time (UTC)" ),
-                                static_cast<int>( ReplayStart::Time ) );
+    for ( const auto& info : kReplayStarts ) {
+        replayStartCombo_->addItem( QLatin1String( info.label ), static_cast<int>( info.start ) );
+    }
     replayLastSpin_->setObjectName( "replayLast" );
     replayLastSpin_->setRange( 1, std::numeric_limits<int>::max() );
     replayLastSpin_->setGroupSeparatorShown( true );
@@ -669,7 +665,7 @@ void ConnectionDialog::listStreams()
     statusLabel_->setText(
         QStringLiteral( "Listing the streams of %1…" ).arg( redactUrls( profile.url ) ) );
     // In the background: connecting may take the connect timeout.  The
-    // destructor joins the thread (natssession.h, listStreams(), says how
+    // destructor joins the thread (replay.h, listStreams(), says how
     // long it may take), and Qt drops the answer if the dialog is gone
     // before it is delivered.
     listing_ = std::thread( [ this, config = sessionConfig( profile ) ] {

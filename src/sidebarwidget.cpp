@@ -29,6 +29,7 @@
 #include "natsoptions.h"
 #include "plugin.h"
 #include "profiles.h"
+#include "replay.h"
 #include "sessions.h"
 #include "subjects.h"
 

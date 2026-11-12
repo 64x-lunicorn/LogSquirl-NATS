@@ -26,6 +26,7 @@
 
 #include "authmethods.h"
 #include "natsoptions.h"
+#include "replay.h"
 #include "subjects.h"
 
 #include <QSettings>
@@ -143,14 +144,6 @@ void writeCapture( QSettings& settings, const ConnectionProfile& profile )
     settings.endGroup();
 }
 
-/// The start positions of a replay, by their saved names.
-const std::array<std::pair<const char*, ReplayStart>, 4> kReplayStarts{ {
-    { "all", ReplayStart::All },
-    { "last", ReplayStart::Last },
-    { "sequence", ReplayStart::Sequence },
-    { "time", ReplayStart::Time },
-} };
-
 /// The replay, in the group "replay"; none if the profile has no stream.
 ReplayConfig readReplay( QSettings& settings )
 {
@@ -159,9 +152,9 @@ ReplayConfig readReplay( QSettings& settings )
     replay.stream = settings.value( "stream" ).toString();
     replay.filterSubject = settings.value( "filterSubject" ).toString();
     const auto start = settings.value( "start" ).toString();
-    for ( const auto& [ name, value ] : kReplayStarts ) {
-        if ( start == QLatin1String( name ) ) {
-            replay.start = value;
+    for ( const auto& info : kReplayStarts ) {
+        if ( start == QLatin1String( info.savedName ) ) {
+            replay.start = info.start;
         }
     }
     bool ok = false;
@@ -183,11 +176,7 @@ void writeReplay( QSettings& settings, const ReplayConfig& replay )
     settings.beginGroup( "replay" );
     settings.setValue( "stream", replay.stream );
     settings.setValue( "filterSubject", replay.filterSubject );
-    for ( const auto& [ name, value ] : kReplayStarts ) {
-        if ( replay.start == value ) {
-            settings.setValue( "start", QString::fromLatin1( name ) );
-        }
-    }
+    settings.setValue( "start", QString::fromLatin1( replayStartInfo( replay.start ).savedName ) );
     settings.setValue( "lastMessages", replay.lastMessages );
     settings.setValue( "sequence", replay.sequence );
     settings.setValue( "timeUs", replay.timeUs );
@@ -223,6 +212,9 @@ QString startProblem( const ConnectionProfile& profile )
         return QStringLiteral( "Enter the server URL." );
     }
     if ( profile.replay.enabled() ) {
+        if ( const auto problem = replayProblem( profile.replay ); !problem.isEmpty() ) {
+            return problem;
+        }
         const auto filter = profile.replay.filterSubject;
         if ( !filter.isEmpty() ) {
             const auto parsed = parseSubscriptions( filter );

@@ -176,7 +176,9 @@ With `SessionConfig::replay` set (a `ReplayConfig` with a stream name), a
 session replays the stream instead of subscribing to its subjects
 ([`src/natssession.h`](../src/natssession.h), REPLAY). The writer thread
 connects, writes `connected to …, replaying stream ORDERS, …`
-(`describeReplay()`) and subscribes with `js_Subscribe` and
+(`describeReplay()`, [`src/replay.h`](../src/replay.h), which also has
+the start positions as one table, `kReplayStarts`, and the checks a replay
+must pass, `replayProblem()`) and subscribes with `js_Subscribe` and
 `jsSubOptions::Ordered`: nats.c's ordered push consumer, ephemeral, AckNone,
 with flow control and heartbeats, which nats.c recreates from the last
 stream sequence after a gap or a reconnect. The filter subject is the
@@ -230,8 +232,9 @@ stream sequence after a gap or a reconnect. The filter subject is the
   deliver subject. nats.c copies the config when it recreates the ordered
   consumer, and the consumer it replaces goes the same way.
 
-The streams the dialog offers come from `listStreams()`
-(`js_StreamNames`, `$JS.API.STREAM.NAMES`), run on a thread of the dialog;
+The streams the dialog offers come from `listStreams()` (replay.h;
+it connects with `connectTo()`, as the session does, natsoptions.h;
+`js_StreamNames`, `$JS.API.STREAM.NAMES`), run on a thread of the dialog;
 List is disabled until it answers. The dialog joins it when it goes (at
 shutdown, before the library may be unloaded), so the listing bounds
 itself: 2 s to connect to each server URL and 2 s for each answer. The tests (`[replay]`) are at the main

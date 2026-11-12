@@ -28,6 +28,7 @@
 #include "natssession.h"
 #include "plugin.h"
 #include "profiles.h"
+#include "replay.h"
 
 namespace nats_monitor {
 

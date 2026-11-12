@@ -61,6 +61,7 @@
 #include "natssession.h"
 
 #include "natsoptions.h"
+#include "replay.h"
 #include "tempdirs.h"
 
 #include <QFile>
@@ -89,10 +90,6 @@ constexpr auto kCallbackTimeout = std::chrono::milliseconds( 5000 );
 /// its own timeout of 10 s, if the connection breaks meanwhile.
 constexpr auto kDrainTimeout = std::chrono::milliseconds( 15000 );
 
-/// How long listStreams() waits for each server to connect, and for the
-/// answer: the dialog waits for it when it closes (at shutdown).
-constexpr int kListTimeoutMs = 2000;
-
 /// What the writer reports to the session along with a line.
 enum class Event {
     None,        ///< A message: nothing to report.
@@ -116,12 +113,6 @@ QString describe( natsStatus status, const char* detail )
         text += QStringLiteral( " (%1)" ).arg( QString::fromUtf8( detail ) );
     }
     return text;
-}
-
-/// describe() with this thread's last nats.c error.
-QString lastError( natsStatus status )
-{
-    return describe( status, nats_GetLastError( nullptr ) );
 }
 
 /// The URL @p connection is connected to, without its password
@@ -521,22 +512,37 @@ struct Shared {
               signalText.isEmpty() ? text : signalText );
     }
 
+    /// The SubscriptionState @p closure of a message callback for @p handle.
+    static SubscriptionState& subscriptionOf( void* closure, natsSubscription* handle )
+    {
+        auto& subscription = *static_cast<SubscriptionState*>( closure );
+        // nats.c may deliver before the writer has stored the handle.
+        natsSubscription* unset = nullptr;
+        subscription.handle.compare_exchange_strong( unset, handle );
+        return subscription;
+    }
+
+    /// Count @p msg, a message of @p subscription, mark the drops before
+    /// it, and queue its line: the Message @p toLine makes of it.  Destroys
+    /// @p msg.
+    template <typename ToLine>
+    void take( SubscriptionState& subscription, natsMsg* msg, ToLine toLine )
+    {
+        received.fetch_add( 1, std::memory_order_relaxed );
+        // Drops since the last message: the gap is before this one.
+        markSlowConsumer( subscription );
+        auto line = formatLine( toLine(), format );
+        natsMsg_Destroy( msg );
+        pushMessage( std::move( line ) );
+    }
+
     // ── nats.c callbacks, on nats.c's threads ────────────────────────
 
     /// @p closure is the SubscriptionState of the subscription.
     static void onMessage( natsConnection*, natsSubscription* handle, natsMsg* msg, void* closure )
     {
-        auto& subscription = *static_cast<SubscriptionState*>( closure );
-        auto* self = subscription.shared;
-        // nats.c may deliver before the writer has stored the handle.
-        natsSubscription* unset = nullptr;
-        subscription.handle.compare_exchange_strong( unset, handle );
-        self->received.fetch_add( 1, std::memory_order_relaxed );
-        // Drops since the last message: the gap is before this one.
-        self->markSlowConsumer( subscription );
-        auto line = formatLine( toMessage( msg ), self->format );
-        natsMsg_Destroy( msg );
-        self->pushMessage( std::move( line ) );
+        auto& subscription = subscriptionOf( closure, handle );
+        subscription.shared->take( subscription, msg, [ msg ] { return toMessage( msg ); } );
     }
 
     /// A message of a replay; @p closure is the SubscriptionState of the
@@ -544,10 +550,8 @@ struct Shared {
     static void onReplayMessage( natsConnection*, natsSubscription* handle, natsMsg* msg,
                                  void* closure )
     {
-        auto& subscription = *static_cast<SubscriptionState*>( closure );
+        auto& subscription = subscriptionOf( closure, handle );
         auto* self = subscription.shared;
-        natsSubscription* unset = nullptr;
-        subscription.handle.compare_exchange_strong( unset, handle );
 
         jsMsgMetaData* meta = nullptr;
         if ( natsMsg_GetMetaData( &meta, msg ) != NATS_OK ) {
@@ -562,16 +566,16 @@ struct Shared {
         }
         self->skipWhilePending = 0; // from the first written on, all are
 
-        self->received.fetch_add( 1, std::memory_order_relaxed );
-        self->markSlowConsumer( subscription );
-        auto message = toMessage( msg );
-        message.receivedUs = meta->Timestamp / 1000;
-        message.streamSequence = meta->Sequence.Stream;
-        message.reply.clear(); // nats.c's is the consumer's, the stream keeps none
+        const auto storedUs = meta->Timestamp / 1000;
+        const auto sequence = meta->Sequence.Stream;
         jsMsgMetaData_Destroy( meta );
-        auto line = formatLine( message, self->format );
-        natsMsg_Destroy( msg );
-        self->pushMessage( std::move( line ) );
+        self->take( subscription, msg, [ msg, storedUs, sequence ] {
+            auto message = toMessage( msg );
+            message.receivedUs = storedUs;
+            message.streamSequence = sequence;
+            message.reply.clear(); // nats.c's is the consumer's, the stream keeps none
+            return message;
+        } );
         if ( pending == 0 ) {
             self->markCaughtUp();
         }
@@ -881,7 +885,7 @@ struct NatsSession::Worker {
         const auto& replay = config.replay;
         natsStatus status = natsConnection_JetStream( &js, connection, nullptr );
         if ( status != NATS_OK ) {
-            return lastError( status );
+            return describeStatus( status );
         }
         const auto stream = replay.stream.toUtf8();
         const auto filter
@@ -890,7 +894,7 @@ struct NatsSession::Worker {
         jsStreamInfo* streamInfo = nullptr;
         status = js_GetStreamInfo( &streamInfo, js, stream.constData(), nullptr, nullptr );
         if ( status != NATS_OK ) {
-            return lastError( status );
+            return describeStatus( status );
         }
         const auto retention = streamInfo->Config->Retention;
         const auto first = streamInfo->State.FirstSeq;
@@ -955,7 +959,7 @@ struct NatsSession::Worker {
             status = setUp( *subscription, state );
         }
         if ( status != NATS_OK ) {
-            return lastError( status );
+            return describeStatus( status );
         }
 
         // Nothing to replay (an empty stream, a start beyond its end): no
@@ -963,7 +967,7 @@ struct NatsSession::Worker {
         jsConsumerInfo* info = nullptr;
         status = natsSubscription_GetConsumerInfo( &info, *subscription, nullptr, nullptr );
         if ( status != NATS_OK ) {
-            return lastError( status );
+            return describeStatus( status );
         }
         const bool nothing = info->NumPending == 0 && info->Delivered.Consumer == 0;
         jsConsumerInfo_Destroy( info );
@@ -987,23 +991,20 @@ struct NatsSession::Worker {
         };
         natsStatus status = createOptions( options );
         if ( status != NATS_OK ) {
-            return fail( lastError( status ) );
+            return fail( describeStatus( status ) );
         }
-        const auto problem = configureConnection( *options, config );
+        const auto problem = connectTo( *options, config, connection );
         // nats.c has its own copy, for reconnecting: no other is kept here.
         config.auth.secret.clear();
         if ( !problem.isEmpty() ) {
-            return fail( problem );
-        }
-        status = natsConnection_Connect( connection, *options );
-        if ( status != NATS_OK ) {
-            return fail( explainConnectFailure( config, status, lastError( status ) ) );
+            shared->pushMarker( problem, Event::Error );
+            return false;
         }
 
         const auto subscribeFailed = [ this ]( const QString& what, natsStatus failure ) {
-            shared->pushMarker(
-                QStringLiteral( "subscribing to %1 failed: %2" ).arg( what, lastError( failure ) ),
-                Event::Error );
+            shared->pushMarker( QStringLiteral( "subscribing to %1 failed: %2" )
+                                    .arg( what, describeStatus( failure ) ),
+                                Event::Error );
             return false;
         };
         if ( config.replay.enabled() ) {
@@ -1025,7 +1026,7 @@ struct NatsSession::Worker {
             status = natsSubscription_GetPendingLimits( subscriptions.front(), &messages, &bytes );
             if ( status != NATS_OK ) {
                 shared->pushMarker( QStringLiteral( "replaying %1 failed: %2" )
-                                        .arg( what, lastError( status ) ),
+                                        .arg( what, describeStatus( status ) ),
                                     Event::Error );
                 return false;
             }
@@ -1274,101 +1275,6 @@ QString describeSubscriptions( const QList<Subscription>& subscriptions )
     return names.join( QStringLiteral( ", " ) );
 }
 
-QStringList listStreams( const SessionConfig& config, QString* error )
-{
-    natsOptions* options = nullptr;
-    natsConnection* connection = nullptr;
-    jsCtx* js = nullptr;
-    jsStreamNamesList* list = nullptr;
-    QStringList names;
-    QString problem;
-
-    natsStatus status = natsOptions_Create( &options );
-    if ( status != NATS_OK ) {
-        problem = lastError( status );
-    }
-    if ( problem.isEmpty() ) {
-        problem = configureConnection( options, config );
-    }
-    if ( problem.isEmpty() ) {
-        status = natsOptions_SetTimeout( options, kListTimeoutMs );
-        if ( status != NATS_OK ) {
-            problem = lastError( status );
-        }
-    }
-    if ( problem.isEmpty() ) {
-        status = natsConnection_Connect( &connection, options );
-        if ( status != NATS_OK ) {
-            problem = QStringLiteral( "connection to %1 failed: %2" )
-                          .arg( redactUrls( config.url ),
-                                explainConnectFailure( config, status, lastError( status ) ) );
-        }
-    }
-    if ( problem.isEmpty() ) {
-        jsOptions jsOptions;
-        jsOptions_Init( &jsOptions );
-        jsOptions.Wait = kListTimeoutMs;
-        status = natsConnection_JetStream( &js, connection, &jsOptions );
-        jsErrCode code = static_cast<jsErrCode>( 0 );
-        if ( status == NATS_OK ) {
-            status = js_StreamNames( &list, js, nullptr, &code );
-        }
-        if ( status == NATS_NOT_FOUND ) {
-            status = NATS_OK; // no stream
-        }
-        if ( status != NATS_OK ) {
-            problem = QStringLiteral( "listing the streams failed: %1" ).arg( lastError( status ) );
-        }
-    }
-    if ( list ) {
-        for ( int i = 0; i < list->Count; ++i ) {
-            names << QString::fromUtf8( list->List[ i ] );
-        }
-        jsStreamNamesList_Destroy( list );
-    }
-    jsCtx_Destroy( js );
-    natsConnection_Destroy( connection );
-    natsOptions_Destroy( options );
-
-    names.sort();
-    if ( error ) {
-        *error = problem;
-    }
-    return problem.isEmpty() ? names : QStringList{};
-}
-
-QString describeReplay( const ReplayConfig& replay )
-{
-    QString text = QStringLiteral( "stream %1" ).arg( replay.stream );
-    if ( !replay.filterSubject.isEmpty() ) {
-        text += QStringLiteral( ", subject %1" ).arg( replay.filterSubject );
-    }
-    switch ( replay.start ) {
-    case ReplayStart::All:
-        break;
-    case ReplayStart::Last:
-        text += replay.lastMessages == 1
-                    ? QStringLiteral( ", the last message" )
-                    : QStringLiteral( ", the last %1 messages" ).arg( replay.lastMessages );
-        break;
-    case ReplayStart::Sequence:
-        text += QStringLiteral( ", from sequence %1" ).arg( replay.sequence );
-        break;
-    case ReplayStart::Time: {
-        Message time;
-        time.receivedUs = replay.timeUs;
-        // The time as the lines have it: the formatter's timestamp.
-        const auto line = formatLine( time );
-        text += QStringLiteral( ", from %1" ).arg( QString::fromUtf8( line.left( 27 ) ) );
-        break;
-    }
-    }
-    if ( replay.followLive ) {
-        text += QStringLiteral( ", then live" );
-    }
-    return text;
-}
-
 NatsSession::NatsSession( const SessionConfig& config, QObject* parent )
     : QObject( parent )
     , config_( config )
@@ -1397,14 +1303,10 @@ bool NatsSession::start()
     const auto& replay = config_.replay;
     const auto blank = []( const Subscription& s ) { return s.subject.trimmed().isEmpty(); };
     if ( replay.enabled() ) {
-        if ( replay.stream.trimmed().isEmpty() ) {
-            return fail( QStringLiteral( "No stream to replay." ) );
-        }
-        if ( replay.start == ReplayStart::Last && replay.lastMessages == 0 ) {
-            return fail( QStringLiteral( "Replaying the last 0 messages replays nothing." ) );
-        }
-        if ( replay.start == ReplayStart::Sequence && replay.sequence == 0 ) {
-            return fail( QStringLiteral( "A stream's sequences start at 1." ) );
+        // A backstop: the dialog and the sidebar check this first
+        // (startProblem(), profiles.h).
+        if ( const auto problem = replayProblem( replay ); !problem.isEmpty() ) {
+            return fail( problem );
         }
     }
     else if ( config_.subscriptions.isEmpty()

@@ -516,8 +516,9 @@ LogSquirl-NATS/
 │   ├── sidebarwidget.*         # The NATS sidebar tab: a tile per saved connection
 │   ├── connectiontile.*        # One tile: plain, knows nothing of NATS
 │   ├── sessions.*              # The captures, one session per connection
-│   ├── natssession.*           # A capture: connection, subscriptions, queue, writer
-│   ├── natsoptions.*           # Settings → nats.c options; failures in words
+│   ├── natssession.*           # A capture or replay: connection, subscriptions, queue, writer
+│   ├── replay.*                # A replay's start positions, description, checks; List
+│   ├── natsoptions.*           # Settings → nats.c options, connecting; failures in words
 │   ├── authmethods.h           # The authentication methods, one table
 │   ├── nkey.*                  # The public key of an NKey seed
 │   ├── profiles.*              # Saved connection profiles

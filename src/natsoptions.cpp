@@ -345,4 +345,28 @@ QString explainConnectFailure( const SessionConfig& config, natsStatus status,
     return QStringLiteral( "%1 (%2)" ).arg( explanation, detail );
 }
 
+QString describeStatus( natsStatus status )
+{
+    auto text = QString::fromUtf8( natsStatus_GetText( status ) );
+    const char* detail = nats_GetLastError( nullptr );
+    if ( detail && *detail ) {
+        text += QStringLiteral( " (%1)" ).arg( QString::fromUtf8( detail ) );
+    }
+    return text;
+}
+
+QString connectTo( natsOptions* options, const SessionConfig& config, natsConnection** connection )
+{
+    auto why = configureConnection( options, config );
+    if ( why.isEmpty() ) {
+        const natsStatus status = natsConnection_Connect( connection, options );
+        if ( status != NATS_OK ) {
+            why = explainConnectFailure( config, status, describeStatus( status ) );
+        }
+    }
+    return why.isEmpty() ? QString()
+                         : QStringLiteral( "connection to %1 failed: %2" )
+                               .arg( redactUrls( config.url ), why );
+}
+
 } // namespace nats_monitor
