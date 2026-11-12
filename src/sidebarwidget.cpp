@@ -56,16 +56,22 @@ constexpr int kSampleMs = 1000;
 /// What @p profile is, for its tile.
 QStringList summaryOf( const ConnectionProfile& profile )
 {
-    const auto subjects = profile.subscriptions();
+    QString what;
+    if ( profile.replay.enabled() ) {
+        what = QStringLiteral( "Replays %1" ).arg( describeReplay( profile.replay ) );
+    }
+    else if ( const auto subjects = profile.subscriptions(); !subjects.isEmpty() ) {
+        what = describeSubscriptions( subjects );
+    }
+    else {
+        what = QStringLiteral( "no subject" );
+    }
     return {
         redactUrls( profile.url ),
         QStringLiteral( "%1 · TLS %2" )
             .arg( QLatin1String( authMethodInfo( profile.auth.method ).label ),
                   profile.usesTls() ? QStringLiteral( "on" ) : QStringLiteral( "off" ) ),
-        profile.replay.enabled()
-            ? QStringLiteral( "Replays %1" ).arg( describeReplay( profile.replay ) )
-        : subjects.isEmpty() ? QStringLiteral( "no subject" )
-                             : describeSubscriptions( subjects ),
+        what,
     };
 }
 
