@@ -48,7 +48,9 @@
 #include <QProcessEnvironment>
 #include <QRegularExpression>
 
+#include <chrono>
 #include <iostream>
+#include <thread>
 
 using nats_monitor::NatsSession;
 using nats_monitor::ReplayStart;
@@ -379,14 +381,23 @@ SCENARIO( "a replay from a time early in its second starts at that time", "[serv
         NatsServer server( withJetStream() );
         Publisher publisher( server.url() );
         JetStream js( publisher );
-        // Until the clock is @p ms milliseconds into a second, or up to 10 more.
+        // Until the clock is @p ms milliseconds into a second, or up to 10
+        // more: sleeps to just before, then spins, as a sleep of a few
+        // milliseconds may last far longer (macOS coalesces timers).
         const auto waitUntilInSecond = []( int ms ) {
-            REQUIRE( waitFor(
-                [ ms ] {
-                    const auto into = QDateTime::currentMSecsSinceEpoch() % 1000;
-                    return into >= ms && into < ms + 10;
-                },
-                3000 ) );
+            for ( ;; ) {
+                const auto into = static_cast<int>( QDateTime::currentMSecsSinceEpoch() % 1000 );
+                if ( into >= ms && into < ms + 10 ) {
+                    return;
+                }
+                const auto until = ( ms - into + 1000 ) % 1000;
+                if ( until > 3 ) {
+                    std::this_thread::sleep_for( std::chrono::milliseconds( until - 3 ) );
+                }
+                else {
+                    std::this_thread::yield();
+                }
+            }
         };
         // A slow machine may publish past the second (or past its first
         // tenth): then again, into a new stream.
@@ -552,15 +563,18 @@ SCENARIO( "a stream of a million messages is replayed whole, or stopped at any p
             }
         }
 
-        // Stopped once the file has more than @p lines lines (0: at once,
+        // Stopped once more than @p lines messages arrived (0: at once,
         // before any): it stops at once, what it wrote until then in order,
         // the stream unchanged.
         const auto requireStopsAt = [ & ]( int lines ) {
             NatsSession session( config );
             REQUIRE( session.start() );
             if ( lines > 0 ) {
-                REQUIRE( waitFor( [ & ] { return readLines( session.filePath() ).size() > lines; },
-                                  30000 ) );
+                // Counted, not read from the file: reading half a million
+                // lines may take longer than the rest of the replay.
+                REQUIRE( waitFor(
+                    [ & ] { return session.receivedCount() > static_cast<quint64>( lines ); },
+                    30000 ) );
             }
             QElapsedTimer timer;
             timer.start();
