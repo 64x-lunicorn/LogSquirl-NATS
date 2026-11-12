@@ -394,6 +394,7 @@ ConnectionDialog::ConnectionDialog( const Sessions* sessions, QWidget* parent )
 
 ConnectionDialog::~ConnectionDialog()
 {
+    // Never detached: the plugin's library may be unloaded after this.
     if ( listing_.joinable() ) {
         listing_.join();
     }
@@ -633,6 +634,9 @@ void ConnectionDialog::updateButtons()
     for ( auto* widget : replayWidgets_ ) {
         widget->setEnabled( replay );
     }
+    // One listing at a time: a second would wait for the first to answer
+    // on the GUI thread.
+    listStreamsButton_->setEnabled( replay && !listingStreams_ );
     subjectsEdit_->setEnabled( !replay );
     const auto start = static_cast<ReplayStart>( replayStartCombo_->currentData().toInt() );
     replayLastSpin_->setVisible( start == ReplayStart::Last );
@@ -642,6 +646,9 @@ void ConnectionDialog::updateButtons()
 
 void ConnectionDialog::listStreams()
 {
+    if ( listingStreams_ ) {
+        return; // the button is disabled meanwhile
+    }
     auto profile = currentProfile();
     if ( const char* secret = authMethodInfo( profile.auth.method ).secret ) {
         bool ok = false;
@@ -655,14 +662,16 @@ void ConnectionDialog::listStreams()
         }
     }
     if ( listing_.joinable() ) {
-        listing_.join(); // done: the button is enabled only once it answered
+        listing_.join(); // it has answered: ends at once
     }
-    listStreamsButton_->setEnabled( false );
+    listingStreams_ = true;
+    updateButtons();
     statusLabel_->setText(
         QStringLiteral( "Listing the streams of %1…" ).arg( redactUrls( profile.url ) ) );
     // In the background: connecting may take the connect timeout.  The
-    // destructor joins the thread, and Qt drops the answer if the dialog is
-    // gone before it is delivered.
+    // destructor joins the thread (natssession.h, listStreams(), says how
+    // long it may take), and Qt drops the answer if the dialog is gone
+    // before it is delivered.
     listing_ = std::thread( [ this, config = sessionConfig( profile ) ] {
         QString error;
         const auto names = nats_monitor::listStreams( config, &error );
@@ -677,7 +686,8 @@ void ConnectionDialog::listStreams()
 
 void ConnectionDialog::showStreams( const QStringList& names, const QString& error )
 {
-    listStreamsButton_->setEnabled( replayCheck_->isChecked() );
+    listingStreams_ = false;
+    updateButtons();
     if ( !error.isEmpty() ) {
         statusLabel_->setText(
             QStringLiteral( "The streams could not be listed: %1" ).arg( error ) );

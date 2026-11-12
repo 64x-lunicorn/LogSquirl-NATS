@@ -97,7 +97,8 @@ public:
     /// runs; @p sessions must outlive it.
     explicit ConnectionDialog( const Sessions* sessions, QWidget* parent = nullptr );
 
-    /// Waits for a listing of the streams still under way.
+    /// Waits for a listing of the streams still under way: at most its
+    /// timeouts (listStreams() in natssession.h).
     ~ConnectionDialog() override;
 
     /// Set up an empty new connection, with the default settings.
@@ -182,6 +183,7 @@ private:
     QLabel* statusLabel_;
     bool fillingProfiles_ = false; ///< The list is being filled: nothing is loaded.
     std::thread listing_;          ///< Lists the streams (listStreams()).
+    bool listingStreams_ = false;  ///< listing_ has yet to answer: List is disabled.
 };
 
 } // namespace nats_monitor

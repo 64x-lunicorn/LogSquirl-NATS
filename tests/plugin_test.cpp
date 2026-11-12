@@ -54,6 +54,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSpinBox>
+#include <QTcpServer>
 #include <QTemporaryDir>
 #include <QTimer>
 
@@ -1824,6 +1825,55 @@ SCENARIO( "a connection replays a JetStream stream from its tile", "[plugin][ser
         }
 
         logsquirl_plugin_shutdown();
+    }
+}
+
+SCENARIO( "listing the streams of a server that does not answer", "[plugin][replay]" )
+{
+    GIVEN( "a dialog whose URL is a server that accepts connections but never answers" )
+    {
+        // The TCP handshake completes in the backlog; no INFO ever comes,
+        // so a listing takes nats.c's connect timeout.
+        QTcpServer silent;
+        REQUIRE( silent.listen( QHostAddress::LocalHost ) );
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        sidebarButton( host, "newConnection" )->click();
+        auto* dialog = openDialog();
+        field( dialog, "url" )
+            ->setText( QStringLiteral( "nats://127.0.0.1:%1" ).arg( silent.serverPort() ) );
+        checkBox( dialog, "replay" )->setChecked( true );
+        auto* list = button( dialog, "listStreams" );
+
+        WHEN( "List is clicked, and Replay is unchecked and checked again meanwhile" )
+        {
+            list->click();
+            checkBox( dialog, "replay" )->setChecked( false );
+            checkBox( dialog, "replay" )->setChecked( true );
+
+            THEN( "List stays disabled until the listing has answered, and is enabled then" )
+            {
+                REQUIRE_FALSE( list->isEnabled() );
+                REQUIRE( waitFor(
+                    [ & ] { return statusText( dialog ).contains( "could not be listed" ); },
+                    10000 ) );
+                REQUIRE( list->isEnabled() );
+            }
+            logsquirl_plugin_shutdown();
+        }
+
+        WHEN( "the plugin shuts down while the listing waits" )
+        {
+            list->click();
+            QElapsedTimer timer;
+            timer.start();
+            logsquirl_plugin_shutdown();
+
+            THEN( "it waits no longer than the listing's connect timeout" )
+            {
+                REQUIRE( timer.elapsed() < 3000 );
+            }
+        }
     }
 }
 
