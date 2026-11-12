@@ -99,7 +99,7 @@ public:
     void rotated( const QString& path );
 
     /// The session reports an error and runs on: @p text is the detail now.
-    void reported( const QString& text );
+    void errorReported( const QString& text );
 
     /// The session's counts at @p nowMs (any monotonic clock, in
     /// milliseconds): the rate is what was received since the sample before,

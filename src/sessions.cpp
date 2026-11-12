@@ -145,7 +145,7 @@ bool Sessions::start( const ConnectionProfile& profile )
              [ this, name, description ]( const QString& message ) {
                  guarded( host_, "reporting a capture error",
                           [ this, &name, &description, &message ] {
-                              entries_[ name ].status.reported( message );
+                              entries_[ name ].status.errorReported( message );
                               Q_EMIT changed( name );
                               reportError( host_, description, message );
                           } );

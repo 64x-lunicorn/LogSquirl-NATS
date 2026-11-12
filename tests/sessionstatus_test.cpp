@@ -111,7 +111,7 @@ SCENARIO( "a connection's state follows its session's transitions", "[status]" )
 
             AND_WHEN( "it reports an error and runs on" )
             {
-                status.reported( "error: Permissions Violation" );
+                status.errorReported( "error: Permissions Violation" );
 
                 THEN( "it still runs, the error its detail" )
                 {

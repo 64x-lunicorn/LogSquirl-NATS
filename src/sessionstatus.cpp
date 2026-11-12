@@ -67,7 +67,7 @@ void ConnectionStatus::rotated( const QString& path )
     ++status_.files;
 }
 
-void ConnectionStatus::reported( const QString& text )
+void ConnectionStatus::errorReported( const QString& text )
 {
     status_.detail = text;
 }
