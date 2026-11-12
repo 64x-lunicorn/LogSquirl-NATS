@@ -100,7 +100,8 @@ it, and whether the replay has caught up with it (`ReplayStep`).
 **Caught up**:
 A replay has written the last message its stream held: it is then complete,
 or it follows live.
-_Avoid_: Done, finished (a finished session is one that failed)
+_Avoid_: Done, finished (how a session ends is its last transition: completed,
+failed or stopped)
 
 **Follow live**:
 Going on, once caught up, with what the stream stores from then on.

@@ -219,8 +219,9 @@ plugin's global state. Init gives it the plugin's adapter, `pluginHost()`
 shutdown; the tests give an in-memory one (below). The plugin API header
 does not change for it. `guarded()` takes the adapter it logs a failure
 to; the plugin's `guarded()` (plugin.h) is that on `pluginHost()`. The
-profile store, the dialog and the tab still log through the plugin's
-`hostLog()` and `hostNotify()`.
+dialog and the tab log a failure only through the plugin's `guarded()`, so
+on `pluginHost()`; the profile store logs nothing, it reports what failed to
+its caller.
 
 **Transitions and the connection status.** A session reports each step of
 its life once, as a typed `Transition`
