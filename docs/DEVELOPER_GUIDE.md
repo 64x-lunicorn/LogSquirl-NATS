@@ -221,6 +221,13 @@ stream sequence after a gap or a reconnect. The filter subject is the
   has interest retention …` marker (a status event) and is replayed.
 - **Stop** drains the subscription like a live one; for a consumer
   nats.c created, the drain (or unsubscribe) also deletes it on the server.
+  Unlike a live capture, a replay writes nothing nats.c delivers once
+  stopping (`Shared::discarding`; a callback waiting for room discards its
+  message too): what it holds, up to the pending limits, the stream keeps,
+  and writing it held a stop up for seconds under a sanitizer. It is
+  neither counted nor marked as dropped, since the user stopped it; what
+  was written until then is in order, followed by `stopped`. A test stops
+  a replay through a queue of one, whose backlog in nats.c is largest.
   Unload and quit stop the same way (`Sessions::stopAll()`). A lost
   connection keeps the consumer, so the replay resumes on reconnect; a
   Stop while disconnected leaves it to the inactive threshold (PLAN.md,

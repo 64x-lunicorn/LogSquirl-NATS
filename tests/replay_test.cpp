@@ -572,6 +572,34 @@ SCENARIO( "a replay whose writer cannot keep up is still written whole", "[serve
                 REQUIRE( markerText( lines.last() ) == "replay complete" );
             }
         }
+
+        WHEN( "it is stopped once the first lines are written" )
+        {
+            // nats.c holds what the writer has yet to take, up to the
+            // pending limits: the stream keeps it, a stop does not wait
+            // for it.
+            NatsSession session( config );
+            REQUIRE( session.start() );
+            REQUIRE(
+                waitFor( [ & ] { return readLines( session.filePath() ).size() > 100; }, 30000 ) );
+            QElapsedTimer timer;
+            timer.start();
+            session.stop();
+            const auto stopMs = timer.elapsed();
+            const auto lines = readLines( session.filePath() );
+
+            THEN( "it stops at once, what it wrote until then in order, none dropped" )
+            {
+                REQUIRE( stopMs < 3000 );
+                REQUIRE( markerText( lines.last() ) == "stopped" );
+                const auto written = sequences( lines );
+                REQUIRE( written.size() < kCount );
+                REQUIRE( written == range( 1, written.size() ) );
+                REQUIRE_FALSE( anyOf( lines, "dropped=" ) );
+                REQUIRE( session.droppedCount() == 0 );
+                REQUIRE( js.messageCount( "BIG" ) == kCount );
+            }
+        }
     }
 }
 

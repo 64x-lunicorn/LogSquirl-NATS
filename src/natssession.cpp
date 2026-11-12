@@ -47,7 +47,11 @@
  *      drains each subscription (or, not connected, waits until nats.c
  *      holds nothing for them), writing all the while, closes the
  *      connection, waits until nats.c has made its last callback, writes
- *      what is left and a "stopped" marker, and closes the file.
+ *      what is left and a "stopped" marker, and closes the file.  A
+ *      replay's callback instead discards what nats.c still delivers
+ *      once stopping, uncounted: the stream keeps it, and writing up to
+ *      the pending limits of it would hold the stop up.  Its drain still
+ *      deletes the consumer.
  *
  * What the callbacks use (Shared) is apart from the writer: should nats.c
  * not confirm within the timeout that its callbacks are over, Shared is
@@ -347,8 +351,11 @@ struct Shared {
     bool closed = false;   ///< nats.c made the closed callback.
 
     // ── Replay (natssession.h, REPLAY); set before subscribing ─────────
-    /// A full queue makes the message callback wait for room, not drop.
+    /// A full queue makes the message callback wait for room, not drop;
+    /// once stopping, it discards the messages (the stream keeps them).
     bool waitForRoom = false;
+    /// Stopping a replay: its callback discards what nats.c still holds.
+    std::atomic<bool> discarding{ false };
     std::condition_variable room; ///< Notified when the writer took the queue.
     bool followLive = false;      ///< Go on once caught up.
     /// Skip messages while the consumer has at least this many more
@@ -407,8 +414,8 @@ struct Shared {
 
     /// Queue the message line @p line (without terminator), or drop it if
     /// the queue is full.  The first message queued after drops is preceded
-    /// by their marker.
-    void pushMessage( QByteArray line )
+    /// by their marker.  False if a replay, stopping, discarded it instead.
+    bool pushMessage( QByteArray line )
     {
         {
             std::unique_lock<std::mutex> lock( mutex );
@@ -416,17 +423,21 @@ struct Shared {
                 // Not while stopping: the writer then waits for nats.c, no
                 // longer taking the queue.
                 room.wait( lock, [ this ] { return queuedMessages < queueLimit || stopping; } );
+                if ( stopping ) {
+                    return false; // the user stopped it, the stream keeps it: no drop
+                }
             }
             if ( queuedMessages >= queueLimit ) {
                 ++queueFullUnmarked;
                 dropped.fetch_add( 1 );
-                return;
+                return true;
             }
             markQueueFullLocked();
             enqueueLocked( std::move( line ) );
             ++queuedMessages;
         }
         wake.notify_all();
+        return true;
     }
 
     /// Queue the marker of the queue-full drops not marked yet; under the mutex.
@@ -528,12 +539,13 @@ struct Shared {
     template <typename ToLine>
     void take( SubscriptionState& subscription, natsMsg* msg, ToLine toLine )
     {
-        received.fetch_add( 1, std::memory_order_relaxed );
         // Drops since the last message: the gap is before this one.
         markSlowConsumer( subscription );
         auto line = formatLine( toLine(), format );
         natsMsg_Destroy( msg );
-        pushMessage( std::move( line ) );
+        if ( pushMessage( std::move( line ) ) ) {
+            received.fetch_add( 1, std::memory_order_relaxed );
+        }
     }
 
     // ── nats.c callbacks, on nats.c's threads ────────────────────────
@@ -552,6 +564,12 @@ struct Shared {
     {
         auto& subscription = subscriptionOf( closure, handle );
         auto* self = subscription.shared;
+        if ( self->discarding.load() ) {
+            // Stopped: what nats.c still holds, up to the pending limits,
+            // the stream keeps; writing it would hold up the stop.
+            natsMsg_Destroy( msg );
+            return;
+        }
 
         jsMsgMetaData* meta = nullptr;
         if ( natsMsg_GetMetaData( &meta, msg ) != NATS_OK ) {
@@ -1186,7 +1204,8 @@ struct NatsSession::Worker {
             std::lock_guard<std::mutex> lock( shared->mutex );
             shared->stopping = true;
         }
-        shared->room.notify_all(); // a replay's callback waits no more
+        shared->discarding = shared->waitForRoom; // a replay writes nothing more
+        shared->room.notify_all();                // a replay's callback waits no more
         subscriptions.erase( std::remove( subscriptions.begin(), subscriptions.end(), nullptr ),
                              subscriptions.end() );
         if ( !subscriptions.empty() ) {

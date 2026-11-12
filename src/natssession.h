@@ -104,7 +104,9 @@
  * except that a full queue makes the delivery wait instead of dropping: the
  * stream holds the messages, and JetStream's flow control holds the server
  * back meanwhile, so a replay of any size is written whole at the speed of
- * the writer.  stop() ends a replay at any point, as it does a capture.
+ * the writer.  stop() ends a replay at any point: what was queued is
+ * written, what nats.c still holds is discarded, uncounted and with no
+ * dropped= marker (the stream keeps it), so a stop does not wait for it.
  *
  * "The last N messages" with a filter subject reads the stream from its
  * start and writes the last N that match; without a filter it starts at
