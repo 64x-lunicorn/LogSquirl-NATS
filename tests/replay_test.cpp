@@ -39,8 +39,13 @@
 #include "natssession.h"
 #include "sessiontest.h"
 
+#include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QRegularExpression>
+
+#include <iostream>
 
 using nats_monitor::NatsSession;
 using nats_monitor::ReplayStart;
@@ -143,6 +148,20 @@ void replayToTheEnd( NatsSession& session, int timeoutMs = 10000 )
     REQUIRE( session.start() );
     REQUIRE( waitFor( [ & ] { return completed == 1; }, timeoutMs ) );
     REQUIRE_FALSE( session.isRunning() );
+}
+
+/// Start @p session, a replay that follows live, and wait until it caught up.
+void startAndCatchUp( NatsSession& session )
+{
+    REQUIRE( session.start() );
+    REQUIRE( waitFor(
+        [ & ] {
+            const auto lines = readLines( session.filePath() );
+            return std::any_of( lines.begin(), lines.end(), []( const QString& line ) {
+                return markerText( line ) == "caught up, following live";
+            } );
+        },
+        10000 ) );
 }
 
 } // namespace
@@ -553,6 +572,118 @@ SCENARIO( "a replay without a stream name does not start", "[replay]" )
         {
             NatsSession session( replayOf( "nats://127.0.0.1:1", " " ) );
             REQUIRE_FALSE( session.start() );
+        }
+    }
+}
+
+SCENARIO( "a replay leaves no consumer behind", "[server][replay][cleanup]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a stream of three messages, with no consumer" )
+    {
+        NatsServer server( withJetStream() );
+        Publisher publisher( server.url() );
+        JetStream js( publisher );
+        js.addStream( "ORDERS", { "orders.>" } );
+        for ( int i = 1; i <= 3; ++i ) {
+            js.publish( "orders.eu", QByteArray::number( i ) );
+        }
+        REQUIRE( js.consumers( "ORDERS" ).isEmpty() );
+
+        WHEN( "a replay that follows live runs" )
+        {
+            auto config = replayOf( server.url(), "ORDERS" );
+            config.replay.followLive = true;
+            NatsSession session( config );
+            startAndCatchUp( session );
+
+            THEN( "the stream has one consumer while it runs, and none once it is stopped" )
+            {
+                REQUIRE( js.consumers( "ORDERS" ).size() == 1 );
+                session.stop();
+                REQUIRE( js.consumers( "ORDERS" ).isEmpty() );
+            }
+        }
+
+        WHEN( "a replay ends by itself, complete" )
+        {
+            NatsSession session( replayOf( server.url(), "ORDERS" ) );
+            replayToTheEnd( session );
+
+            THEN( "the stream has no consumer" )
+            {
+                REQUIRE( js.consumers( "ORDERS" ).isEmpty() );
+            }
+        }
+    }
+}
+
+namespace {
+
+/// The test, run in a process of its own, that the next scenario kills.
+constexpr const char* kKilledReplay = "a replay runs in a process of its own until it is killed";
+
+} // namespace
+
+// Run by the next scenario only, as a child process: a replay of the stream
+// LOGSQUIRL_NATS_REPLAY_STREAM on LOGSQUIRL_NATS_REPLAY_URL, with the
+// consumer's inactive threshold LOGSQUIRL_NATS_REPLAY_INACTIVE_MS.  It says
+// "caught up" on stdout and runs until it is killed.
+TEST_CASE( "a replay runs in a process of its own until it is killed", "[.][child]" )
+{
+    const auto env = QProcessEnvironment::systemEnvironment();
+    auto config = replayOf( env.value( "LOGSQUIRL_NATS_REPLAY_URL" ),
+                            env.value( "LOGSQUIRL_NATS_REPLAY_STREAM" ) );
+    config.replay.followLive = true;
+    config.replay.inactiveThresholdMs = env.value( "LOGSQUIRL_NATS_REPLAY_INACTIVE_MS" ).toInt();
+    NatsSession session( config );
+    startAndCatchUp( session );
+    std::cout << "caught up" << std::endl;
+    waitFor( [] { return false; }, 60000 );
+}
+
+SCENARIO( "the consumer of a replay that is killed disappears after its inactive threshold",
+          "[server][replay][cleanup]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a replay with an inactive threshold of 500 ms, in a process of its own" )
+    {
+        NatsServer server( withJetStream() );
+        Publisher publisher( server.url() );
+        JetStream js( publisher );
+        js.addStream( "ORDERS", { "orders.>" } );
+        js.publish( "orders.eu", "1" );
+
+        QProcess child;
+        auto env = QProcessEnvironment::systemEnvironment();
+        env.insert( "LOGSQUIRL_NATS_REPLAY_URL", server.url() );
+        env.insert( "LOGSQUIRL_NATS_REPLAY_STREAM", "ORDERS" );
+        env.insert( "LOGSQUIRL_NATS_REPLAY_INACTIVE_MS", "500" );
+        child.setProcessEnvironment( env );
+        child.start( QCoreApplication::applicationFilePath(), { kKilledReplay } );
+        QByteArray output;
+        REQUIRE( waitFor(
+            [ & ] {
+                output += child.readAllStandardOutput();
+                return output.contains( "caught up" );
+            },
+            10000 ) );
+        REQUIRE( js.consumers( "ORDERS" ).size() == 1 );
+
+        WHEN( "the process is killed" )
+        {
+            child.kill();
+            REQUIRE( child.waitForFinished( 5000 ) );
+
+            THEN( "its consumer is gone within a few seconds (the server's default: 5 s)" )
+            {
+                QElapsedTimer timer;
+                timer.start();
+                REQUIRE( waitFor( [ & ] { return js.consumers( "ORDERS" ).isEmpty(); }, 3000 ) );
+                INFO( "gone after " << timer.elapsed() << " ms" );
+            }
         }
     }
 }

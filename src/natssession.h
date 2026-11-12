@@ -158,6 +158,10 @@ inline constexpr qint64 kBytesPerMiB = 1024 * 1024;
 /// The size limit in MiB the dialog proposes, unless the user chose another.
 inline constexpr int kDefaultMaxFileMiB = 256;
 
+/// The default inactive threshold of a replay's consumer, in milliseconds:
+/// the server deletes it this long after its reader went away.
+inline constexpr int kDefaultInactiveThresholdMs = 5000;
+
 /// How a session proves who it is to the server.
 enum class AuthMethod {
     None,         ///< No credentials.
@@ -219,6 +223,9 @@ struct ReplayConfig {
     /// Once caught up, go on with the messages the stream stores from then
     /// on, instead of ending.
     bool followLive = false;
+    /// How long the server keeps the replay's consumer once nobody reads
+    /// it: after a crash, or a connection lost for good.
+    int inactiveThresholdMs = kDefaultInactiveThresholdMs;
 
     bool enabled() const
     {

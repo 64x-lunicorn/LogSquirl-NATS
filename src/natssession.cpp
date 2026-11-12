@@ -888,6 +888,10 @@ struct NatsSession::Worker {
         options.Stream = stream.constData();
         options.Ordered = true; // ephemeral, AckNone, flow control: nats.c's ordered consumer
         options.Config.DeliverPolicy = js_DeliverAll;
+        // Stop deletes the consumer; this covers a crash or a connection
+        // lost for good.  nats.c keeps it when it recreates the consumer.
+        options.Config.InactiveThreshold
+            = static_cast<int64_t>( replay.inactiveThresholdMs ) * 1000000;
         switch ( replay.start ) {
         case ReplayStart::All:
             break;

@@ -255,6 +255,24 @@ public:
         return ns / 1000;
     }
 
+    /// The names of the consumers of the stream @p name, sorted.
+    QStringList consumers( const char* name )
+    {
+        jsConsumerNamesList* list = nullptr;
+        const auto status = js_ConsumerNames( &list, js_, name, nullptr, nullptr );
+        if ( status == NATS_NOT_FOUND ) {
+            return {}; // nats.c's answer for none
+        }
+        Publisher::check( status, "js_ConsumerNames" );
+        QStringList names;
+        for ( int i = 0; list && i < list->Count; ++i ) {
+            names << QString::fromUtf8( list->List[ i ] );
+        }
+        jsConsumerNamesList_Destroy( list );
+        names.sort();
+        return names;
+    }
+
     jsCtx* context() const
     {
         return js_;
