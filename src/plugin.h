@@ -39,6 +39,7 @@
 namespace nats_monitor {
 
 class ConnectionDialog;
+class ProfileStore;
 class Sessions;
 class SidebarWidget;
 
@@ -52,6 +53,7 @@ struct PluginState {
     const LogSquirlHostApi* api = nullptr; ///< Host API function table.
     void* handle = nullptr;                ///< Opaque plugin instance handle.
     Sessions* sessions = nullptr;          ///< The captures, created by init.
+    ProfileStore* profiles = nullptr;      ///< The saved connections (nats.ini), created by init.
     ConnectionDialog* dialog = nullptr;    ///< The connection dialog, created by init.
     /// The sidebar tab, created by init.  Weak: the host parents it, and a
     /// host window that goes first takes it along.
@@ -69,7 +71,8 @@ extern PluginState g_state;
 void hostLog( int level, const QString& message );
 
 /// The plugin's settings file, nats.ini in its configuration directory;
-/// empty without a host to say where that is.
+/// empty without a host to say where that is.  Read by init, which opens
+/// the profile store (profiles.h) on it: only the store reads and writes it.
 QString settingsFile();
 
 /// The directory the plugin's temporary directories go in (tempdirs.h):

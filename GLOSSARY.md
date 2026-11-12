@@ -5,6 +5,24 @@ JetStream stream, into files LogSquirl follows as tabs.
 
 ## Language
 
+### Connections
+
+**Connection**:
+A connection's settings saved under a name: its server, how it logs in, TLS,
+and the subjects it captures or the stream it replays; a tile in the sidebar.
+Never a password or token.
+_Avoid_: Session (a session is a connection running)
+
+**Profile**:
+A connection as saved in nats.ini (`ConnectionProfile`).
+
+**Profile store**:
+The one owner of nats.ini, opened on its path: lists, finds, saves and
+deletes the profiles, saying why when it cannot, and remembers the defaults a
+new connection proposes, such as the size limit saved last (`ProfileStore`).
+The dialog and the sidebar both go through it.
+_Avoid_: Settings, config file
+
 ### Replay
 
 **Replay**:

@@ -24,8 +24,9 @@
  * The four exported symbols of a LogSquirl plugin:
  *
  *   - logsquirl_plugin_get_info()   → static metadata
- *   - logsquirl_plugin_init()       → store host API, create the sessions, the dialog and the
- *                                     sidebar tab, register the menu action and the tab
+ *   - logsquirl_plugin_init()       → store host API, create the sessions, the profile store,
+ *                                     the dialog and the sidebar tab, register the menu action
+ *                                     and the tab
  *   - logsquirl_plugin_shutdown()   → stop the sessions, close nats.c, clear state
  *   - logsquirl_plugin_configure()  → plugin settings (none yet)
  *
@@ -43,6 +44,7 @@
 #include "plugin.h"
 
 #include "connectiondialog.h"
+#include "profiles.h"
 #include "sessions.h"
 #include "sidebarwidget.h"
 #include "tempdirs.h"
@@ -156,12 +158,12 @@ static void showNatsMonitor( void* /* userData */ )
     guarded( "showing the NATS Monitor dialog", [] { showDialog(); } );
 }
 
-/// Create the sidebar tab and connect it to the dialog, which carries out
-/// what is asked in the tab: new, edit and delete.
+/// Create the sidebar tab and connect it to the dialog, which opens for
+/// what is asked in the tab: new and edit.  Both follow the profile store.
 static void createSidebar()
 {
     auto& st = nats_monitor::g_state;
-    st.sidebar = new nats_monitor::SidebarWidget( st.sessions );
+    st.sidebar = new nats_monitor::SidebarWidget( st.profiles, st.sessions );
     auto* sidebar = st.sidebar.data();
     auto* dialog = st.dialog;
     QObject::connect( sidebar, &nats_monitor::SidebarWidget::newConnectionRequested, dialog,
@@ -178,20 +180,6 @@ static void createSidebar()
                               showDialog();
                           } );
                       } );
-    QObject::connect( sidebar, &nats_monitor::SidebarWidget::deleteRequested, dialog,
-                      [ dialog ]( const QString& name ) {
-                          guarded( "deleting a connection", [ dialog, &name ] {
-                              if ( !dialog->deleteConnection( name ) ) {
-                                  nats_monitor::hostNotify(
-                                      QStringLiteral( "NATS Monitor: the connection %1 could not "
-                                                      "be deleted." )
-                                          .arg( name ) );
-                              }
-                          } );
-                      } );
-    QObject::connect(
-        dialog, &nats_monitor::ConnectionDialog::profilesChanged, sidebar,
-        [ sidebar ] { guarded( "showing the connections", [ sidebar ] { sidebar->reload(); } ); } );
 }
 
 // ── Exported C entry points ──────────────────────────────────────────────
@@ -238,7 +226,12 @@ LOGSQUIRL_PLUGIN_EXPORT int logsquirl_plugin_init( const LogSquirlHostApi* api, 
 
         auto& st = nats_monitor::g_state;
         st.sessions = new nats_monitor::Sessions( nats_monitor::tempRoot() );
-        st.dialog = new nats_monitor::ConnectionDialog( st.sessions );
+        // The one owner of nats.ini; it deletes no connection that runs.
+        st.profiles = new nats_monitor::ProfileStore(
+            nats_monitor::settingsFile(), [ sessions = st.sessions ]( const QString& name ) {
+                return sessions->isRunning( name );
+            } );
+        st.dialog = new nats_monitor::ConnectionDialog( st.profiles, st.sessions );
 
         // The host shuts the plugin down both when LogSquirl quits (after
         // aboutToQuit) and when the plugin is disabled or updated at
@@ -303,6 +296,11 @@ LOGSQUIRL_PLUGIN_EXPORT void logsquirl_plugin_shutdown( void )
     if ( st.dialog ) {
         guarded( "shutdown", [ &st ] { delete st.dialog; } );
         st.dialog = nullptr;
+    }
+    // After the tab and the dialog, which use it; before the sessions it asks.
+    if ( st.profiles ) {
+        guarded( "shutdown", [ &st ] { delete st.profiles; } );
+        st.profiles = nullptr;
     }
     if ( st.sessions ) {
         // Stops the sessions: their files are flushed and kept for the tabs.

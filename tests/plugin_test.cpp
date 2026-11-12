@@ -35,6 +35,7 @@
 #include "capture.h"
 #include "fakehost.h"
 #include "natsserver.h"
+#include "profiles.h"
 #include "sessiontest.h"
 
 #include "testconfig.h"
@@ -59,8 +60,10 @@
 #include <QTimer>
 
 #include <functional>
+#include <memory>
 #include <optional>
 
+using nats_monitor::ProfileStore;
 using nats_test::Capture;
 using nats_test::ConfiguredServer;
 using nats_test::FakeHost;
@@ -275,6 +278,37 @@ void answerQuestion( QMessageBox::StandardButton button )
         REQUIRE( box );
         box->button( button )->click();
     } );
+}
+
+/// Answer the next question with Yes, and the warning that follows with OK;
+/// the warning's text, once it was shown.
+std::shared_ptr<QString> confirmAndReadWarning()
+{
+    auto warning = std::make_shared<QString>();
+    auto* timer = new QTimer;
+    timer->setInterval( 10 );
+    auto ticks = std::make_shared<int>( 0 );
+    QObject::connect( timer, &QTimer::timeout, [ timer, warning, ticks ] {
+        auto* box = qobject_cast<QMessageBox*>( QApplication::activeModalWidget() );
+        if ( ++*ticks > 1000 ) { // no warning in 10 s: give up
+            timer->stop();
+            timer->deleteLater();
+            return;
+        }
+        if ( !box || !box->isVisible() ) {
+            return;
+        }
+        if ( box->icon() == QMessageBox::Question ) {
+            box->button( QMessageBox::Yes )->click();
+            return;
+        }
+        timer->stop();
+        timer->deleteLater();
+        *warning = box->text();
+        box->button( QMessageBox::Ok )->click();
+    } );
+    timer->start();
+    return warning;
 }
 
 /// Save the settings in @p dialog as the connection @p name.
@@ -1359,14 +1393,34 @@ SCENARIO( "each saved connection is a tile in the sidebar", "[plugin][sidebar]" 
                 answerQuestion( QMessageBox::Yes );
                 tileButton( host, "dev", "delete" )->click();
 
-                THEN( "its tile goes, and so does the saved connection" )
+                THEN( "its tile goes, and so does the saved connection, without the dialog "
+                      "taking part" )
                 {
                     REQUIRE( tileNames( host ) == QStringList{ "prod" } );
                     REQUIRE( comboBox( openDialog(), "profile" )->findText( "dev" ) < 0 );
+                    REQUIRE_FALSE( statusText( openDialog() ).contains( "deleted" ) );
+                    REQUIRE( host.notifications.isEmpty() );
                     logsquirl_plugin_shutdown();
                     host.menuActions.clear();
                     host.sidebarTabs.clear();
                     REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+                    REQUIRE( tileNames( host ) == QStringList{ "prod" } );
+                }
+            }
+
+            AND_WHEN( "dev is deleted elsewhere meanwhile, then Delete is clicked on its tile, "
+                      "and confirmed" )
+            {
+                // Another store on the file: another LogSquirl, say.
+                ProfileStore elsewhere( host.configDir() + "/nats.ini" );
+                REQUIRE( elsewhere.remove( "dev" ).isEmpty() );
+                REQUIRE( tileNames( host ) == QStringList{ "prod", "dev" } );
+                const auto warning = confirmAndReadWarning();
+                tileButton( host, "dev", "delete" )->click();
+
+                THEN( "a warning says why it could not be deleted, and the tile goes" )
+                {
+                    REQUIRE( *warning == "There is no saved connection dev." );
                     REQUIRE( tileNames( host ) == QStringList{ "prod" } );
                 }
             }

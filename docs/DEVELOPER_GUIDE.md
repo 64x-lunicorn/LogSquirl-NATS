@@ -16,9 +16,10 @@ decisions behind it are in [PLAN.md](PLAN.md); what the user sees is in the
 plugin.cpp            entry points (logsquirl_plugin_*), each through guarded()
   │  registers        the sidebar tab "NATS" (register_sidebar_tab) and
   │                   Plugins → NATS Monitor…  (register_menu_action)
+  ├─ ProfileStore     the one owner of nats.ini: the saved connections (profiles.h)
   ├─ SidebarWidget    the tab: New connection…, Stop all, a tile per saved connection
   │    └─ ConnectionTile × N  plain card: summary, details, Start/Stop, Edit, Delete
-  ├─ ConnectionDialog edits and saves connections (profiles.h); opened from the tab
+  ├─ ConnectionDialog edits and saves connections through the store; opened from the tab
   └─ Sessions         one session per connection; state and counts for the tiles
        └─ NatsSession × N   children of Sessions
             ├─ nats.c threads   callbacks: format a line, enqueue
@@ -43,15 +44,16 @@ a failure to the host log instead.
 
 - **init** removes the temporary directories of LogSquirl processes that no
   longer run, creates `Sessions` (with the temporary root its sessions
-  write below), the dialog (parentless: it must not die
+  write below), the profile store on `nats.ini` (told by `Sessions` which
+  connections run), the dialog (parentless: it must not die
   with a main window) and the sidebar tab, connects the tab's requests (new,
-  edit, delete) to the dialog and the dialog's saves back to the tab,
-  registers the menu action and the tab, and logs which nats.c and OpenSSL
-  it carries. A failure is undone by shutdown, and init returns 1.
+  edit) to the dialog, registers the menu action and the tab, and logs
+  which nats.c and OpenSSL it carries. The dialog and the tab follow the
+  store's `changed()`. A failure is undone by shutdown, and init returns 1.
 - **shutdown** unregisters and deletes the sidebar tab (before the sessions
   it shows; `PluginState` holds it in a `QPointer`, since the host parents
-  it and a host window deleted first takes it along), deletes the dialog,
-  stops every session (`Sessions::stopAll()`: files flushed and kept for
+  it and a host window deleted first takes it along), deletes the dialog
+  and then the profile store, stops every session (`Sessions::stopAll()`: files flushed and kept for
   the tabs) and deletes `Sessions`. Only when LogSquirl quits
   (it saw `aboutToQuit`), not when the plugin is disabled or updated with
   its tabs still open, does it remove this process's temporary directories.
@@ -140,9 +142,10 @@ of the server tests) use limits of a few hundred bytes, and make a rotation
 fail by putting a directory where the next file goes, which works on every
 platform and also for root.
 
-The size limit is saved with the connection (its profile, below). Save
-also writes it to `nats.ini` (`capture/maxFileMiB`) in the directory the
-host's `get_config_dir` gives, and a new connection proposes it. The tests'
+The size limit is saved with the connection (its profile, below). The
+profile store also remembers it in `nats.ini` (`capture/maxFileMiB`) in the
+directory the host's `get_config_dir` gives, and a new connection proposes
+it (`ProfileStore::newProfile()`). The tests'
 `FakeHost` gives each host a configuration directory of its own.
 
 ### Several subjects, several sessions
@@ -315,8 +318,9 @@ permissions the README lists are checked by `permissions_test.cpp`
 The tab "NATS" ([`src/sidebarwidget.h`](../src/sidebarwidget.h)) is
 registered with `register_sidebar_tab` at init and unregistered at
 shutdown. It holds *New connection…*, *Stop all*, and one tile per saved
-connection in the order they were saved, rebuilt when the dialog saves or
-deletes one (`ConnectionDialog::profilesChanged`).
+connection in the order they were saved, rebuilt whenever the profile store
+saves or deletes one (`ProfileStore::changed`), from the dialog or from a
+tile.
 
 - **The tile** ([`src/connectiontile.h`](../src/connectiontile.h)) is a
   plain `QFrame` that knows nothing of NATS: a state dot, a title, a
@@ -338,11 +342,13 @@ deletes one (`ConnectionDialog::profilesChanged`).
   number after a rotation, and `connected to <server>`; while connecting,
   the last event; after a failure, `failed: <why>`; after Stop, what it
   captured.
-- **Start** reads the profile from `nats.ini` and, when its method takes a
+- **Start** finds the profile in the store and, when its method takes a
   password or token, asks for it (`QInputDialog`, password echo); it is
   never saved, and an empty answer starts nothing. **Delete** asks
-  (`QMessageBox`) and is hidden while the connection connects or runs; the
-  dialog refuses to delete a running connection too.
+  (`QMessageBox`), then deletes through the store, not the dialog; it is
+  hidden while the connection connects or runs, and the store refuses to
+  delete a running connection too. When the store cannot delete, a warning
+  says why (it runs, it is no longer saved, the file could not be written).
 - **Edit** while the connection runs: the tile shows the saved settings at
   once, the capture runs on with those it started with (the dialog says
   so) until it is stopped and started again. A connection saved under
@@ -353,8 +359,9 @@ The tile's states are tested on the tile itself (`[tile]`,
 `FakeHost`, which records the
 sidebar tabs registered and unregistered: tiles created, updated and
 deleted, Start and Stop, the details of a running tile, two tiles at once,
-and drops on a tile. They answer the password prompt and the delete
-question by finding the modal dialog from a timer (`onNextModal()` in
+and drops on a tile, and a delete the store refuses. They answer the
+password prompt, the delete question and the warning by finding the modal
+dialog from a timer (`onNextModal()` and `confirmAndReadWarning()` in
 `plugin_test.cpp`).
 
 ### The Log Format
@@ -421,11 +428,26 @@ the connection's tile shows it (`failed: …`) and a notification says it.
 
 The dialog saves each connection as a named **profile**
 ([`src/profiles.h`](../src/profiles.h)) in `nats.ini`, array `profiles`:
-URLs, method, user name, file paths, the TLS settings, and in the group
-`capture` the subjects and limits (a profile saved without them gets the
-defaults). Never a password or token: those are asked for at Start; a URL
-with credentials in it is not saved. `startProblem()` says what a profile
-lacks to start; the dialog checks it at Save, `Sessions` again at Start.
+URLs, method, user name, file paths, the TLS settings, in the group
+`capture` the subjects and limits, and in the group `replay` the stream
+(a profile saved without them, as 0.1.0 did, gets the defaults). Never a
+password or token: those are asked for at Start; a URL with credentials in
+it is not saved. `startProblem()` says what a profile lacks to start; the
+dialog checks it at Save, `Sessions` again at Start.
+
+The **profile store** (`ProfileStore`, in profiles.h) is the only code that
+reads or writes `nats.ini`. It is opened on a file path, and told by a
+function which connections run, so it needs neither the host nor
+`Sessions` to be tested. `list()`, `find()`, `upsert()` (replace the
+profile of that name where it is, or add it at the end) and `remove()`;
+`upsert()` and `remove()` return why they could not, in words for the user,
+and empty when they did. `newProfile()` gives a new connection's settings,
+with the size limit saved last. It reads the file on each call, and emits
+`changed()` after each save or delete, which the dialog's list and the tab
+follow. `profiles_test.cpp` (`[profiles]`) tests it on temporary files:
+round trips of every setting, the order, replacing, renaming, removing, a
+running connection refused, the remembered size limit, and files as 0.1.0
+and the version before the store wrote them, byte for byte.
 
 The tests (`[auth]`, part of the server tests) are at the main seam,
 `auth_test.cpp`: a server started with a fixture configuration, a session

@@ -35,6 +35,7 @@ add_executable(logsquirl_nats_tests
     capture_test.cpp
     plugininfo_test.cpp
     plugin_test.cpp
+    profiles_test.cpp
     library_test.cpp
     natsserver_test.cpp
     lineformat_test.cpp

@@ -46,7 +46,6 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpressionValidator>
-#include <QSettings>
 #include <QSpinBox>
 #include <QTimeZone>
 #include <QUrl>
@@ -63,40 +62,6 @@ namespace {
 constexpr int kMaxPendingMegabytes
     = static_cast<int>( std::numeric_limits<int>::max() / kBytesPerMiB );
 
-/// Where the size limit is saved.
-constexpr const char* kMaxFileMiBKey = "capture/maxFileMiB";
-
-/// The size limit saved last time, or the default.
-int savedMaxFileMiB()
-{
-    const auto file = settingsFile();
-    if ( file.isEmpty() ) {
-        return kDefaultMaxFileMiB;
-    }
-    bool ok = false;
-    const auto value = QSettings( file, QSettings::IniFormat )
-                           .value( kMaxFileMiBKey, kDefaultMaxFileMiB )
-                           .toInt( &ok );
-    return ok && value >= 0 && value <= kMaxFileMiBLimit ? value : kDefaultMaxFileMiB;
-}
-
-/// Save the size limit @p mib for the next session.
-void saveMaxFileMiB( int mib )
-{
-    const auto file = settingsFile();
-    if ( file.isEmpty() ) {
-        return;
-    }
-    QSettings settings( file, QSettings::IniFormat );
-    settings.setValue( kMaxFileMiBKey, mib );
-    settings.sync();
-    if ( settings.status() != QSettings::NoError ) {
-        hostLog( LOGSQUIRL_LOG_WARNING,
-                 QStringLiteral( "NATS Monitor: the size limit could not be saved to %1." )
-                     .arg( file ) );
-    }
-}
-
 /// The height of @p area for @p lines lines of its font, with @p margin
 /// around them.
 int heightForLines( const QAbstractScrollArea* area, int lines, int margin = 0 )
@@ -112,8 +77,10 @@ const AuthMethodInfo& chosenMethod( const QComboBox* combo )
 
 } // namespace
 
-ConnectionDialog::ConnectionDialog( const Sessions* sessions, QWidget* parent )
+ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sessions,
+                                    QWidget* parent )
     : QDialog( parent )
+    , profiles_( profiles )
     , sessions_( sessions )
     , profileCombo_( new QComboBox( this ) )
     , saveProfileButton_( new QPushButton( QStringLiteral( "Save" ), this ) )
@@ -233,7 +200,6 @@ ConnectionDialog::ConnectionDialog( const Sessions* sessions, QWidget* parent )
     maxFileSpin_->setGroupSeparatorShown( true );
     maxFileSpin_->setSuffix( QStringLiteral( " MiB" ) );
     maxFileSpin_->setSpecialValueText( QStringLiteral( "No limit" ) );
-    maxFileSpin_->setValue( savedMaxFileMiB() );
     maxFileSpin_->setToolTip(
         QStringLiteral( "When a file reaches this size, the capture goes on in a new file, "
                         "opened in a new tab; a new connection proposes the last one saved" ) );
@@ -383,6 +349,11 @@ ConnectionDialog::ConnectionDialog( const Sessions* sessions, QWidget* parent )
     connect( replayStartCombo_, &QComboBox::currentIndexChanged, this,
              &ConnectionDialog::updateButtons );
     connect( listStreamsButton_, &QPushButton::clicked, this, &ConnectionDialog::listStreams );
+    // Saved here, or deleted from a tile: the list follows, the name entered stays.
+    connect( profiles_, &ProfileStore::changed, this, [ this ] {
+        guarded( "listing the connections",
+                 [ this ] { fillProfileList( profileCombo_->currentText().trimmed() ); } );
+    } );
 
     newConnection();
     resize( 520, sizeHint().height() );
@@ -468,11 +439,8 @@ void ConnectionDialog::showProfile( const ConnectionProfile& profile )
 
 void ConnectionDialog::newConnection()
 {
-    ConnectionProfile defaults;
-    defaults.url = QString::fromLatin1( kDefaultUrl );
-    defaults.maxFileMiB = savedMaxFileMiB();
     fillProfileList( {} );
-    showProfile( defaults );
+    showProfile( profiles_->newProfile() );
     statusLabel_->setText(
         QStringLiteral( "Enter a name and the settings, then Save: the connection gets a tile in "
                         "the NATS sidebar, where it is started." ) );
@@ -492,7 +460,7 @@ void ConnectionDialog::fillProfileList( const QString& current )
 {
     fillingProfiles_ = true;
     profileCombo_->clear();
-    for ( const auto& profile : loadProfiles( settingsFile() ) ) {
+    for ( const auto& profile : profiles_->list() ) {
         profileCombo_->addItem( profile.name );
     }
     profileCombo_->setCurrentIndex( profileCombo_->findText( current ) );
@@ -506,7 +474,7 @@ void ConnectionDialog::loadProfile( int index )
         return;
     }
     const auto name = profileCombo_->itemText( index );
-    const auto profile = findProfile( settingsFile(), name );
+    const auto profile = profiles_->find( name );
     if ( !profile ) {
         return;
     }
@@ -542,29 +510,17 @@ void ConnectionDialog::saveProfile()
         statusLabel_->setText( problem );
         return;
     }
-    auto profiles = loadProfiles( settingsFile() );
-    const auto existing = std::find_if( profiles.begin(), profiles.end(),
-                                        [ & ]( const auto& p ) { return p.name == profile.name; } );
-    if ( existing != profiles.end() ) {
-        *existing = profile;
-    }
-    else {
-        profiles << profile;
-    }
-    if ( !saveProfiles( settingsFile(), profiles ) ) {
-        statusLabel_->setText( QStringLiteral( "The connection %1 could not be saved to %2." )
-                                   .arg( profile.name, settingsFile() ) );
+    // The list follows the store (ProfileStore::changed), the name chosen.
+    if ( const auto problem = profiles_->upsert( profile ); !problem.isEmpty() ) {
+        statusLabel_->setText( problem );
         return;
     }
-    saveMaxFileMiB( profile.maxFileMiB );
-    fillProfileList( profile.name );
     const char* secret = authMethodInfo( profile.auth.method ).secret;
     if ( sessions_ && sessions_->isRunning( profile.name ) ) {
         statusLabel_->setText( QStringLiteral( "Connection %1 saved. Its capture runs on with "
                                                "the settings it started with: stop and start it "
                                                "to use the new ones." )
                                    .arg( profile.name ) );
-        Q_EMIT profilesChanged();
         return;
     }
     statusLabel_->setText(
@@ -573,31 +529,16 @@ void ConnectionDialog::saveProfile()
                      .arg( profile.name, QLatin1String( secret ) )
                : QStringLiteral( "Connection %1 saved: start it in the NATS sidebar." )
                      .arg( profile.name ) );
-    Q_EMIT profilesChanged();
 }
 
-bool ConnectionDialog::deleteConnection( const QString& name )
+void ConnectionDialog::deleteConnection( const QString& name )
 {
-    if ( sessions_ && sessions_->isRunning( name ) ) {
-        statusLabel_->setText(
-            QStringLiteral( "The connection %1 is capturing: stop it to delete it." ).arg( name ) );
-        return false;
-    }
-    auto profiles = loadProfiles( settingsFile() );
-    const auto removed = profiles.removeIf( [ & ]( const auto& p ) { return p.name == name; } );
-    if ( removed == 0 ) {
-        statusLabel_->setText( QStringLiteral( "There is no saved connection %1." ).arg( name ) );
-        return false;
-    }
-    if ( !saveProfiles( settingsFile(), profiles ) ) {
-        statusLabel_->setText( QStringLiteral( "The connection %1 could not be deleted from %2." )
-                                   .arg( name, settingsFile() ) );
-        return false;
+    if ( const auto problem = profiles_->remove( name ); !problem.isEmpty() ) {
+        statusLabel_->setText( problem );
+        return;
     }
     fillProfileList( {} );
     statusLabel_->setText( QStringLiteral( "Connection %1 deleted." ).arg( name ) );
-    Q_EMIT profilesChanged();
-    return true;
 }
 
 void ConnectionDialog::browse( QLineEdit* edit, const QString& title )

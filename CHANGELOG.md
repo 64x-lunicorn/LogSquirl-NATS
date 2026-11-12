@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `orders.>` `nats_orders.all.log` and `billing.*` `nats_billing.any.log`,
   where they were `nats__.log`, `nats_orders._.log` and
   `nats_billing._.log` (#23).
+- **A failed delete says why.** When a connection cannot be deleted from
+  its tile, a warning says why (it is capturing, it is no longer saved, or
+  nats.ini could not be written) instead of a notification that it could
+  not be deleted (#31).
 
 ## [0.1.0]
 

@@ -56,9 +56,11 @@
  *
  * SETTINGS
  * ────────
- * The connections are saved by name, as profiles (profiles.h), in nats.ini
- * in the plugin's configuration directory (get_config_dir).  Save also
- * remembers the size limit there, which a new connection proposes.
+ * The connections are saved by name, as profiles, through the profile store
+ * (profiles.h), the one owner of nats.ini; the dialog reads and writes no
+ * file itself.  Save also has the store remember the size limit, which a
+ * new connection proposes.  The list of names follows the store, also when
+ * a connection is deleted from its tile.
  *
  * OWNERSHIP
  * ─────────
@@ -86,6 +88,7 @@ class QSpinBox;
 
 namespace nats_monitor {
 
+class ProfileStore;
 class Sessions;
 struct ConnectionProfile;
 
@@ -93,9 +96,10 @@ class ConnectionDialog : public QDialog {
     Q_OBJECT
 
 public:
-    /// A dialog that does not delete a connection of @p sessions that
-    /// runs; @p sessions must outlive it.
-    explicit ConnectionDialog( const Sessions* sessions, QWidget* parent = nullptr );
+    /// A dialog on the connections of @p profiles, which says when one it
+    /// saves runs in @p sessions; both must outlive it.
+    ConnectionDialog( ProfileStore* profiles, const Sessions* sessions,
+                      QWidget* parent = nullptr );
 
     /// Waits for a listing of the streams still under way: at most its
     /// timeouts (listStreams() in streams.h).
@@ -107,15 +111,11 @@ public:
     /// Fill in the settings of the saved connection @p name.
     void editConnection( const QString& name );
 
-    /// Delete the saved connection @p name, unless it runs; whether it was
-    /// deleted.  The status line says what happened.
-    bool deleteConnection( const QString& name );
-
-Q_SIGNALS:
-    /// A connection was saved or deleted.
-    void profilesChanged();
-
 private:
+    /// Delete the saved connection @p name; the status line says what
+    /// happened, or why it was not deleted.
+    void deleteConnection( const QString& name );
+
     /// Show the warning for the subjects entered, if they overlap.
     void updateSubjectsWarning();
 
@@ -146,6 +146,7 @@ private:
     /// The streams were listed: offer @p names, or say what failed.
     void showStreams( const QStringList& names, const QString& error );
 
+    ProfileStore* profiles_;
     const Sessions* sessions_;
     QComboBox* profileCombo_;
     QPushButton* saveProfileButton_;

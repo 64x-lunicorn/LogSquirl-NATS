@@ -99,8 +99,9 @@ QStringList countsOf( const SessionStatus& status )
 
 } // namespace
 
-SidebarWidget::SidebarWidget( Sessions* sessions, QWidget* parent )
+SidebarWidget::SidebarWidget( ProfileStore* profiles, Sessions* sessions, QWidget* parent )
     : QWidget( parent )
+    , profiles_( profiles )
     , sessions_( sessions )
     , stopAll_( new QPushButton( QStringLiteral( "■ Stop all" ), this ) )
     , empty_( new QLabel( QStringLiteral( "No saved connection yet: New connection… adds one." ),
@@ -155,6 +156,8 @@ SidebarWidget::SidebarWidget( Sessions* sessions, QWidget* parent )
             updateStopAll();
         } );
     } );
+    connect( profiles_, &ProfileStore::changed, this,
+             [ this ] { guarded( "showing the connections", [ this ] { reload(); } ); } );
     connect( timer_, &QTimer::timeout, this,
              [ this ] { guarded( "counting the captures", [ this ] { sample(); } ); } );
     timer_->start( kSampleMs );
@@ -171,7 +174,7 @@ void SidebarWidget::reload()
     }
     tileByName_.clear();
 
-    const auto profiles = loadProfiles( settingsFile() );
+    const auto profiles = profiles_->list();
     for ( const auto& profile : profiles ) {
         auto* tile = new ConnectionTile( profile.name, this );
         tile->setSummary( summaryOf( profile ) );
@@ -197,7 +200,7 @@ void SidebarWidget::reload()
 
 void SidebarWidget::start( const QString& name )
 {
-    auto profile = findProfile( settingsFile(), name );
+    auto profile = profiles_->find( name );
     if ( !profile ) {
         reload(); // deleted meanwhile
         return;
@@ -222,8 +225,13 @@ void SidebarWidget::confirmDelete( const QString& name )
         = QMessageBox::question( this, QStringLiteral( "NATS Monitor" ),
                                  QStringLiteral( "Delete the saved connection %1?" ).arg( name ),
                                  QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel );
-    if ( answer == QMessageBox::Yes ) {
-        Q_EMIT deleteRequested( name );
+    if ( answer != QMessageBox::Yes ) {
+        return;
+    }
+    // Deleted, the store's changed() reloads the tiles.
+    if ( const auto problem = profiles_->remove( name ); !problem.isEmpty() ) {
+        QMessageBox::warning( this, QStringLiteral( "NATS Monitor" ), problem );
+        reload(); // e.g. deleted meanwhile
     }
 }
 

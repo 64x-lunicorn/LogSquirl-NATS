@@ -36,10 +36,12 @@
  * session each (sessions.h).
  *
  * Start asks for the password or token when the connection's method takes
- * one: it is never saved.  Edit opens the dialog with the connection, New
- * connection… opens it empty, and Delete asks, then deletes the saved
- * connection; the plugin carries those out (editRequested() and the
- * others), and reload() shows the connections saved now.
+ * one: it is never saved.  Edit opens the dialog with the connection and New
+ * connection… opens it empty; the plugin carries those out (editRequested()
+ * and newConnectionRequested()).  Delete asks, then deletes the saved
+ * connection through the profile store (profiles.h), not the dialog; when
+ * the store cannot, a message box says why.  The tiles follow the store:
+ * reload() shows the connections saved now whenever it changed.
  *
  * The counts are polled once a second; a state change shows at once.
  *
@@ -67,14 +69,16 @@ class QVBoxLayout;
 namespace nats_monitor {
 
 class ConnectionTile;
+class ProfileStore;
 class Sessions;
 
 class SidebarWidget : public QWidget {
     Q_OBJECT
 
 public:
-    /// Shows the saved connections and @p sessions, which must outlive it.
-    explicit SidebarWidget( Sessions* sessions, QWidget* parent = nullptr );
+    /// Shows the connections of @p profiles and the sessions of
+    /// @p sessions, which must both outlive it.
+    SidebarWidget( ProfileStore* profiles, Sessions* sessions, QWidget* parent = nullptr );
 
     /// Show the connections saved now.
     void reload();
@@ -86,14 +90,12 @@ Q_SIGNALS:
     /// Edit was clicked on the connection @p name.
     void editRequested( const QString& name );
 
-    /// Delete was clicked on the connection @p name, and confirmed.
-    void deleteRequested( const QString& name );
-
 private:
     /// Start the connection @p name, asking for its secret if it takes one.
     void start( const QString& name );
 
-    /// Ask whether to delete the connection @p name, and if so request it.
+    /// Ask whether to delete the connection @p name, and if so delete it,
+    /// or say why it could not be.
     void confirmDelete( const QString& name );
 
     /// Show what the session of the tile @p tile does.
@@ -105,6 +107,7 @@ private:
     /// Stop all is enabled while some capture runs.
     void updateStopAll();
 
+    ProfileStore* profiles_;
     Sessions* sessions_;
     QPushButton* stopAll_;
     QLabel* empty_;

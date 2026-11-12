@@ -19,7 +19,7 @@
 
 /**
  * @file profiles.cpp
- * @brief Implementation of the connection profiles.
+ * @brief Implementation of the connection profiles and their store.
  */
 
 #include "profiles.h"
@@ -31,6 +31,7 @@
 
 #include <QSettings>
 
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <utility>
@@ -40,6 +41,10 @@ namespace nats_monitor {
 namespace {
 
 constexpr const char* kProfiles = "profiles";
+
+/// Where the size limit saved last is remembered, outside the profiles:
+/// 0.1.0 had it there already.
+constexpr const char* kMaxFileMiBKey = "capture/maxFileMiB";
 
 /// The text settings of TLS, by their keys in the group "tls".
 const std::array<std::pair<const char*, QString TlsConfig::*>, 4> kTlsTexts{ {
@@ -196,16 +201,6 @@ bool ConnectionProfile::usesTls() const
     return nats_monitor::usesTls( url, tls.enabled );
 }
 
-std::optional<ConnectionProfile> findProfile( const QString& settingsFile, const QString& name )
-{
-    for ( const auto& profile : loadProfiles( settingsFile ) ) {
-        if ( profile.name == name ) {
-            return profile;
-        }
-    }
-    return std::nullopt;
-}
-
 QString startProblem( const ConnectionProfile& profile )
 {
     if ( profile.url.isEmpty() ) {
@@ -265,13 +260,25 @@ SessionConfig sessionConfig( const ConnectionProfile& profile )
     return config;
 }
 
-QList<ConnectionProfile> loadProfiles( const QString& settingsFile )
+ProfileStore::ProfileStore( const QString& settingsFile, IsRunning isRunning, QObject* parent )
+    : QObject( parent )
+    , settingsFile_( settingsFile )
+    , isRunning_( std::move( isRunning ) )
+{
+}
+
+QString ProfileStore::settingsFile() const
+{
+    return settingsFile_;
+}
+
+QList<ConnectionProfile> ProfileStore::list() const
 {
     QList<ConnectionProfile> profiles;
-    if ( settingsFile.isEmpty() ) {
+    if ( settingsFile_.isEmpty() ) {
         return profiles;
     }
-    QSettings settings( settingsFile, QSettings::IniFormat );
+    QSettings settings( settingsFile_, QSettings::IniFormat );
     const int count = settings.beginReadArray( kProfiles );
     for ( int i = 0; i < count; ++i ) {
         settings.setArrayIndex( i );
@@ -291,12 +298,77 @@ QList<ConnectionProfile> loadProfiles( const QString& settingsFile )
     return profiles;
 }
 
-bool saveProfiles( const QString& settingsFile, const QList<ConnectionProfile>& profiles )
+std::optional<ConnectionProfile> ProfileStore::find( const QString& name ) const
 {
-    if ( settingsFile.isEmpty() ) {
+    for ( const auto& profile : list() ) {
+        if ( profile.name == name ) {
+            return profile;
+        }
+    }
+    return std::nullopt;
+}
+
+ConnectionProfile ProfileStore::newProfile() const
+{
+    ConnectionProfile profile;
+    profile.url = QString::fromLatin1( kDefaultUrl );
+    if ( !settingsFile_.isEmpty() ) {
+        const QSettings settings( settingsFile_, QSettings::IniFormat );
+        profile.maxFileMiB
+            = readInt( settings, kMaxFileMiBKey, 0, kMaxFileMiBLimit, kDefaultMaxFileMiB );
+    }
+    return profile;
+}
+
+QString ProfileStore::upsert( const ConnectionProfile& profile )
+{
+    if ( profile.name.isEmpty() ) {
+        return QStringLiteral( "Enter a name for the connection to save." );
+    }
+    auto profiles = list();
+    const auto existing = std::find_if( profiles.begin(), profiles.end(),
+                                        [ & ]( const auto& p ) { return p.name == profile.name; } );
+    if ( existing != profiles.end() ) {
+        *existing = profile;
+    }
+    else {
+        profiles << profile;
+    }
+    if ( !write( profiles, profile.maxFileMiB ) ) {
+        return QStringLiteral( "The connection %1 could not be saved to %2." )
+            .arg( profile.name, settingsFile_ );
+    }
+    Q_EMIT changed();
+    return {};
+}
+
+QString ProfileStore::remove( const QString& name )
+{
+    if ( isRunning_ && isRunning_( name ) ) {
+        return QStringLiteral( "The connection %1 is capturing: stop it to delete it." )
+            .arg( name );
+    }
+    auto profiles = list();
+    if ( profiles.removeIf( [ & ]( const auto& p ) { return p.name == name; } ) == 0 ) {
+        return QStringLiteral( "There is no saved connection %1." ).arg( name );
+    }
+    if ( !write( profiles, std::nullopt ) ) {
+        return QStringLiteral( "The connection %1 could not be deleted from %2." )
+            .arg( name, settingsFile_ );
+    }
+    Q_EMIT changed();
+    return {};
+}
+
+bool ProfileStore::write( const QList<ConnectionProfile>& profiles, std::optional<int> maxFileMiB )
+{
+    if ( settingsFile_.isEmpty() ) {
         return false;
     }
-    QSettings settings( settingsFile, QSettings::IniFormat );
+    QSettings settings( settingsFile_, QSettings::IniFormat );
+    if ( maxFileMiB ) {
+        settings.setValue( kMaxFileMiBKey, *maxFileMiB );
+    }
     settings.remove( kProfiles );
     settings.beginWriteArray( kProfiles, static_cast<int>( profiles.size() ) );
     for ( int i = 0; i < profiles.size(); ++i ) {
