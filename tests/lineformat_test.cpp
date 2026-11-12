@@ -32,6 +32,7 @@
 using nats_monitor::formatLine;
 using nats_monitor::formatMarker;
 using nats_monitor::FormatOptions;
+using nats_monitor::formatTimestamp;
 using nats_monitor::Message;
 
 namespace {
@@ -276,6 +277,17 @@ SCENARIO( "a marker line has the same format", "[lineformat]" )
         {
             REQUIRE( formatMarker( kReceived, "disconnected" )
                      == "2026-11-11 10:00:00.123456Z $NATS-MONITOR - 12 disconnected" );
+        }
+    }
+}
+
+SCENARIO( "a time is named as a line's timestamp", "[lineformat]" )
+{
+    GIVEN( "a time in microseconds" )
+    {
+        THEN( "it reads as the timestamp field of a line" )
+        {
+            REQUIRE( formatTimestamp( kReceived ) == "2026-11-11 10:00:00.123456Z" );
         }
     }
 }

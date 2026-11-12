@@ -207,6 +207,13 @@ QByteArray formatMarker( qint64 receivedUs, const QByteArray& text )
     return formatLine( marker );
 }
 
+QByteArray formatTimestamp( qint64 us )
+{
+    QByteArray timestamp;
+    appendTimestamp( timestamp, us );
+    return timestamp;
+}
+
 qint64 nowUs()
 {
     using namespace std::chrono;

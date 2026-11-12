@@ -96,6 +96,10 @@ QByteArray formatLine( const Message& message, const FormatOptions& options = {}
 /// terminator.  @p text is formatted as a payload.
 QByteArray formatMarker( qint64 receivedUs, const QByteArray& text );
 
+/// @p us microseconds since the epoch as a line's timestamp has it:
+/// "2026-11-11 10:00:00.123456Z" (UTC).
+QByteArray formatTimestamp( qint64 us );
+
 /// The current time in microseconds since the epoch, for Message::receivedUs.
 qint64 nowUs();
 
