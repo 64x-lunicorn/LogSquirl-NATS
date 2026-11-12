@@ -294,8 +294,7 @@ Drops Capture::drops() const
             REQUIRE( count > 0 );
             ++d.markers;
             ( match.captured( 2 ) == QLatin1String( "slow consumer" ) ? d.slowConsumer
-                                                                      : d.queueFull )
-                += count;
+                                                                      : d.queueFull ) += count;
         }
         else if ( line.text().contains( QLatin1String( "dropped=" ) ) ) {
             ++d.unknown;
