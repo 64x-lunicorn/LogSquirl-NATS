@@ -19,16 +19,19 @@
 
 /**
  * @file connectiondialog.h
- * @brief Non-modal dialog to start and stop captures: server URL, subjects.
+ * @brief Non-modal dialog for the settings of a saved connection.
  *
- * Opened from Plugins ▸ NATS Monitor…  It provides:
+ * Opened from the sidebar (New connection…, a tile's Edit) and from
+ * Plugins ▸ NATS Monitor…  It provides:
  *
- *   - the connection profile: choosing one fills in its settings, Save
- *     saves the settings under the name entered, Delete removes it
+ *   - the connection's name: choosing a saved one fills in its settings,
+ *     Save saves the settings under the name entered (a new tile in the
+ *     sidebar, or the tile of that name updated), Delete removes it
  *   - the server URL (default nats://localhost:4222; several comma-separated,
  *     the seeds of a cluster)
  *   - how to log in: no credentials, user and password, token, a .creds
- *     file or an NKey seed file
+ *     file or an NKey seed file; a password or token is asked for when the
+ *     connection is started, and never saved
  *   - TLS: the CA file, a client certificate and its key, the server name
  *     the certificate must be for, and skipping the verification (off, and
  *     marked as insecure); they apply, and can be entered, when the
@@ -42,42 +45,20 @@
  *   - the size limit of a file in MiB (default 256, 0 for no limit): each
  *     next file of the capture opens in a new followed tab, with a line in
  *     the host log (no notification: a busy capture rotates often)
- *   - Start, which starts a NatsSession with the settings entered and opens
- *     its file in a followed tab
- *   - the list of the running sessions; Stop stops the one selected, Stop
- *     all every one; the tabs keep the files until LogSquirl quits
- *   - a status line with the sessions' connection events and errors, each
- *     with the subjects of its session
+ *   - a status line: what was saved, or what is missing
  *
- * Starting, stopping with Stop or Stop all and errors are also host
- * notifications, as in the Serial plugin; stopAll() (shutdown) is not.
- *
- * SEVERAL SESSIONS
- * ────────────────
- * Each Start starts another session beside those running, as the Serial
- * plugin does per port: its own connection, file and tab.  The settings
- * stay editable while sessions run, for the next one.  totals() is what the
- * status widget (statuswidget.h) shows.
+ * The connections are started and stopped from their tiles in the sidebar
+ * (sidebarwidget.h), not here.
  *
  * SETTINGS
  * ────────
- * The size limit is remembered between sessions: Start saves it to
- * nats.ini in the plugin's configuration directory (get_config_dir), and
- * the dialog proposes it when it is created.  The connection settings are
- * saved by name, as profiles (profiles.h), in the same file.  A password
- * or token is never saved: the dialog asks for it at Start.
- *
- * ERRORS
- * ──────
- * A capture that cannot connect says why in the status line, in words the
- * user can act on: the server refused the password, the server's
- * certificate is not trusted, a file cannot be read, …  (natsoptions.h).
+ * The connections are saved by name, as profiles (profiles.h), in nats.ini
+ * in the plugin's configuration directory (get_config_dir).  Save also
+ * remembers the size limit there, which a new connection proposes.
  *
  * OWNERSHIP
  * ─────────
- * Created by logsquirl_plugin_init(), deleted by logsquirl_plugin_shutdown(),
- * which calls stopAll() first.  The running sessions are children of the
- * dialog.
+ * Created by logsquirl_plugin_init(), deleted by logsquirl_plugin_shutdown().
  */
 
 #pragma once
@@ -93,68 +74,48 @@ class QCheckBox;
 class QComboBox;
 class QLabel;
 class QLineEdit;
-class QListWidget;
 class QPlainTextEdit;
 class QPushButton;
 class QSpinBox;
 
 namespace nats_monitor {
 
-class NatsSession;
+class Sessions;
 struct ConnectionProfile;
 
 class ConnectionDialog : public QDialog {
     Q_OBJECT
 
 public:
-    explicit ConnectionDialog( QWidget* parent = nullptr );
-    ~ConnectionDialog() override;
+    /// A dialog that does not delete a connection of @p sessions that
+    /// runs; @p sessions must outlive it.
+    explicit ConnectionDialog( const Sessions* sessions, QWidget* parent = nullptr );
 
-    /// Stop every running session, keeping their files for the tabs.
-    void stopAll();
+    /// Set up an empty new connection, with the default settings.
+    void newConnection();
 
-    /// Whether a session runs.
-    bool isCapturing() const;
+    /// Fill in the settings of the saved connection @p name.
+    void editConnection( const QString& name );
 
-    /// What the sessions have done, for the status widget.
-    struct Totals {
-        int sessions = 0;     ///< Running.
-        quint64 received = 0; ///< By every session since the dialog was made: only grows.
-        quint64 dropped = 0;  ///< By the running sessions.
-    };
-
-    /// The totals now.
-    Totals totals() const;
+    /// Delete the saved connection @p name, unless it runs; whether it was
+    /// deleted.  The status line says what happened.
+    bool deleteConnection( const QString& name );
 
 Q_SIGNALS:
-    /// A session was started, or has stopped or ended.
-    void sessionsChanged();
+    /// A connection was saved or deleted.
+    void profilesChanged();
 
 private:
-    /// Start a session with the settings entered, and open its file.
-    void startCapture();
-
-    /// Stop the session selected in the list and say so (Stop button).
-    void stopSelected();
-
-    /// Stop every session and say so (Stop all button).
-    void stopAllCaptures();
-
-    /// Stop @p session and say so in the status line, and with @p notify
-    /// in a host notification.
-    void stopCapture( NatsSession* session, bool notify );
-
-    /// Let go of @p session, which has stopped or ended on its own: keep
-    /// its file, take it from the list, delete it later.
-    void releaseSession( NatsSession* session );
-
     /// Show the warning for the subjects entered, if they overlap.
     void updateSubjectsWarning();
 
     void updateButtons();
 
-    /// The connection settings entered, as a profile named as entered.
+    /// The settings entered, as a profile named as entered.
     ConnectionProfile currentProfile() const;
+
+    /// Fill in the settings of @p profile.
+    void showProfile( const ConnectionProfile& profile );
 
     /// Fill in the settings of the saved profile chosen in the list.
     void loadProfile( int index );
@@ -162,26 +123,19 @@ private:
     /// Save the settings entered as the profile named in the list.
     void saveProfile();
 
-    /// Remove the profile named in the list.
-    void deleteProfile();
-
     /// Fill the list with the saved profiles' names, @p current chosen.
     void fillProfileList( const QString& current );
-
-    /// What is missing for the settings entered to start a capture; empty
-    /// if nothing.
-    QString missingSetting() const;
 
     /// Choose a file for @p edit, titled @p title.
     void browse( QLineEdit* edit, const QString& title );
 
+    const Sessions* sessions_;
     QComboBox* profileCombo_;
     QPushButton* saveProfileButton_;
     QPushButton* deleteProfileButton_;
     QLineEdit* urlEdit_;
     QComboBox* authCombo_;
     QLineEdit* userEdit_;
-    QLineEdit* secretEdit_;
     QLineEdit* authFileEdit_;
     QPushButton* authFileButton_;
     QCheckBox* tlsCheck_;
@@ -199,14 +153,7 @@ private:
     QSpinBox* pendingMessagesSpin_;
     QSpinBox* pendingMegabytesSpin_;
     QSpinBox* maxFileSpin_;
-    QPushButton* startButton_;
-    QListWidget* sessionList_;
-    QPushButton* stopButton_;
-    QPushButton* stopAllButton_;
     QLabel* statusLabel_;
-    /// The running sessions, in the order of sessionList_'s rows.
-    QList<NatsSession*> sessions_;
-    quint64 receivedByEnded_ = 0;  ///< What the sessions no longer running received.
     bool fillingProfiles_ = false; ///< The list is being filled: nothing is loaded.
 };
 

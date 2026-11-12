@@ -25,10 +25,13 @@
 #include "profiles.h"
 
 #include "authmethods.h"
+#include "natsoptions.h"
+#include "subjects.h"
 
 #include <QSettings>
 
 #include <array>
+#include <limits>
 #include <utility>
 
 namespace nats_monitor {
@@ -103,7 +106,95 @@ void writeTls( QSettings& settings, const TlsConfig& tls )
     settings.endGroup();
 }
 
+/// @p settings' value @p key as an int in [@p min, @p max]; @p fallback if
+/// it is missing or out of range.
+int readInt( const QSettings& settings, const char* key, int min, int max, int fallback )
+{
+    bool ok = false;
+    const int value = settings.value( key, fallback ).toInt( &ok );
+    return ok && value >= min && value <= max ? value : fallback;
+}
+
+/// The subjects and limits, in the group "capture"; a profile saved before
+/// they were gets the defaults.
+void readCapture( QSettings& settings, ConnectionProfile& profile )
+{
+    settings.beginGroup( "capture" );
+    profile.subjects = settings.value( "subjects" ).toString();
+    profile.maxBinaryBytes
+        = readInt( settings, "maxBinaryBytes", 0, kMaxBinaryBytesLimit, kDefaultMaxBinaryBytes );
+    profile.pendingLimits.messages
+        = readInt( settings, "pendingMessages", 1, std::numeric_limits<int>::max(),
+                   kDefaultPendingLimits.messages );
+    profile.pendingLimits.bytes = readInt(
+        settings, "pendingBytes", 1, std::numeric_limits<int>::max(), kDefaultPendingLimits.bytes );
+    profile.maxFileMiB = readInt( settings, "maxFileMiB", 0, kMaxFileMiBLimit, kDefaultMaxFileMiB );
+    settings.endGroup();
+}
+
+void writeCapture( QSettings& settings, const ConnectionProfile& profile )
+{
+    settings.beginGroup( "capture" );
+    settings.setValue( "subjects", profile.subjects );
+    settings.setValue( "maxBinaryBytes", profile.maxBinaryBytes );
+    settings.setValue( "pendingMessages", profile.pendingLimits.messages );
+    settings.setValue( "pendingBytes", profile.pendingLimits.bytes );
+    settings.setValue( "maxFileMiB", profile.maxFileMiB );
+    settings.endGroup();
+}
+
 } // namespace
+
+std::optional<ConnectionProfile> findProfile( const QString& settingsFile, const QString& name )
+{
+    for ( const auto& profile : loadProfiles( settingsFile ) ) {
+        if ( profile.name == name ) {
+            return profile;
+        }
+    }
+    return std::nullopt;
+}
+
+QString startProblem( const ConnectionProfile& profile )
+{
+    if ( profile.url.isEmpty() ) {
+        return QStringLiteral( "Enter the server URL." );
+    }
+    const auto subjects = parseSubscriptions( profile.subjects );
+    if ( !subjects.error.isEmpty() ) {
+        return subjects.error;
+    }
+    if ( subjects.subscriptions.isEmpty() ) {
+        return QStringLiteral( "Enter the subject to capture." );
+    }
+    const auto& method = authMethodInfo( profile.auth.method );
+    if ( method.takesUser && profile.auth.user.isEmpty() ) {
+        return QStringLiteral( "Enter the user name." );
+    }
+    if ( method.file && profile.auth.file.isEmpty() ) {
+        return QStringLiteral( "Choose the %1." ).arg( QLatin1String( method.file ) );
+    }
+    if ( usesTls( profile.url, profile.tls.enabled )
+         && profile.tls.certFile.isEmpty() != profile.tls.keyFile.isEmpty() ) {
+        return QStringLiteral( "Choose both the client certificate and its key, or neither." );
+    }
+    return {};
+}
+
+SessionConfig sessionConfig( const ConnectionProfile& profile )
+{
+    SessionConfig config;
+    config.url = profile.url;
+    config.auth = profile.auth;
+    if ( usesTls( profile.url, profile.tls.enabled ) ) {
+        config.tls = profile.tls; // also for a tls:// URL with Use TLS unchecked
+    }
+    config.subscriptions = parseSubscriptions( profile.subjects ).subscriptions;
+    config.format.maxBinaryBytes = profile.maxBinaryBytes;
+    config.pendingLimits = profile.pendingLimits;
+    config.maxFileBytes = profile.maxFileMiB * kBytesPerMiB;
+    return config;
+}
 
 QList<ConnectionProfile> loadProfiles( const QString& settingsFile )
 {
@@ -123,6 +214,7 @@ QList<ConnectionProfile> loadProfiles( const QString& settingsFile )
         profile.url = settings.value( "url" ).toString();
         profile.auth = readAuth( settings );
         profile.tls = readTls( settings );
+        readCapture( settings, profile );
         profiles << profile;
     }
     settings.endArray();
@@ -144,6 +236,7 @@ bool saveProfiles( const QString& settingsFile, const QList<ConnectionProfile>& 
         settings.setValue( "url", profile.url );
         writeAuth( settings, profile.auth );
         writeTls( settings, profile.tls );
+        writeCapture( settings, profile );
     }
     settings.endArray();
     settings.sync();

@@ -37,7 +37,8 @@
 namespace nats_monitor {
 
 class ConnectionDialog;
-class StatusWidget;
+class Sessions;
+class SidebarWidget;
 
 /**
  * Global plugin state.
@@ -48,11 +49,12 @@ class StatusWidget;
 struct PluginState {
     const LogSquirlHostApi* api = nullptr; ///< Host API function table.
     void* handle = nullptr;                ///< Opaque plugin instance handle.
-    ConnectionDialog* dialog = nullptr;    ///< The NATS Monitor dialog, created by init.
-    /// In the host's status bar, created by init.  Weak: the host parents it,
-    /// and a host window that goes first takes it along.
-    QPointer<StatusWidget> statusWidget;
-    bool statusWidgetRegistered = false; ///< The host took statusWidget.
+    Sessions* sessions = nullptr;          ///< The captures, created by init.
+    ConnectionDialog* dialog = nullptr;    ///< The connection dialog, created by init.
+    /// The sidebar tab, created by init.  Weak: the host parents it, and a
+    /// host window that goes first takes it along.
+    QPointer<SidebarWidget> sidebar;
+    bool sidebarRegistered = false; ///< The host took sidebar as a tab.
     bool quitting = false; ///< LogSquirl is quitting (aboutToQuit), not just unloading the plugin.
     QString tempRoot;      ///< Where temporary directories go; empty: the system's (for tests).
 };
@@ -63,6 +65,10 @@ extern PluginState g_state;
 /// Log a message through the host API (no-op if not initialised).
 /// The host decodes the message as UTF-8.
 void hostLog( int level, const QString& message );
+
+/// The plugin's settings file, nats.ini in its configuration directory;
+/// empty without a host to say where that is.
+QString settingsFile();
 
 /// Show a host notification (no-op if not initialised).
 /// The host decodes the message as UTF-8.
