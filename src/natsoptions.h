@@ -22,7 +22,7 @@
  * @brief A session's connection settings as nats.c options, and why a
  *        connection failed in words the user can act on.
  *
- * Part of NatsSession (natssession.cpp) and of listStreams() (replay.cpp),
+ * Part of NatsSession (natssession.cpp) and of listStreams() (streams.cpp),
  * apart because it is all about nats.c's options: the server URLs, the
  * authentication method and TLS of a SessionConfig, and connecting with
  * them.  Tested through the session (auth_test.cpp).

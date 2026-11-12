@@ -27,10 +27,12 @@
  *   2. The writer thread connects and subscribes to each subject; its
  *      "connected" marker is the capture's first line.  A replay instead
  *      writes the marker and subscribes to the stream through nats.c's
- *      ordered consumer (js_Subscribe, jsSubOptions::Ordered); its
- *      callback takes the stored time and stream sequence from the
- *      message's metadata, and the consumer's pending count of 0 says it
- *      has caught up (or, before any message, the consumer's info).
+ *      ordered consumer (js_Subscribe, jsSubOptions::Ordered), as the replay
+ *      plan made from the stream's info says (replay.h); its callback
+ *      takes the stored time and stream sequence from the message's
+ *      metadata, and the plan's step says whether to write the message
+ *      and whether the replay has caught up (or, before any message, the
+ *      plan and the consumer's info).
  *   3. nats.c's callbacks format a line and push it onto the queue under a
  *      mutex, and wake the writer.  The writer swaps the whole queue out,
  *      writes the batch and flushes, so it never holds the mutex while
@@ -347,6 +349,9 @@ struct SubscriptionState {
     /// nats.c took the completion callback: done is awaited.  Only the
     /// writer reads and writes it.
     bool awaitsCompletion = false;
+    /// A replay's step, made from its plan before subscribing; then used by
+    /// nats.c's delivery thread only.
+    ReplayStep replayStep;
 };
 
 /// What nats.c's callbacks and the writer share.
@@ -374,18 +379,9 @@ struct Shared {
     /// Stopping a replay: its callback discards what nats.c still holds.
     std::atomic<bool> discarding{ false };
     std::condition_variable room; ///< Notified when the writer took the queue.
-    bool followLive = false;      ///< Go on once caught up.
-    /// Skip messages while the consumer has at least this many more
-    /// pending, until the first one written: the last N with a filter.
-    /// 0: none.  Read and written by nats.c's delivery thread only.
-    Count skipWhilePending = 0;
-    /// Skip messages stored before this time (nanoseconds since the
-    /// epoch, UTC), until the first one written: a start time the
-    /// consumer had to be given rounded down (subscribeReplay).  0: none.
-    /// Read and written by nats.c's delivery thread only.
-    int64_t skipStoredBeforeNs = 0;
-    bool caughtUp = false;   ///< Under the mutex.
-    bool replayDone = false; ///< Caught up, not following: the writer ends; under the mutex.
+    bool followLive = false;      ///< Go on once caught up (ReplayPlan::followLive).
+    bool caughtUp = false;        ///< Under the mutex.
+    bool replayDone = false;      ///< Caught up, not following: the writer ends; under the mutex.
 
     std::atomic<Count> received{ 0 };    ///< Messages nats.c handed over.
     std::atomic<Count> dropped{ 0 };     ///< Drops counted: marked, or to be marked.
@@ -598,34 +594,24 @@ struct Shared {
             natsMsg_Destroy( msg ); // not a stream's message: nothing to replay
             return;
         }
-        const auto pending = static_cast<Count>( meta->NumPending );
-        if ( self->skipWhilePending > 0 && pending >= self->skipWhilePending ) {
-            jsMsgMetaData_Destroy( meta );
-            natsMsg_Destroy( msg ); // before the last N
-            return;
-        }
-        if ( meta->Timestamp < self->skipStoredBeforeNs ) {
-            jsMsgMetaData_Destroy( meta );
-            natsMsg_Destroy( msg ); // before the start time
-            if ( pending == 0 ) {
-                self->markCaughtUp();
-            }
-            return;
-        }
-        self->skipWhilePending = 0; // from the first written on, all are
-        self->skipStoredBeforeNs = 0;
-
+        const auto step = subscription.replayStep.next( static_cast<quint64>( meta->NumPending ),
+                                                        meta->Timestamp );
         const auto storedUs = meta->Timestamp / 1000;
         const auto sequence = meta->Sequence.Stream;
         jsMsgMetaData_Destroy( meta );
-        self->take( subscription, msg, [ msg, storedUs, sequence ] {
-            auto message = toMessage( msg );
-            message.receivedUs = storedUs;
-            message.streamSequence = sequence;
-            message.reply.clear(); // nats.c's is the consumer's, the stream keeps none
-            return message;
-        } );
-        if ( pending == 0 ) {
+        if ( step.write ) {
+            self->take( subscription, msg, [ msg, storedUs, sequence ] {
+                auto message = toMessage( msg );
+                message.receivedUs = storedUs;
+                message.streamSequence = sequence;
+                message.reply.clear(); // nats.c's is the consumer's, the stream keeps none
+                return message;
+            } );
+        }
+        else {
+            natsMsg_Destroy( msg ); // before where the replay starts
+        }
+        if ( step.caughtUp ) {
             self->markCaughtUp();
         }
     }
@@ -728,7 +714,6 @@ struct NatsSession::Worker {
         shared->queueLimit = config.queueLimit;
         const bool replay = config.replay.enabled();
         shared->waitForRoom = replay;
-        shared->followLive = config.replay.followLive;
         const auto count = replay ? 1 : config.subscriptions.size();
         for ( qsizetype i = 0; i < count; ++i ) {
             auto state = std::make_unique<SubscriptionState>();
@@ -927,99 +912,83 @@ struct NatsSession::Worker {
         return status;
     }
 
+    /// The state of @p stream to plan its replay from; an error text if it
+    /// could not be read.
+    QString readStream( const QByteArray& stream, StreamState* state )
+    {
+        jsStreamInfo* info = nullptr;
+        const natsStatus status = js_GetStreamInfo( &info, js, stream.constData(), nullptr,
+                                                    nullptr );
+        if ( status != NATS_OK ) {
+            return describeStatus( status );
+        }
+        switch ( info->Config->Retention ) {
+        case js_LimitsPolicy:
+            state->retention = Retention::Limits;
+            break;
+        case js_InterestPolicy:
+            state->retention = Retention::Interest;
+            break;
+        case js_WorkQueuePolicy:
+            state->retention = Retention::WorkQueue;
+            break;
+        }
+        state->firstSequence = info->State.FirstSeq;
+        state->lastSequence = info->State.LastSeq;
+        state->messages = info->State.Msgs;
+        jsStreamInfo_Destroy( info );
+        return {};
+    }
+
     /// Subscribe to the stream to replay through an ordered consumer, as
-    /// the only SubscriptionState; an error text if that failed.
+    /// the only SubscriptionState, as its plan (replay.h) says; an error
+    /// text if that failed or the plan refused it.
     QString subscribeReplay( natsConnection* connection, natsSubscription** subscription )
     {
-        const auto& replay = config.replay;
         natsStatus status = natsConnection_JetStream( &js, connection, nullptr );
         if ( status != NATS_OK ) {
             return describeStatus( status );
         }
-        const auto stream = replay.stream.toUtf8();
-        const auto filter
-            = replay.filterSubject.isEmpty() ? QByteArray( ">" ) : replay.filterSubject.toUtf8();
-
-        jsStreamInfo* streamInfo = nullptr;
-        status = js_GetStreamInfo( &streamInfo, js, stream.constData(), nullptr, nullptr );
-        if ( status != NATS_OK ) {
-            return describeStatus( status );
+        const auto stream = config.replay.stream.toUtf8();
+        StreamState streamState;
+        if ( const auto error = readStream( stream, &streamState ); !error.isEmpty() ) {
+            return error;
         }
-        const auto retention = streamInfo->Config->Retention;
-        const auto first = streamInfo->State.FirstSeq;
-        const auto last = streamInfo->State.LastSeq;
-        jsStreamInfo_Destroy( streamInfo );
-        if ( retention == js_WorkQueuePolicy ) {
-            // A work queue's consumer takes the messages it reads away
-            // from the workers; the server allows none that does not
-            // acknowledge.
-            return QStringLiteral( "it is a work queue (work-queue retention), whose messages "
-                                   "a replay would take away from its workers" );
+        const auto plan = planReplay( config.replay, streamState );
+        if ( !plan.refusal.isEmpty() ) {
+            return plan.refusal;
         }
-        if ( retention == js_InterestPolicy ) {
-            shared->pushMarker(
-                QStringLiteral( "warning: stream %1 has interest retention: it holds only the "
-                                "messages its consumers have yet to acknowledge, and the replay "
-                                "is one more consumer while it runs" )
-                    .arg( replay.stream ),
-                Event::Status );
+        if ( !plan.warning.isEmpty() ) {
+            shared->pushMarker( plan.warning, Event::Status );
         }
 
         jsSubOptions options;
         jsSubOptions_Init( &options );
         options.Stream = stream.constData();
         options.Ordered = true; // ephemeral, AckNone, flow control: nats.c's ordered consumer
-        options.Config.DeliverPolicy = js_DeliverAll;
         // Stop deletes the consumer; this covers a crash or a connection
         // lost for good.  nats.c keeps it when it recreates the consumer.
-        options.Config.InactiveThreshold
-            = static_cast<int64_t>( replay.inactiveThresholdMs ) * 1000000;
-        switch ( replay.start ) {
-        case ReplayStart::All:
+        options.Config.InactiveThreshold = plan.inactiveThresholdNs;
+        switch ( plan.deliver ) {
+        case DeliverFrom::All:
+            options.Config.DeliverPolicy = js_DeliverAll;
             break;
-        case ReplayStart::Last:
-            if ( replay.filterSubject.isEmpty() ) {
-                if ( last >= replay.lastMessages && last - replay.lastMessages + 1 > first ) {
-                    options.Config.DeliverPolicy = js_DeliverByStartSequence;
-                    options.Config.OptStartSeq = last - replay.lastMessages + 1;
-                }
-            }
-            else {
-                // Which of the stream's messages match is the server's to
-                // know: read them all, write the last N.
-                shared->skipWhilePending = replay.lastMessages;
-            }
-            break;
-        case ReplayStart::Sequence:
+        case DeliverFrom::StartSequence:
             options.Config.DeliverPolicy = js_DeliverByStartSequence;
-            options.Config.OptStartSeq = replay.sequence;
+            options.Config.OptStartSeq = plan.startSequence;
             break;
-        case ReplayStart::Time: {
+        case DeliverFrom::StartTime:
             options.Config.DeliverPolicy = js_DeliverByStartTime;
-            // nats.c (3.14) writes the fraction of a second without its
-            // leading zeros, so 12:00:00.025 would reach the server as
-            // 12:00:00.25, past what was stored in between.  Such a time
-            // starts the consumer at its whole second, and what the
-            // consumer has from before the time is skipped.  nats.c's main
-            // has the fix (974c232), after 3.14.0; with a release of it
-            // this can go.
-            constexpr int64_t kNsPerSecond = 1000000000;
-            const int64_t startNs = replay.timeUs * 1000;
-            const int64_t fractionNs = ( ( startNs % kNsPerSecond ) + kNsPerSecond ) % kNsPerSecond;
-            if ( fractionNs > 0 && fractionNs < kNsPerSecond / 10 ) {
-                options.Config.OptStartTime = startNs - fractionNs;
-                shared->skipStoredBeforeNs = startNs;
-            }
-            else {
-                options.Config.OptStartTime = startNs;
-            }
+            options.Config.OptStartTime = plan.startTimeNs;
             break;
-        }
         }
 
+        // Before subscribing: nats.c's delivery thread uses them from then on.
         auto& state = *shared->subscriptions.front();
+        state.replayStep = ReplayStep( plan.skip );
+        shared->followLive = plan.followLive;
         jsErrCode error = static_cast<jsErrCode>( 0 );
-        status = js_Subscribe( subscription, js, filter.constData(), &Shared::onReplayMessage,
+        status = js_Subscribe( subscription, js, plan.filter.constData(), &Shared::onReplayMessage,
                                &state, nullptr, &options, &error );
         if ( status == NATS_OK ) {
             status = setUp( *subscription, state );
@@ -1035,9 +1004,10 @@ struct NatsSession::Worker {
         if ( status != NATS_OK ) {
             return describeStatus( status );
         }
-        const bool nothing = info->NumPending == 0 && info->Delivered.Consumer == 0;
+        const bool caughtUp
+            = caughtUpOnSubscribing( plan, info->NumPending, info->Delivered.Consumer );
         jsConsumerInfo_Destroy( info );
-        if ( nothing ) {
+        if ( caughtUp ) {
             shared->markCaughtUp();
         }
         return {};

@@ -25,7 +25,9 @@
  * The main seam, as natssession_test.cpp: a test starts a server with -js,
  * fills a stream with nats.c, starts a replaying session and reads the
  * lines of its file.  Only what the file, the session's signals and the
- * server show is asserted.
+ * server show is asserted.  Where a replay starts and what it skips is
+ * planned without a server (replayplan_test.cpp); here each deliver policy
+ * is replayed once, to see nats.c called as the plan says.
  */
 
 // First: on Windows nats.h includes winsock2.h, which must come before any
@@ -38,8 +40,8 @@
 #include "lineformat.h"
 #include "natsserver.h"
 #include "natssession.h"
-#include "replay.h"
 #include "sessiontest.h"
+#include "streams.h"
 #include "tcpproxy.h"
 
 #include <QCoreApplication>
@@ -187,19 +189,6 @@ SCENARIO( "a replay starts where it is told to", "[server][replay]" )
                 REQUIRE( capture.sequences() == range( 8, 10 ) );
                 REQUIRE(
                     capture.first().markerText().endsWith( "stream ORDERS, the last 3 messages" ) );
-            }
-        }
-
-        WHEN( "it replays the last 20 messages, more than there are" )
-        {
-            config.replay.start = ReplayStart::Last;
-            config.replay.lastMessages = 20;
-            NatsSession session( config, sessionTempRoot() );
-            replayToTheEnd( session );
-
-            THEN( "it writes all ten" )
-            {
-                REQUIRE( Capture::read( session.filePath() ).sequences() == range( 1, 10 ) );
             }
         }
 

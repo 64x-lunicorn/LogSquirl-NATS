@@ -36,8 +36,8 @@
 #include "capture.h"
 #include "natsserver.h"
 #include "natssession.h"
-#include "replay.h"
 #include "sessiontest.h"
+#include "streams.h"
 
 #include <algorithm>
 

@@ -19,25 +19,20 @@
 
 /**
  * @file replay.cpp
- * @brief Implementation of replay.h: describing, checking and choosing a replay.
+ * @brief Implementation of replay.h: describing, checking and planning a
+ *        replay, and its step.
  */
-
-// First: on Windows nats.h includes winsock2.h, which must come before any
-// windows.h.
-#include <nats.h>
 
 #include "replay.h"
 
 #include "lineformat.h"
-#include "natsoptions.h"
 
 namespace nats_monitor {
 
 namespace {
 
-/// How long listStreams() waits for each server to connect, and for each
-/// answer: the dialog waits for it when it closes (at shutdown).
-constexpr int kListTimeoutMs = 2000;
+constexpr qint64 kNsPerSecond = 1000000000;
+constexpr qint64 kNsPerMs = 1000000;
 
 } // namespace
 
@@ -84,57 +79,98 @@ QString replayProblem( const ReplayConfig& replay )
     return {};
 }
 
-QStringList listStreams( const SessionConfig& config, QString* error )
+ReplayPlan planReplay( const ReplayConfig& replay, const StreamState& stream )
 {
-    natsOptions* options = nullptr;
-    natsConnection* connection = nullptr;
-    jsCtx* js = nullptr;
-    jsStreamNamesList* list = nullptr;
-    QStringList names;
-    QString problem;
+    ReplayPlan plan;
+    plan.refusal = replayProblem( replay );
+    if ( !plan.refusal.isEmpty() ) {
+        return plan;
+    }
+    if ( stream.retention == Retention::WorkQueue ) {
+        // A work queue's consumer takes the messages it reads away from the
+        // workers; the server allows none that does not acknowledge.
+        plan.refusal = QStringLiteral( "it is a work queue (work-queue retention), whose messages "
+                                       "a replay would take away from its workers" );
+        return plan;
+    }
+    if ( stream.retention == Retention::Interest ) {
+        plan.warning = QStringLiteral( "warning: stream %1 has interest retention: it holds only "
+                                       "the messages its consumers have yet to acknowledge, and "
+                                       "the replay is one more consumer while it runs" )
+                           .arg( replay.stream );
+    }
 
-    natsStatus status = natsOptions_Create( &options );
-    if ( status == NATS_OK ) {
-        status = natsOptions_SetTimeout( options, kListTimeoutMs );
-    }
-    if ( status != NATS_OK ) {
-        problem = describeStatus( status );
-    }
-    if ( problem.isEmpty() ) {
-        problem = connectTo( options, config, &connection );
-    }
-    if ( problem.isEmpty() ) {
-        jsOptions jsOptions;
-        jsOptions_Init( &jsOptions );
-        jsOptions.Wait = kListTimeoutMs;
-        status = natsConnection_JetStream( &js, connection, &jsOptions );
-        jsErrCode code = static_cast<jsErrCode>( 0 );
-        if ( status == NATS_OK ) {
-            status = js_StreamNames( &list, js, nullptr, &code );
-        }
-        if ( status == NATS_NOT_FOUND ) {
-            status = NATS_OK; // no stream
-        }
-        if ( status != NATS_OK ) {
-            problem = QStringLiteral( "listing the streams failed: %1" )
-                          .arg( describeStatus( status ) );
-        }
-    }
-    if ( list ) {
-        for ( int i = 0; i < list->Count; ++i ) {
-            names << QString::fromUtf8( list->List[ i ] );
-        }
-        jsStreamNamesList_Destroy( list );
-    }
-    jsCtx_Destroy( js );
-    natsConnection_Destroy( connection );
-    natsOptions_Destroy( options );
+    plan.filter
+        = replay.filterSubject.isEmpty() ? QByteArray( ">" ) : replay.filterSubject.toUtf8();
+    plan.inactiveThresholdNs = static_cast<qint64>( replay.inactiveThresholdMs ) * kNsPerMs;
+    plan.followLive = replay.followLive;
+    plan.caughtUpAtOnce = stream.messages == 0;
 
-    names.sort();
-    if ( error ) {
-        *error = problem;
+    const auto first = stream.firstSequence;
+    const auto last = stream.lastSequence;
+    switch ( replay.start ) {
+    case ReplayStart::All:
+        break;
+    case ReplayStart::Last:
+        if ( replay.filterSubject.isEmpty() ) {
+            if ( last >= replay.lastMessages && last - replay.lastMessages + 1 > first ) {
+                plan.deliver = DeliverFrom::StartSequence;
+                plan.startSequence = last - replay.lastMessages + 1;
+            }
+        }
+        else {
+            // Which of the stream's messages match is the server's to
+            // know: read them all, write the last N.
+            plan.skip.whilePending = replay.lastMessages;
+        }
+        break;
+    case ReplayStart::Sequence:
+        plan.deliver = DeliverFrom::StartSequence;
+        plan.startSequence = replay.sequence;
+        plan.caughtUpAtOnce = plan.caughtUpAtOnce || replay.sequence > last;
+        break;
+    case ReplayStart::Time: {
+        plan.deliver = DeliverFrom::StartTime;
+        // nats.c (3.14) writes the fraction of a second without its leading
+        // zeros, so 12:00:00.025 would reach the server as 12:00:00.25, past
+        // what was stored in between.  Such a time starts the consumer at
+        // its whole second, and what the consumer has from before the time
+        // is skipped.  nats.c's main has the fix (974c232), after 3.14.0;
+        // with a release of it this can go.
+        const qint64 startNs = replay.timeUs * 1000;
+        const qint64 fractionNs = ( ( startNs % kNsPerSecond ) + kNsPerSecond ) % kNsPerSecond;
+        if ( fractionNs > 0 && fractionNs < kNsPerSecond / 10 ) {
+            plan.startTimeNs = startNs - fractionNs;
+            plan.skip.storedBeforeNs = startNs;
+        }
+        else {
+            plan.startTimeNs = startNs;
+        }
+        break;
     }
-    return problem.isEmpty() ? names : QStringList{};
+    }
+    return plan;
+}
+
+bool caughtUpOnSubscribing( const ReplayPlan& plan, quint64 consumerPending,
+                            quint64 consumerDelivered )
+{
+    return plan.caughtUpAtOnce || ( consumerPending == 0 && consumerDelivered == 0 );
+}
+
+ReplayStep::Outcome ReplayStep::next( quint64 pending, qint64 storedNs )
+{
+    Outcome outcome;
+    outcome.caughtUp = pending == 0;
+    if ( skip_.whilePending > 0 && pending >= skip_.whilePending ) {
+        return outcome; // before the last N
+    }
+    if ( storedNs < skip_.storedBeforeNs ) {
+        return outcome; // before the start time
+    }
+    skip_ = {}; // from the first written on, all are
+    outcome.write = true;
+    return outcome;
 }
 
 } // namespace nats_monitor

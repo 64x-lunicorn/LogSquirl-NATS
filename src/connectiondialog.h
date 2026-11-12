@@ -98,7 +98,7 @@ public:
     explicit ConnectionDialog( const Sessions* sessions, QWidget* parent = nullptr );
 
     /// Waits for a listing of the streams still under way: at most its
-    /// timeouts (listStreams() in replay.h).
+    /// timeouts (listStreams() in streams.h).
     ~ConnectionDialog() override;
 
     /// Set up an empty new connection, with the default settings.

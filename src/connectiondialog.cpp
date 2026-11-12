@@ -30,6 +30,7 @@
 #include "profiles.h"
 #include "replay.h"
 #include "sessions.h"
+#include "streams.h"
 #include "subjects.h"
 
 #include <QCheckBox>
@@ -664,7 +665,7 @@ void ConnectionDialog::listStreams()
     statusLabel_->setText(
         QStringLiteral( "Listing the streams of %1…" ).arg( redactUrls( profile.url ) ) );
     // In the background: connecting may take the connect timeout.  The
-    // destructor joins the thread (replay.h, listStreams(), says how
+    // destructor joins the thread (streams.h, listStreams(), says how
     // long it may take), and Qt drops the answer if the dialog is gone
     // before it is delivered.
     listing_ = std::thread( [ this, config = sessionConfig( profile ) ] {

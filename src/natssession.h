@@ -112,7 +112,9 @@
  *
  * "The last N messages" with a filter subject reads the stream from its
  * start and writes the last N that match; without a filter it starts at
- * the stream sequence N before the end.
+ * the stream sequence N before the end.  Where a replay starts, what it
+ * skips and when it has caught up are planned from the stream's state
+ * before it subscribes (replay.h, planReplay() and ReplayStep).
  *
  * USAGE
  * ─────

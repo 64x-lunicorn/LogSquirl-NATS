@@ -201,19 +201,32 @@ with flow control and heartbeats, which nats.c recreates from the last
 stream sequence after a gap or a reconnect. The filter subject is the
 `ReplayConfig::filterSubject`, or `>` for all of the stream's.
 
+- **The plan.** Before subscribing, the writer reads the stream's state
+  (`js_GetStreamInfo`: retention, first and last sequence, message count,
+  as a `StreamState`) and plans the replay: `planReplay()` (replay.h) makes
+  a `ReplayPlan` of the config and that state, which says whether it is
+  refused or warned of, where the consumer starts (`DeliverFrom` and a
+  start sequence or time), what the step skips (`ReplaySkip`), whether
+  there is nothing to replay (caught up at once), and whether it follows
+  live. The plan is pure; `subscribeReplay` (natssession.cpp) only turns it
+  into `jsSubOptions` and hands each message's `NumPending` and stored time
+  to the plan's `ReplayStep`, which says whether to write the message and
+  whether the replay has caught up. A new start position is a row in
+  `kReplayStarts`, a case in `describeReplay()` and one in `planReplay()`;
+  only a new `DeliverFrom` needs the session too, to map it to nats.c.
 - **Start.** *All*: `js_DeliverAll`. *Sequence*: `js_DeliverByStartSequence`
   with `OptStartSeq`. *Time*: `js_DeliverByStartTime` with `OptStartTime`
   (nanoseconds). nats.c (3.14) writes that time's fraction of a second
   without its leading zeros (`nats_EncodeTimeUTC`: 12:00:00.025 goes out as
   12:00:00.25), so a time less than 0.1 s into its second starts the
-  consumer at the whole second instead, and the callback skips what was
+  consumer at the whole second instead, and the step skips what was
   stored before the time, until the first one written (fixed in nats.c's
   main, 974c232, after 3.14.0: with a release of it this can go).
   *Last N* without a filter: by start sequence, `OptStartSeq` = the
-  stream's last sequence − N + 1, from `js_GetStreamInfo`. *Last N* with
-  a filter: which messages match is the server's to know, so it delivers
-  all and the callback skips while the message's `NumPending` (metadata)
-  is N or more, until the first one written.
+  stream's last sequence − N + 1 (all, if that is not after its first).
+  *Last N* with a filter: which messages match is the server's to know, so
+  it delivers all and the step skips while the message's `NumPending`
+  (metadata) is N or more, until the first one written.
 - **The line.** `onReplayMessage` reads `natsMsg_GetMetaData`: the stored
   time (`Timestamp`) and the stream sequence go into `Message`, and the
   reply is cleared (nats.c's is the consumer's; the stream keeps none).
@@ -222,9 +235,10 @@ stream sequence after a gap or a reconnect. The filter subject is the
   on; otherwise the writer ends as on stop, writes `replay complete` and
   the session emits `completed()` (not `finished()`, which is a failure),
   on which `Sessions` sets the tile to stopped with *replay complete*. With
-  nothing to replay no message comes, so after subscribing the consumer's
-  info (`natsSubscription_GetConsumerInfo`: nothing pending, nothing
-  delivered) says it.
+  nothing to replay no message comes, so after subscribing the plan (an
+  empty stream, a start sequence after its last) or the consumer's info
+  (`natsSubscription_GetConsumerInfo`: nothing pending, nothing delivered)
+  says it (`caughtUpOnSubscribing()`).
 - **No drops by the plugin.** A replay's message callback waits for room in
   the queue instead of dropping (`Shared::waitForRoom`, woken when the
   writer takes the queue, and not while stopping): the stream holds the
@@ -236,8 +250,8 @@ stream sequence after a gap or a reconnect. The filter subject is the
   arrives (`jsSub_trackSequences`, conn.c), not from the delivery thread
   that waits, so the consumer is not reset; a test replays 20,000 messages
   through a queue of one.
-- **Retention.** Before subscribing, `js_GetStreamInfo` gives the stream's
-  retention (and its first and last sequence, for *Last N*). A work queue
+- **Retention.** The plan takes the stream's retention into account
+  (`Retention`, mapped from `js_RetentionPolicy`). A work queue
   (`js_WorkQueuePolicy`) is refused: the replay fails with `replaying
   stream JOBS failed: it is a work queue …`, before any consumer exists.
   An interest stream (`js_InterestPolicy`) gets a `warning: stream EVENTS
@@ -262,14 +276,23 @@ stream sequence after a gap or a reconnect. The filter subject is the
   deliver subject. nats.c copies the config when it recreates the ordered
   consumer, and the consumer it replaces goes the same way.
 
-The streams the dialog offers come from `listStreams()` (replay.h;
+The streams the dialog offers come from `listStreams()`
+([`src/streams.h`](../src/streams.h), apart from the pure planning;
 it connects with `connectTo()`, as the session does, natsoptions.h;
 `js_StreamNames`, `$JS.API.STREAM.NAMES`), run on a thread of the dialog;
 List is disabled until it answers. The dialog joins it when it goes (at
 shutdown, before the library may be unloaded), so the listing bounds
-itself: 2 s to connect to each server URL and 2 s for each answer. The tests (`[replay]`) are at the main
+itself: 2 s to connect to each server URL and 2 s for each answer.
+
+The plan and the step are tested without a server and without the clock
+(`[plan]`, `replayplan_test.cpp`): tables of a config and a stream's state
+with the plan expected (each start position, *last N* with a filter,
+sub-second start times, an empty stream, the work queue refused and the
+interest warning), and of the (pending, stored time) of each message with
+what the step makes of it. The other tests (`[replay]`) are at the main
 seam, `replay_test.cpp`, against a server started with `-js`
-(`NatsServerOptions::jetStream`); `nats_test::JetStream`
+(`NatsServerOptions::jetStream`), replaying each deliver policy at least
+once to see nats.c called as the plan says; `nats_test::JetStream`
 ([`tests/sessiontest.h`](../tests/sessiontest.h)) adds memory streams,
 publishes into them and reads their message count, stored times and
 consumers. The million-message test (`[large]`) takes about ten seconds.
@@ -583,6 +606,11 @@ options of one with JetStream.
   (`capture_test.cpp`, `[capture]`) read the formatter's lines.
 - **The formatter** (`lineformat_test.cpp`): `formatLine()` is a pure
   function from a message to one line.
+- **The replay plan** (`replayplan_test.cpp`): `planReplay()` is a pure
+  function from a replay config and a stream's state to a plan, and
+  `ReplayStep` one from each message's pending count and stored time to
+  write or skip and caught up; the tests are tables, with no server and no
+  clock.
 - **The Log Format** (`logformat_test.cpp`) is tested at the same seam: it
   reads the formatter's lines with the regex and timestamp format of
   [`formats/nats_log.json`](../formats/nats_log.json), as LogSquirl does,
