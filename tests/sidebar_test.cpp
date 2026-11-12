@@ -73,9 +73,8 @@ SCENARIO( "a tile shows its connection's status", "[sidebar]" )
             REQUIRE( file.open( QIODevice::WriteOnly ) );
             file.write( QByteArray( 2048, 'x' ) );
         }
-        const auto fileLine
-            = "nats_orders.all.log · "
-              + QLocale().formattedDataSize( 2048, 1, QLocale::DataSizeIecFormat );
+        const auto fileLine = "nats_orders.all.log · "
+                              + QLocale().formattedDataSize( 2048, 1, QLocale::DataSizeIecFormat );
         SessionStatus status;
         status.filePath = path;
         status.files = 1;
@@ -129,8 +128,8 @@ SCENARIO( "a tile shows its connection's status", "[sidebar]" )
         WHEN( "it was stopped, or its replay is complete" )
         {
             status.state = SessionState::Stopped;
-            status.detail = GENERATE( QStringLiteral( "stopped" ),
-                                      QStringLiteral( "replay complete" ) );
+            status.detail
+                = GENERATE( QStringLiteral( "stopped" ), QStringLiteral( "replay complete" ) );
 
             THEN( "the tile is stopped, saying how, with what it captured" )
             {

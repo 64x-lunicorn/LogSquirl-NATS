@@ -140,7 +140,7 @@ private:
     /// its file (if it wrote one), and delete it later.
     void release( Entry& entry );
 
-    HostAdapter& host_; ///< Not owned.
+    HostAdapter& host_;      ///< Not owned.
     const QString tempRoot_; ///< Given to each session it starts.
     const Clock clock_;
     QTimer* timer_;

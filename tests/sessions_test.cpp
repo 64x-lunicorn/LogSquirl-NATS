@@ -48,8 +48,8 @@
 #include <utility>
 
 using nats_monitor::ConnectionProfile;
-using nats_monitor::SessionState;
 using nats_monitor::Sessions;
+using nats_monitor::SessionState;
 using nats_monitor::SessionStatus;
 using nats_test::MemoryHost;
 using nats_test::NatsServer;
@@ -103,8 +103,7 @@ struct Announced {
 
 } // namespace
 
-SCENARIO( "Sessions keeps the state, counts and rate of each connection",
-          "[server][sessions]" )
+SCENARIO( "Sessions keeps the state, counts and rate of each connection", "[server][sessions]" )
 {
     SKIP_WITHOUT_NATS_SERVER();
 
@@ -132,11 +131,10 @@ SCENARIO( "Sessions keeps the state, counts and rate of each connection",
 
             THEN( "its file is opened in one followed tab, and a notification says it started" )
             {
-                REQUIRE( host.followedTabs
-                         == QStringList{ sessions.status( "orders" ).filePath } );
-                REQUIRE( host.notifications
-                         == QStringList{ "NATS capture of orders.> started on " + server.url()
-                                         + "." } );
+                REQUIRE( host.followedTabs == QStringList{ sessions.status( "orders" ).filePath } );
+                REQUIRE(
+                    host.notifications
+                    == QStringList{ "NATS capture of orders.> started on " + server.url() + "." } );
             }
 
             AND_WHEN( "it is stopped with a notification" )
@@ -146,8 +144,7 @@ SCENARIO( "Sessions keeps the state, counts and rate of each connection",
                 THEN( "a notification says it stopped, and no other tab is opened" )
                 {
                     REQUIRE( host.notifications.size() == 2 );
-                    REQUIRE( host.notifications.last()
-                             == "NATS capture of orders.> stopped." );
+                    REQUIRE( host.notifications.last() == "NATS capture of orders.> stopped." );
                     REQUIRE( host.followedTabs.size() == 1 );
                 }
             }
@@ -236,8 +233,7 @@ SCENARIO( "Sessions keeps the state, counts and rate of each connection",
                 REQUIRE( status.detail.startsWith( "connection to " + url + " failed: " ) );
                 REQUIRE_FALSE( sessions.isRunning( "orders" ) );
                 REQUIRE( announced.states()
-                         == QList<SessionState>{ SessionState::Connecting,
-                                                 SessionState::Failed } );
+                         == QList<SessionState>{ SessionState::Connecting, SessionState::Failed } );
 
                 AND_THEN( "a notification says why, and the host log has it as a warning" )
                 {
@@ -332,8 +328,7 @@ SCENARIO( "a connection that cannot start has failed, saying why", "[sessions]" 
     }
 }
 
-SCENARIO( "Sessions tells the host when it does not verify a server's certificate",
-          "[sessions]" )
+SCENARIO( "Sessions tells the host when it does not verify a server's certificate", "[sessions]" )
 {
     GIVEN( "Sessions on an in-memory host, and a connection with TLS that does not verify "
            "the certificate" )
@@ -355,8 +350,7 @@ SCENARIO( "Sessions tells the host when it does not verify a server's certificat
                 REQUIRE( host.logs.first().message
                          == "NATS Monitor: the certificate of nats://127.0.0.1:1 is not verified "
                             "(insecure)." );
-                REQUIRE( host.followedTabs
-                         == QStringList{ sessions.status( "x" ).filePath } );
+                REQUIRE( host.followedTabs == QStringList{ sessions.status( "x" ).filePath } );
             }
             sessions.stopAll();
         }

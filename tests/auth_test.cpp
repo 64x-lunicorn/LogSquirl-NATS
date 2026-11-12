@@ -574,9 +574,9 @@ SCENARIO( "a password in a session's URL is never written to its file or its err
 
         WHEN( "a session starts on a URL with the right password in it" )
         {
-            Run run( sessionConfig(
-                QString( server.url() ).replace( "nats://", "nats://alice:s3cret@" ),
-                { "auth.>" } ) );
+            Run run(
+                sessionConfig( QString( server.url() ).replace( "nats://", "nats://alice:s3cret@" ),
+                               { "auth.>" } ) );
 
             THEN( "it runs, and its connected marker does not show the password" )
             {

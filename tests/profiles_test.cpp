@@ -400,9 +400,9 @@ SCENARIO( "the profile store says why it cannot write its file", "[profiles]" )
 
         THEN( "saving says the connection could not be saved to the file" )
         {
-            REQUIRE( store.upsert( profile( "prod" ) )
-                     == QStringLiteral( "The connection prod could not be saved to %1." )
-                            .arg( path ) );
+            REQUIRE(
+                store.upsert( profile( "prod" ) )
+                == QStringLiteral( "The connection prod could not be saved to %1." ).arg( path ) );
         }
     }
 
@@ -551,13 +551,14 @@ SCENARIO( "whether a connection can be started is one check, with a reason for t
           },
           "Enter the server URL." },
         // The replay's rules are the Replay module's (replayProblem()).
-        { "a replay without subjects", []( ConnectionProfile& p ) {
+        { "a replay without subjects",
+          []( ConnectionProfile& p ) {
               replays( p );
               p.subjects.clear();
           },
           "" },
-        { "a replay of a blank stream name",
-          []( ConnectionProfile& p ) { p.replay.stream = "  "; }, "No stream to replay." },
+        { "a replay of a blank stream name", []( ConnectionProfile& p ) { p.replay.stream = "  "; },
+          "No stream to replay." },
         { "a replay of the last 0 messages",
           []( ConnectionProfile& p ) {
               replays( p );
@@ -605,8 +606,7 @@ SCENARIO( "whether a connection can be started is one check, with a reason for t
           true },
         { "a subject that is not one",
           []( ConnectionProfile& p ) { p.subjects = "orders.>\norders.>x"; },
-          "orders.>x is not a valid subject: * and > must each be a token of their own.",
-          true },
+          "orders.>x is not a valid subject: * and > must each be a token of their own.", true },
         { "no subject", []( ConnectionProfile& p ) { p.subjects = " \n "; },
           "Enter the subject to capture." },
         { "no subject and no user: the subject first",
@@ -708,10 +708,10 @@ SCENARIO( "whether a connection can be saved is one check, with a reason for the
               p.url = "nats://bob:s3cret@localhost:4222";
           },
           "Enter a name for the connection to save." },
-        { "replay chosen with no stream",
-          []( ConnectionProfile& p ) { p.replayChosen = true; },
+        { "replay chosen with no stream", []( ConnectionProfile& p ) { p.replayChosen = true; },
           "Enter the stream to replay, or List the server's streams to choose it." },
-        { "replay chosen with a stream", []( ConnectionProfile& p ) {
+        { "replay chosen with a stream",
+          []( ConnectionProfile& p ) {
               p.replayChosen = true;
               replays( p );
           },

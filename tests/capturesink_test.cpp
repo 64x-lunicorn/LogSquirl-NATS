@@ -268,8 +268,7 @@ SCENARIO( "drops not marked yet are written before the last marker", "[sink][dro
                                                markerFields( "dropped=3 (queue full)" ),
                                                markerFields( "stopped" ) } );
                 REQUIRE( sink.dropped() == 4 );
-                REQUIRE( events.all()
-                         == QList<CaptureSink::Event>{ { Kind::Status, "stopped" } } );
+                REQUIRE( events.all() == QList<CaptureSink::Event>{ { Kind::Status, "stopped" } } );
             }
 
             AND_WHEN( "a callback still comes afterwards" )
@@ -328,9 +327,8 @@ SCENARIO( "a replay's sink waits for room instead of dropping", "[sink][replay]"
             }
         } );
         const auto waitsWith = [ & ]( quint64 received ) {
-            return waitFor( [ & ] {
-                return sink.waitingForRoom() == 1 && sink.received() == received;
-            } );
+            return waitFor(
+                [ & ] { return sink.waitingForRoom() == 1 && sink.received() == received; } );
         };
 
         THEN( "the second message waits while the first is queued" )

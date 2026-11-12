@@ -43,7 +43,6 @@
 #include <QScrollArea>
 #include <QVBoxLayout>
 
-
 namespace nats_monitor {
 
 namespace {
@@ -114,10 +113,9 @@ TileView tileViewOf( const SessionStatus& status )
         break;
     case SessionState::Running:
         view.state = TileState::Running;
-        view.details << QStringLiteral( "running · %1 msgs/s" )
-                            .arg( QLocale().toString( status.rate ) )
-                     << countsOf( status )
-                     << QStringLiteral( "connected to %1" ).arg( status.server );
+        view.details
+            << QStringLiteral( "running · %1 msgs/s" ).arg( QLocale().toString( status.rate ) )
+            << countsOf( status ) << QStringLiteral( "connected to %1" ).arg( status.server );
         break;
     case SessionState::Failed:
         view.state = TileState::Failed;

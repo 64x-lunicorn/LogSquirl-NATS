@@ -538,8 +538,8 @@ struct NatsSession::Worker {
         sink.fileStem = fileStem;
         sink.maxFileBytes = config.maxFileBytes;
         sink.queueLimit = config.queueLimit;
-        sink.mode = config.replay.enabled() ? CaptureSink::Mode::WaitForRoom
-                                            : CaptureSink::Mode::Drop;
+        sink.mode
+            = config.replay.enabled() ? CaptureSink::Mode::WaitForRoom : CaptureSink::Mode::Drop;
         return sink;
     }
 
@@ -561,8 +561,7 @@ struct NatsSession::Worker {
 
     /// Have @p session emit @p transition, of start number @p generation,
     /// on the GUI thread: unless it was stopped meanwhile.
-    static void postTransition( NatsSession* session, int generation,
-                                const Transition& transition )
+    static void postTransition( NatsSession* session, int generation, const Transition& transition )
     {
         post( session, [ generation, transition ]( NatsSession* s ) {
             s->onWorkerTransition( generation, transition );
@@ -677,8 +676,8 @@ struct NatsSession::Worker {
     QString readStream( const QByteArray& stream, StreamState* state )
     {
         jsStreamInfo* info = nullptr;
-        const natsStatus status = js_GetStreamInfo( &info, js, stream.constData(), nullptr,
-                                                    nullptr );
+        const natsStatus status
+            = js_GetStreamInfo( &info, js, stream.constData(), nullptr, nullptr );
         if ( status != NATS_OK ) {
             return describeStatus( status );
         }
@@ -1071,7 +1070,8 @@ bool NatsSession::start()
     const bool opened = sink.open();
     filePath_ = sink.fileName();
     if ( !opened ) {
-        return fail( QStringLiteral( "Cannot create %1: %2" ).arg( filePath_, sink.errorString() ) );
+        return fail(
+            QStringLiteral( "Cannot create %1: %2" ).arg( filePath_, sink.errorString() ) );
     }
     sink.start();
     auto* raw = worker.get();

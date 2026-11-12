@@ -98,8 +98,7 @@ class ConnectionDialog : public QDialog {
 public:
     /// A dialog on the connections of @p profiles, which says when one it
     /// saves runs in @p sessions; both must outlive it.
-    ConnectionDialog( ProfileStore* profiles, const Sessions* sessions,
-                      QWidget* parent = nullptr );
+    ConnectionDialog( ProfileStore* profiles, const Sessions* sessions, QWidget* parent = nullptr );
 
     /// Waits for a listing of the streams still under way: at most its
     /// timeouts (listStreams() in streams.h).

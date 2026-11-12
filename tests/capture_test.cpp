@@ -164,11 +164,10 @@ SCENARIO( "the line reader reads no line the formatter does not write", "[captur
 {
     GIVEN( "lines the Log Format does not match, or with a header block not closed" )
     {
-        const auto text = GENERATE( as<QString>{}, "", "garbage",
-                                    "2026-11-11 10:00:00.123 orders - 20 x",
-                                    "2026-11-11 10:00:00.123456Z orders - twenty x",
-                                    "2026-11-11 10:00:00.123456Z h - 0 [a=b",
-                                    "2026-11-11 10:00:00.123456Z h - 1 [a=b]x" );
+        const auto text = GENERATE(
+            as<QString>{}, "", "garbage", "2026-11-11 10:00:00.123 orders - 20 x",
+            "2026-11-11 10:00:00.123456Z orders - twenty x",
+            "2026-11-11 10:00:00.123456Z h - 0 [a=b", "2026-11-11 10:00:00.123456Z h - 1 [a=b]x" );
         const auto line = CaptureLine::read( text );
 
         THEN( "it is unreadable, with no fields, and kept as it is" )
@@ -200,8 +199,7 @@ SCENARIO( "a capture's lines are read as messages, markers and drops", "[capture
             QString::fromUtf8( formatMarker( kReceived, "dropped=3 (slow consumer)" ) ),
             QString::fromUtf8( formatLine( b ) ),
             QString::fromUtf8( formatMarker( kReceived, "dropped=5 (queue full)" ) ),
-            "dropped=1 not a line",
-            QString::fromUtf8( formatMarker( kReceived, "stopped" ) ) } );
+            "dropped=1 not a line", QString::fromUtf8( formatMarker( kReceived, "stopped" ) ) } );
 
         THEN( "each line is there, in order" )
         {
@@ -215,9 +213,9 @@ SCENARIO( "a capture's lines are read as messages, markers and drops", "[capture
             REQUIRE( capture.fields().size() == 7 );
             REQUIRE( capture.fields().at( 6 ) == nats_test::markerFields( "stopped" ) );
             REQUIRE( capture.messages().size() == 2 );
-            REQUIRE( capture.messageFields()
-                     == QList<LineFields>{ { "a", "-", 7, 1, {}, "1" },
-                                           { "b", "-", 9, 2, {}, "22" } } );
+            REQUIRE(
+                capture.messageFields()
+                == QList<LineFields>{ { "a", "-", 7, 1, {}, "1" }, { "b", "-", 9, 2, {}, "22" } } );
             REQUIRE( capture.messagesOn( "b" ).size() == 1 );
             REQUIRE( capture.payloadsOn( "a" ) == QStringList{ "1" } );
             REQUIRE( capture.sequences() == QList<quint64>{ 7, 9 } );

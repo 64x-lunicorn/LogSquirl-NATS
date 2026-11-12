@@ -154,7 +154,7 @@ bool caughtUpOnSubscribing( const ReplayPlan& plan, quint64 consumerPending,
  * for each replay, called in the order of delivery, from one thread.
  */
 class ReplayStep {
-  public:
+public:
     struct Outcome {
         bool write = false;    ///< Write the message; false: skip it.
         bool caughtUp = false; ///< It was the last one there was (none pending).
@@ -169,7 +169,7 @@ class ReplayStep {
     /// NumPending), stored at @p storedNs (nanoseconds since the epoch, UTC).
     Outcome next( quint64 pending, qint64 storedNs );
 
-  private:
+private:
     ReplaySkip skip_; ///< Cleared at the first message written.
 };
 

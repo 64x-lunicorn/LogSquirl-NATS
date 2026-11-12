@@ -49,13 +49,13 @@ using nats_test::ConfiguredServer;
 using nats_test::JetStream;
 using nats_test::LineFields;
 using nats_test::liveFields;
-using nats_test::withJetStream;
 using nats_test::Publisher;
 using nats_test::replayConfig;
 using nats_test::sessionConfig;
 using nats_test::sessionTempRoot;
 using nats_test::Transitions;
 using nats_test::waitFor;
+using nats_test::withJetStream;
 using Kind = nats_monitor::Transition::Kind;
 
 namespace {

@@ -114,12 +114,15 @@ SCENARIO( "a published message shows up as a line in the session's file", "[serv
 
             THEN( "it is a line of the file within a second" )
             {
-                const LineFields expected{ "orders.eu.created", "_INBOX.ab12", 0, 20, "Trace=abc",
-                                           R"({"id":1,"total":9.5})" };
+                const LineFields expected{
+                    "orders.eu.created",      "_INBOX.ab12", 0, 20, "Trace=abc",
+                    R"({"id":1,"total":9.5})"
+                };
                 REQUIRE( waitFor(
                     [ & ] {
-                        return Capture::read( session.filePath() ).messageFields().contains(
-                            expected );
+                        return Capture::read( session.filePath() )
+                            .messageFields()
+                            .contains( expected );
                     },
                     1000 ) );
                 REQUIRE( timer.elapsed() < 1000 );
@@ -365,8 +368,8 @@ SCENARIO( "a session without a subject does not start", "[session][subjects]" )
 {
     GIVEN( "a session with no subscription, or only a blank subject" )
     {
-        const auto config = GENERATE( SessionConfig{},
-                                      sessionConfig( "nats://127.0.0.1:1", { "  " } ) );
+        const auto config
+            = GENERATE( SessionConfig{}, sessionConfig( "nats://127.0.0.1:1", { "  " } ) );
         NatsSession session( config, sessionTempRoot() );
         Transitions transitions( session );
         QStringList errors;
@@ -376,9 +379,9 @@ SCENARIO( "a session without a subject does not start", "[session][subjects]" )
         THEN( "start() refuses: it failed, saying why as the start check does, and that alone" )
         {
             REQUIRE_FALSE( session.start() );
-            REQUIRE( transitions.all()
-                     == QList<Transition>{
-                         { Kind::Failed, "Enter the subject to capture.", {} } } );
+            REQUIRE(
+                transitions.all()
+                == QList<Transition>{ { Kind::Failed, "Enter the subject to capture.", {} } } );
             REQUIRE( errors.isEmpty() );
         }
     }
@@ -618,8 +621,8 @@ SCENARIO( "connection problems are reported and written as marker lines", "[serv
 
             THEN( "it failed, saying why as in the file's marker, and the session ends" )
             {
-                REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Failed ) == 1; },
-                                  10000 ) );
+                REQUIRE(
+                    waitFor( [ & ] { return transitions.count( Kind::Failed ) == 1; }, 10000 ) );
                 REQUIRE( transitions.kinds() == QList<Kind>{ Kind::Connecting, Kind::Failed } );
                 const auto why = transitions.last( Kind::Failed ).detail;
                 REQUIRE( why.startsWith( "connection to " + url + " failed: " ) );
@@ -942,8 +945,7 @@ SCENARIO( "when the server goes away during a flood, the drops until then are st
             REQUIRE( drops.unknown == 0 );
             REQUIRE( drops.slowConsumer > 0 );
             REQUIRE( session.droppedCount() == static_cast<quint64>( drops.total() ) );
-            REQUIRE( session.receivedCount()
-                     == static_cast<quint64>( written + drops.queueFull ) );
+            REQUIRE( session.receivedCount() == static_cast<quint64>( written + drops.queueFull ) );
             REQUIRE( capture.last().fields() == markerFields( lastMarker ) );
         };
 
@@ -972,8 +974,8 @@ SCENARIO( "when the server goes away during a flood, the drops until then are st
 
             THEN( "the session ends, and every drop is in a marker before the closed marker" )
             {
-                REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Failed ) == 1; },
-                                  30000 ) );
+                REQUIRE(
+                    waitFor( [ & ] { return transitions.count( Kind::Failed ) == 1; }, 30000 ) );
                 REQUIRE( transitions.last( Kind::Failed ).detail == "connection closed" );
                 check( "connection closed" );
             }

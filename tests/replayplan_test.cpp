@@ -107,7 +107,7 @@ struct Start {
 
 Start startOf( const ReplayPlan& plan )
 {
-    return { plan.deliver,          plan.startSequence,          plan.startTimeNs,
+    return { plan.deliver,           plan.startSequence,       plan.startTimeNs,
              plan.skip.whilePending, plan.skip.storedBeforeNs, plan.caughtUpAtOnce };
 }
 
@@ -135,15 +135,14 @@ struct StringMaker<Start> {
     {
         return "{ deliver " + std::to_string( static_cast<int>( s.deliver ) ) + ", sequence "
                + std::to_string( s.sequence ) + ", time " + std::to_string( s.timeNs )
-               + ", skip while pending " + std::to_string( s.skipWhilePending )
-               + ", skip before " + std::to_string( s.skipStoredBeforeNs )
+               + ", skip while pending " + std::to_string( s.skipWhilePending ) + ", skip before "
+               + std::to_string( s.skipStoredBeforeNs )
                + ( s.caughtUpAtOnce ? ", caught up at once }" : " }" );
     }
 };
 } // namespace Catch
 
-SCENARIO( "a replay plan says where the consumer starts and what the step skips",
-          "[replay][plan]" )
+SCENARIO( "a replay plan says where the consumer starts and what the step skips", "[replay][plan]" )
 {
     struct Row {
         const char* what;
@@ -154,35 +153,57 @@ SCENARIO( "a replay plan says where the consumer starts and what the step skips"
     const std::vector<Row> rows{
         { "all messages", replay(), stream( 1, 10 ), {} },
         { "the last 3", last( 3 ), stream( 1, 10 ), { DeliverFrom::StartSequence, 8 } },
-        { "the last 3 of a stream that lost its first ones", last( 3 ), stream( 5, 10 ),
+        { "the last 3 of a stream that lost its first ones",
+          last( 3 ),
+          stream( 5, 10 ),
           { DeliverFrom::StartSequence, 8 } },
         { "the last 10 of ten: all", last( 10 ), stream( 1, 10 ), {} },
         { "the last 20 of ten: all", last( 20 ), stream( 1, 10 ), {} },
         { "the last 6 of the messages 5 to 10: all", last( 6 ), stream( 5, 10 ), {} },
         { "the last 2 on a subject: all, skipping while 2 or more are pending",
-          last( 2, "orders.eu" ), stream( 1, 10 ), { DeliverFrom::All, 0, 0, 2 } },
-        { "from sequence 7", fromSequence( 7 ), stream( 1, 10 ),
+          last( 2, "orders.eu" ),
+          stream( 1, 10 ),
+          { DeliverFrom::All, 0, 0, 2 } },
+        { "from sequence 7",
+          fromSequence( 7 ),
+          stream( 1, 10 ),
           { DeliverFrom::StartSequence, 7 } },
-        { "from sequence 11, after the last: caught up at once", fromSequence( 11 ),
-          stream( 1, 10 ), { DeliverFrom::StartSequence, 11, 0, 0, 0, true } },
-        { "from a whole second", fromTime( kSecondUs ), stream( 1, 10 ),
+        { "from sequence 11, after the last: caught up at once",
+          fromSequence( 11 ),
+          stream( 1, 10 ),
+          { DeliverFrom::StartSequence, 11, 0, 0, 0, true } },
+        { "from a whole second",
+          fromTime( kSecondUs ),
+          stream( 1, 10 ),
           { DeliverFrom::StartTime, 0, kSecondNs } },
-        { "from half a second in", fromTime( kSecondUs + 500000 ), stream( 1, 10 ),
+        { "from half a second in",
+          fromTime( kSecondUs + 500000 ),
+          stream( 1, 10 ),
           { DeliverFrom::StartTime, 0, kSecondNs + 500000000 } },
-        { "from 0.1 s in, written right by nats.c 3.14", fromTime( kSecondUs + 100000 ),
-          stream( 1, 10 ), { DeliverFrom::StartTime, 0, kSecondNs + 100000000 } },
+        { "from 0.1 s in, written right by nats.c 3.14",
+          fromTime( kSecondUs + 100000 ),
+          stream( 1, 10 ),
+          { DeliverFrom::StartTime, 0, kSecondNs + 100000000 } },
         { "from 0.025 s in: at the whole second, skipping what is stored before",
-          fromTime( kSecondUs + 25000 ), stream( 1, 10 ),
+          fromTime( kSecondUs + 25000 ),
+          stream( 1, 10 ),
           { DeliverFrom::StartTime, 0, kSecondNs, 0, kSecondNs + 25000000 } },
         { "from 1 us in: at the whole second, skipping what is stored before",
-          fromTime( kSecondUs + 1 ), stream( 1, 10 ),
+          fromTime( kSecondUs + 1 ),
+          stream( 1, 10 ),
           { DeliverFrom::StartTime, 0, kSecondNs, 0, kSecondNs + 1000 } },
-        { "an empty stream: caught up at once", replay(), stream( 0, 0 ),
+        { "an empty stream: caught up at once",
+          replay(),
+          stream( 0, 0 ),
           { DeliverFrom::All, 0, 0, 0, 0, true } },
-        { "an emptied stream, the last 5: caught up at once", last( 5 ), stream( 11, 10 ),
+        { "an emptied stream, the last 5: caught up at once",
+          last( 5 ),
+          stream( 11, 10 ),
           { DeliverFrom::All, 0, 0, 0, 0, true } },
-        { "an empty stream, from a time: caught up at once", fromTime( kSecondUs ),
-          stream( 0, 0 ), { DeliverFrom::StartTime, 0, kSecondNs, 0, 0, true } },
+        { "an empty stream, from a time: caught up at once",
+          fromTime( kSecondUs ),
+          stream( 0, 0 ),
+          { DeliverFrom::StartTime, 0, kSecondNs, 0, 0, true } },
     };
     for ( const auto& row : rows ) {
         DYNAMIC_SECTION( row.what )

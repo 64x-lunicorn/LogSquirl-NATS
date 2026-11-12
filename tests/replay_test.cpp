@@ -475,8 +475,8 @@ SCENARIO( "a stream of a million messages is replayed whole, or stopped at any p
             for ( int i = 0; i < messages.size(); ++i ) {
                 const auto n = QString::number( i + 1 );
                 if ( messages.at( i ).fields()
-                     != LineFields{ "big.data", "-", static_cast<quint64>( i + 1 ), n.size(), {},
-                                    n } ) {
+                     != LineFields{
+                         "big.data", "-", static_cast<quint64>( i + 1 ), n.size(), {}, n } ) {
                     FAIL( "message line " << i << ": " << messages.at( i ).text().toStdString() );
                 }
             }
@@ -749,7 +749,7 @@ TEST_CASE( "a replay runs in a process of its own until it is killed", "[.][chil
 {
     const auto env = QProcessEnvironment::systemEnvironment();
     auto config = replayConfig( env.value( "LOGSQUIRL_NATS_REPLAY_URL" ),
-                            env.value( "LOGSQUIRL_NATS_REPLAY_STREAM" ) );
+                                env.value( "LOGSQUIRL_NATS_REPLAY_STREAM" ) );
     config.replay.followLive = true;
     config.replay.inactiveThresholdMs = env.value( "LOGSQUIRL_NATS_REPLAY_INACTIVE_MS" ).toInt();
     NatsSession session( config, sessionTempRoot() );
@@ -922,9 +922,8 @@ SCENARIO( "a stream that removes what its consumers took is refused or replayed 
             THEN( "it warns before the messages, then writes them" )
             {
                 REQUIRE( capture.size() >= 2 );
-                REQUIRE( capture.at( 1 ).markerText()
-                             .startsWith( "warning: stream EVENTS has "
-                                          "interest retention" ) );
+                REQUIRE( capture.at( 1 ).markerText().startsWith( "warning: stream EVENTS has "
+                                                                  "interest retention" ) );
                 REQUIRE( capture.sequences() == range( 1, 3 ) );
             }
 

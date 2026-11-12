@@ -43,7 +43,7 @@ struct LogFormat {
     QString name;
     QJsonObject definition;
     QStringList patterns;
-    QList<QRegularExpression> regexes; ///< The patterns, compiled with no options.
+    QList<QRegularExpression> regexes;    ///< The patterns, compiled with no options.
     QString timestampField = "timestamp"; // lnav's defaults, as LogSquirl's
     QString bodyField = "body";
     QStringList timestampFormats;

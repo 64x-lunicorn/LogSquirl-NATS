@@ -120,9 +120,9 @@ public:
             /// caught up, the end of the capture or why it failed (the
             /// session's own transitions say those); the text is what it says.
             Status,
-            Error, ///< A marker of an error the capture runs on after; the text is what it says.
-            Rotated,     ///< The capture goes on in another file; the text is its path.
-            FileError,   ///< A file could not be written or started; the text says why.
+            Error,   ///< A marker of an error the capture runs on after; the text is what it says.
+            Rotated, ///< The capture goes on in another file; the text is its path.
+            FileError, ///< A file could not be written or started; the text says why.
         };
         Kind kind = Kind::Status;
         QString text;

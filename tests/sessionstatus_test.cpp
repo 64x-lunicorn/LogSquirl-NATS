@@ -133,7 +133,6 @@ SCENARIO( "a connection's state follows its session's transitions", "[status]" )
                 }
             }
         }
-
     }
 
     GIVEN( "a running session that has a rate" )

@@ -545,7 +545,8 @@ SCENARIO( "capturing from a tile: Start, Stop, Start", "[plugin][server]" )
                         return lastFields( second ) == liveFields( "orders.us.created", "second" );
                     } ) );
                     REQUIRE( QFileInfo::exists( first ) );
-                    REQUIRE_FALSE( Capture::read( first ).payloadsOn( "orders.us.created" )
+                    REQUIRE_FALSE( Capture::read( first )
+                                       .payloadsOn( "orders.us.created" )
                                        .contains( "second" ) );
                     REQUIRE( Capture::read( first ).unreadable().isEmpty() );
                 }
@@ -830,8 +831,7 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
 
             THEN( "the tile says the server refused the user name or password" )
             {
-                REQUIRE(
-                    waitFor( [ & ] { return isIn( "test", SessionState::Failed ); }, 10000 ) );
+                REQUIRE( waitFor( [ & ] { return isIn( "test", SessionState::Failed ); }, 10000 ) );
                 REQUIRE( tileDetails( host, "test" ).startsWith( "failed: " ) );
                 REQUIRE( tileDetails( host, "test" )
                              .contains( "the server refused the user name or password" ) );
@@ -893,8 +893,7 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
 
             THEN( "the tile says the server's certificate is not trusted" )
             {
-                REQUIRE(
-                    waitFor( [ & ] { return isIn( "test", SessionState::Failed ); }, 10000 ) );
+                REQUIRE( waitFor( [ & ] { return isIn( "test", SessionState::Failed ); }, 10000 ) );
                 REQUIRE( tileDetails( host, "test" )
                              .contains( "the server's certificate is not trusted" ) );
             }
@@ -1630,9 +1629,7 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
 
             THEN( "its tile shows how many were dropped" )
             {
-                REQUIRE( waitFor(
-                    [ & ] { return statusOf( "metrics" ).dropped > 0; },
-                    10000 ) );
+                REQUIRE( waitFor( [ & ] { return statusOf( "metrics" ).dropped > 0; }, 10000 ) );
             }
         }
 
@@ -1961,9 +1958,7 @@ SCENARIO( "unloading the plugin or quitting LogSquirl during a replay leaves no 
         REQUIRE( host.openedFiles.size() == 1 );
         const auto path = host.openedFiles.first();
         REQUIRE( waitFor(
-            [ & ] {
-                return Capture::read( path ).hasMarker( "caught up, following live" );
-            },
+            [ & ] { return Capture::read( path ).hasMarker( "caught up, following live" ); },
             10000 ) );
         REQUIRE( js.consumers( "ORDERS" ).size() == before.size() + 1 );
 
