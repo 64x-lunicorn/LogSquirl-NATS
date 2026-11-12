@@ -745,3 +745,70 @@ SCENARIO( "a replay that loses its connection leaves no consumer behind",
         }
     }
 }
+
+SCENARIO( "a stream that removes what its consumers took is refused or replayed with a warning",
+          "[server][replay][retention]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    NatsServer server( withJetStream() );
+    Publisher publisher( server.url() );
+    JetStream js( publisher );
+
+    GIVEN( "a work queue stream of three jobs" )
+    {
+        js.addStream( "JOBS", { "jobs.>" }, js_WorkQueuePolicy );
+        for ( int i = 1; i <= 3; ++i ) {
+            js.publish( "jobs.new", QByteArray::number( i ) );
+        }
+
+        WHEN( "a session replays it" )
+        {
+            NatsSession session( replayOf( server.url(), "JOBS" ) );
+            int finished = 0;
+            QObject::connect( &session, &NatsSession::finished, [ &finished ] { ++finished; } );
+            REQUIRE( session.start() );
+            REQUIRE( waitFor( [ & ] { return finished == 1; }, 10000 ) );
+
+            THEN( "it refuses, saying why, and the jobs are still there, with no consumer" )
+            {
+                const auto lines = readLines( session.filePath() );
+                REQUIRE( messageLines( lines ).isEmpty() );
+                REQUIRE( anyOf( lines, "replaying stream JOBS failed: it is a work queue" ) );
+                REQUIRE( js.messageCount( "JOBS" ) == 3 );
+                REQUIRE( js.consumers( "JOBS" ).isEmpty() );
+            }
+        }
+    }
+
+    GIVEN( "an interest stream of three events, which its consumer EVENTS_READER has yet to read" )
+    {
+        js.addStream( "EVENTS", { "events.>" }, js_InterestPolicy );
+        js.addDurable( "EVENTS", "EVENTS_READER" );
+        for ( int i = 1; i <= 3; ++i ) {
+            js.publish( "events.new", QByteArray::number( i ) );
+        }
+
+        WHEN( "a session replays it" )
+        {
+            NatsSession session( replayOf( server.url(), "EVENTS" ) );
+            replayToTheEnd( session );
+            const auto lines = readLines( session.filePath() );
+
+            THEN( "it warns before the messages, then writes them" )
+            {
+                REQUIRE( lines.size() >= 2 );
+                REQUIRE( markerText( lines.at( 1 ) )
+                             .startsWith( "warning: stream EVENTS has "
+                                          "interest retention" ) );
+                REQUIRE( sequences( lines ) == range( 1, 3 ) );
+            }
+
+            THEN( "the stream still holds them for EVENTS_READER, its only consumer" )
+            {
+                REQUIRE( js.messageCount( "EVENTS" ) == 3 );
+                REQUIRE( js.consumers( "EVENTS" ) == QStringList{ "EVENTS_READER" } );
+            }
+        }
+    }
+}

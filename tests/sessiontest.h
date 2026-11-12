@@ -177,8 +177,9 @@ public:
     JetStream( const JetStream& ) = delete;
     JetStream& operator=( const JetStream& ) = delete;
 
-    /// Add the stream @p name, in memory, on @p subjects.
-    void addStream( const char* name, const std::vector<const char*>& subjects )
+    /// Add the stream @p name, in memory, on @p subjects, with @p retention.
+    void addStream( const char* name, const std::vector<const char*>& subjects,
+                    jsRetentionPolicy retention = js_LimitsPolicy )
     {
         jsStreamConfig config;
         jsStreamConfig_Init( &config );
@@ -186,10 +187,25 @@ public:
         config.Subjects = const_cast<const char**>( subjects.data() );
         config.SubjectsLen = static_cast<int>( subjects.size() );
         config.Storage = js_MemoryStorage;
+        config.Retention = retention;
         jsErrCode error = static_cast<jsErrCode>( 0 );
         jsStreamInfo* info = nullptr;
         Publisher::check( js_AddStream( &info, js_, &config, nullptr, &error ), "js_AddStream" );
         jsStreamInfo_Destroy( info );
+    }
+
+    /// Add the durable pull consumer @p durable to the stream @p name; it
+    /// acknowledges explicitly, and is never read here.
+    void addDurable( const char* name, const char* durable )
+    {
+        jsConsumerConfig config;
+        jsConsumerConfig_Init( &config );
+        config.Durable = durable;
+        config.AckPolicy = js_AckExplicit;
+        jsConsumerInfo* info = nullptr;
+        Publisher::check( js_AddConsumer( &info, js_, name, &config, nullptr, nullptr ),
+                          "js_AddConsumer" );
+        jsConsumerInfo_Destroy( info );
     }
 
     /// Publish @p payload on @p subject into its stream; the sequence the

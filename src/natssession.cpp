@@ -883,6 +883,31 @@ struct NatsSession::Worker {
         const auto filter
             = replay.filterSubject.isEmpty() ? QByteArray( ">" ) : replay.filterSubject.toUtf8();
 
+        jsStreamInfo* streamInfo = nullptr;
+        status = js_GetStreamInfo( &streamInfo, js, stream.constData(), nullptr, nullptr );
+        if ( status != NATS_OK ) {
+            return lastError( status );
+        }
+        const auto retention = streamInfo->Config->Retention;
+        const auto first = streamInfo->State.FirstSeq;
+        const auto last = streamInfo->State.LastSeq;
+        jsStreamInfo_Destroy( streamInfo );
+        if ( retention == js_WorkQueuePolicy ) {
+            // A work queue's consumer takes the messages it reads away
+            // from the workers; the server allows none that does not
+            // acknowledge.
+            return QStringLiteral( "it is a work queue (work-queue retention), whose messages "
+                                   "a replay would take away from its workers" );
+        }
+        if ( retention == js_InterestPolicy ) {
+            shared->pushMarker(
+                QStringLiteral( "warning: stream %1 has interest retention: it holds only the "
+                                "messages its consumers have yet to acknowledge, and the replay "
+                                "is one more consumer while it runs" )
+                    .arg( replay.stream ),
+                Event::Status );
+        }
+
         jsSubOptions options;
         jsSubOptions_Init( &options );
         options.Stream = stream.constData();
@@ -897,15 +922,6 @@ struct NatsSession::Worker {
             break;
         case ReplayStart::Last:
             if ( replay.filterSubject.isEmpty() ) {
-                jsStreamInfo* info = nullptr;
-                jsErrCode error = static_cast<jsErrCode>( 0 );
-                status = js_GetStreamInfo( &info, js, stream.constData(), nullptr, &error );
-                if ( status != NATS_OK ) {
-                    return lastError( status );
-                }
-                const auto last = info->State.LastSeq;
-                const auto first = info->State.FirstSeq;
-                jsStreamInfo_Destroy( info );
                 if ( last >= replay.lastMessages && last - replay.lastMessages + 1 > first ) {
                     options.Config.OptStartSeq = last - replay.lastMessages + 1;
                 }
