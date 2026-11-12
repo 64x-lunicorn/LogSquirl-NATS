@@ -23,7 +23,16 @@
  *
  * Opened from Plugins ▸ NATS Monitor…  It provides:
  *
- *   - the server URL (default nats://localhost:4222; several comma-separated)
+ *   - the connection profile: choosing one fills in its settings, Save
+ *     saves the settings under the name entered, Delete removes it
+ *   - the server URL (default nats://localhost:4222; several comma-separated,
+ *     the seeds of a cluster)
+ *   - how to log in: no credentials, user and password, token, a .creds
+ *     file or an NKey seed file
+ *   - TLS: the CA file, a client certificate and its key, the server name
+ *     the certificate must be for, and skipping the verification (off, and
+ *     marked as insecure); they apply, and can be entered, when the
+ *     connection uses TLS: Use TLS checked, or a tls:// URL
  *   - the subject, with the wildcards * and >
  *   - how many bytes of a binary payload are written (default 256)
  *   - the subscription's pending limits, messages and MiB (default
@@ -44,8 +53,15 @@
  * ────────
  * The size limit is remembered between sessions: Start saves it to
  * nats.ini in the plugin's configuration directory (get_config_dir), and
- * the dialog proposes it when it is created.  The other fields are not
- * saved (saved connections are #6's).
+ * the dialog proposes it when it is created.  The connection settings are
+ * saved by name, as profiles (profiles.h), in the same file.  A password
+ * or token is never saved: the dialog asks for it at Start.
+ *
+ * ERRORS
+ * ──────
+ * A capture that cannot connect says why in the status line, in words the
+ * user can act on: the server refused the password, the server's
+ * certificate is not trusted, a file cannot be read, …  (natsoptions.h).
  *
  * OWNERSHIP
  * ─────────
@@ -55,8 +71,15 @@
 
 #pragma once
 
-#include <QDialog>
+#include "natssession.h"
 
+#include <QDialog>
+#include <QList>
+
+#include <utility>
+
+class QCheckBox;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -65,6 +88,7 @@ class QSpinBox;
 namespace nats_monitor {
 
 class NatsSession;
+struct ConnectionProfile;
 
 class ConnectionDialog : public QDialog {
     Q_OBJECT
@@ -95,7 +119,46 @@ private:
 
     void updateButtons();
 
+    /// The connection settings entered, as a profile named as entered.
+    ConnectionProfile currentProfile() const;
+
+    /// Fill in the settings of the saved profile chosen in the list.
+    void loadProfile( int index );
+
+    /// Save the settings entered as the profile named in the list.
+    void saveProfile();
+
+    /// Remove the profile named in the list.
+    void deleteProfile();
+
+    /// Fill the list with the saved profiles' names, @p current chosen.
+    void fillProfileList( const QString& current );
+
+    /// What is missing for the settings entered to start a capture; empty
+    /// if nothing.
+    QString missingSetting() const;
+
+    /// Choose a file for @p edit, titled @p title.
+    void browse( QLineEdit* edit, const QString& title );
+
+    QComboBox* profileCombo_;
+    QPushButton* saveProfileButton_;
+    QPushButton* deleteProfileButton_;
     QLineEdit* urlEdit_;
+    QComboBox* authCombo_;
+    QLineEdit* userEdit_;
+    QLineEdit* secretEdit_;
+    QLineEdit* authFileEdit_;
+    QPushButton* authFileButton_;
+    QCheckBox* tlsCheck_;
+    QLineEdit* caFileEdit_;
+    QLineEdit* certFileEdit_;
+    QLineEdit* keyFileEdit_;
+    QLineEdit* serverNameEdit_;
+    QCheckBox* skipVerifyCheck_;
+    QList<QWidget*> tlsWidgets_; ///< Enabled when the connection uses TLS.
+    /// The TLS settings entered in a line edit, by their field.
+    QList<std::pair<QLineEdit*, QString TlsConfig::*>> tlsTexts_;
     QLineEdit* subjectEdit_;
     QSpinBox* maxBinarySpin_;
     QSpinBox* pendingMessagesSpin_;
@@ -105,6 +168,7 @@ private:
     QPushButton* stopButton_;
     QLabel* statusLabel_;
     NatsSession* session_ = nullptr;
+    bool fillingProfiles_ = false; ///< The list is being filled: nothing is loaded.
 };
 
 } // namespace nats_monitor

@@ -35,18 +35,25 @@
 #include "natsserver.h"
 #include "sessiontest.h"
 
+#include "testconfig.h"
+
 #include <QApplication>
+#include <QCheckBox>
+#include <QComboBox>
 #include <QDialog>
 #include <QDir>
+#include <QDirIterator>
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTemporaryDir>
 
 using nats_test::FakeHost;
 using nats_test::NatsServer;
+using nats_test::NatsServerOptions;
 using nats_test::Publisher;
 using nats_test::readLines;
 using nats_test::waitFor;
@@ -89,6 +96,76 @@ QPushButton* button( QDialog* dialog, const char* name )
     REQUIRE( pushButton );
     return pushButton;
 }
+
+QComboBox* comboBox( QDialog* dialog, const char* name )
+{
+    auto* combo = dialog ? dialog->findChild<QComboBox*>( name ) : nullptr;
+    REQUIRE( combo );
+    return combo;
+}
+
+QCheckBox* checkBox( QDialog* dialog, const char* name )
+{
+    auto* check = dialog ? dialog->findChild<QCheckBox*>( name ) : nullptr;
+    REQUIRE( check );
+    return check;
+}
+
+QString statusText( QDialog* dialog )
+{
+    auto* label = dialog ? dialog->findChild<QLabel*>( "status" ) : nullptr;
+    REQUIRE( label );
+    return label->text();
+}
+
+/// Choose the authentication method whose entry reads @p text.
+void chooseAuth( QDialog* dialog, const QString& text )
+{
+    auto* combo = comboBox( dialog, "authMethod" );
+    const int index = combo->findText( text );
+    REQUIRE( index >= 0 );
+    combo->setCurrentIndex( index );
+}
+
+/// Choose the saved profile @p name.
+void chooseProfile( QDialog* dialog, const QString& name )
+{
+    auto* combo = comboBox( dialog, "profile" );
+    const int index = combo->findText( name );
+    REQUIRE( index >= 0 );
+    combo->setCurrentIndex( index );
+}
+
+/// Whether some file under @p dir contains @p text.
+bool anyFileContains( const QString& dir, const QByteArray& text )
+{
+    QDirIterator it( dir, QDir::Files, QDirIterator::Subdirectories );
+    while ( it.hasNext() ) {
+        QFile file( it.next() );
+        if ( file.open( QIODevice::ReadOnly ) && file.readAll().contains( text ) ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// A nats-server started with the configuration @p text.
+struct ConfiguredServer {
+    explicit ConfiguredServer( const QString& text )
+    {
+        REQUIRE( dir.isValid() );
+        NatsServerOptions options;
+        options.configFile = dir.filePath( "server.conf" );
+        QFile file( options.configFile );
+        REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::Text ) );
+        file.write( text.toUtf8() );
+        file.close();
+        server = std::make_unique<NatsServer>( options );
+    }
+
+    QTemporaryDir dir;
+    std::unique_ptr<NatsServer> server;
+};
 
 /// Open the dialog from the menu, enter @p url and @p subject and click Start.
 void startFromDialog( FakeHost& host, const QString& url, const QString& subject )
@@ -527,6 +604,489 @@ SCENARIO( "unloading the plugin or quitting LogSquirl while capturing stops clea
                 REQUIRE( QDir( host.tempRoot() ).isEmpty() );
             }
         }
+    }
+}
+
+SCENARIO( "a wrong credential or certificate is explained in the dialog", "[plugin][server][auth]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "an initialised plugin and a server that requires a user and password" )
+    {
+        ConfiguredServer server( "authorization { user: alice, password: s3cret }\n" );
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+        auto* dialog = openDialog();
+        chooseAuth( dialog, "User and password" );
+        field( dialog, "user" )->setText( "alice" );
+
+        WHEN( "the user starts a capture with a wrong password" )
+        {
+            field( dialog, "secret" )->setText( "wrong" );
+            startFromDialog( host, server.server->url(), "x" );
+
+            THEN( "the dialog says the server refused the user name or password" )
+            {
+                REQUIRE( waitFor(
+                    [ & ] {
+                        return statusText( dialog ).contains(
+                            "the server refused the user name or password" );
+                    },
+                    10000 ) );
+                REQUIRE( button( dialog, "start" )->isEnabled() );
+            }
+        }
+
+        WHEN( "the user starts a capture with the right password" )
+        {
+            field( dialog, "secret" )->setText( "s3cret" );
+            startFromDialog( host, server.server->url(), "x" );
+
+            THEN( "the capture runs" )
+            {
+                REQUIRE( host.openedFiles.size() == 1 );
+                REQUIRE( waitSubscribed( host.openedFiles.first() ) );
+            }
+        }
+
+        WHEN( "the user starts a capture without a password" )
+        {
+            startFromDialog( host, server.server->url(), "x" );
+
+            THEN( "nothing is started, and the dialog asks for the password" )
+            {
+                REQUIRE( host.openedFiles.isEmpty() );
+                REQUIRE( statusText( dialog ).contains( "Enter the password" ) );
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+
+    GIVEN( "an initialised plugin and a server that requires TLS" )
+    {
+        const QString certs = QStringLiteral( LOGSQUIRL_NATS_TEST_CERTS );
+        ConfiguredServer server( QStringLiteral( "tls {\n"
+                                                 "  cert_file: \"%1/server-cert.pem\"\n"
+                                                 "  key_file: \"%1/server-key.pem\"\n"
+                                                 "}\n" )
+                                     .arg( certs ) );
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+        auto* dialog = openDialog();
+
+        THEN( "skipping the verification is off and marked as insecure" )
+        {
+            REQUIRE_FALSE( checkBox( dialog, "skipVerify" )->isChecked() );
+            REQUIRE( checkBox( dialog, "skipVerify" )->text().contains( "insecure" ) );
+        }
+
+        WHEN( "the user starts a capture over TLS trusting another CA" )
+        {
+            checkBox( dialog, "tls" )->setChecked( true );
+            field( dialog, "caFile" )->setText( certs + "/other-ca-cert.pem" );
+            startFromDialog( host, server.server->url(), "x" );
+
+            THEN( "the dialog says the server's certificate is not trusted" )
+            {
+                REQUIRE( waitFor(
+                    [ & ] {
+                        return statusText( dialog ).contains(
+                            "the server's certificate is not trusted" );
+                    },
+                    10000 ) );
+            }
+        }
+
+        WHEN( "the user starts a capture over TLS trusting the test CA" )
+        {
+            checkBox( dialog, "tls" )->setChecked( true );
+            field( dialog, "caFile" )->setText( certs + "/ca-cert.pem" );
+            startFromDialog( host, server.server->url(), "x" );
+
+            THEN( "the capture runs" )
+            {
+                REQUIRE( host.openedFiles.size() == 1 );
+                REQUIRE( waitSubscribed( host.openedFiles.first() ) );
+            }
+        }
+
+        WHEN( "the user starts a capture with a tls:// URL, Use TLS unchecked, trusting the test "
+              "CA" )
+        {
+            const auto url = server.server->url().replace( "nats://", "tls://" );
+            field( dialog, "url" )->setText( url );
+            REQUIRE_FALSE( checkBox( dialog, "tls" )->isChecked() );
+
+            THEN( "the TLS settings can be entered, and they are used: the capture runs" )
+            {
+                REQUIRE( field( dialog, "caFile" )->isEnabled() );
+                field( dialog, "caFile" )->setText( certs + "/ca-cert.pem" );
+                startFromDialog( host, url, "x" );
+                REQUIRE( host.openedFiles.size() == 1 );
+                REQUIRE( waitSubscribed( host.openedFiles.first() ) );
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+}
+
+namespace {
+
+/// Start a capture from @p dialog on @p url and wait until its status line
+/// says @p text.
+void requireStatusAfterStart( FakeHost& host, QDialog* dialog, const QString& url,
+                              const QString& text )
+{
+    startFromDialog( host, url, "x" );
+    REQUIRE( waitFor( [ & ] { return statusText( dialog ).contains( text ); }, 10000 ) );
+    INFO( "status: " << statusText( dialog ).toStdString() );
+    REQUIRE( statusText( dialog ).contains( text ) );
+    REQUIRE( button( dialog, "start" )->isEnabled() );
+}
+
+/// The content of the fixture file @p path, trimmed.
+QString fixtureText( const QString& path )
+{
+    QFile file( path );
+    REQUIRE( file.open( QIODevice::ReadOnly | QIODevice::Text ) );
+    return QString::fromUtf8( file.readAll() ).trimmed();
+}
+
+} // namespace
+
+SCENARIO( "a wrong token, NKey, .creds or client certificate is explained in the dialog",
+          "[plugin][server][auth]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+    const QString auth = QStringLiteral( LOGSQUIRL_NATS_TEST_AUTH );
+    const QString certs = QStringLiteral( LOGSQUIRL_NATS_TEST_CERTS );
+
+    GIVEN( "an initialised plugin and a server that requires a token" )
+    {
+        ConfiguredServer server( "authorization { token: t0ken }\n" );
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+        auto* dialog = openDialog();
+        chooseAuth( dialog, "Token" );
+
+        WHEN( "the user starts a capture with a wrong token" )
+        {
+            field( dialog, "secret" )->setText( "wrong" );
+
+            THEN( "the dialog says the server refused the token" )
+            {
+                requireStatusAfterStart( host, dialog, server.server->url(),
+                                         "the server refused the token" );
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+
+    GIVEN( "an initialised plugin and a server that knows the fixture NKey user" )
+    {
+        ConfiguredServer server( QStringLiteral( "authorization { users: [ { nkey: %1 } ] }\n" )
+                                     .arg( fixtureText( auth + "/nkey.pub" ) ) );
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+        auto* dialog = openDialog();
+        chooseAuth( dialog, "NKey seed file" );
+
+        WHEN( "the user starts a capture with the seed of another NKey" )
+        {
+            field( dialog, "authFile" )->setText( auth + "/other.seed" );
+
+            THEN( "the dialog says the server refused the NKey in that file" )
+            {
+                requireStatusAfterStart( host, dialog, server.server->url(),
+                                         "the server refused the NKey in " + auth + "/other.seed" );
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+
+    GIVEN( "an initialised plugin and a server in operator mode with the fixture account" )
+    {
+        ConfiguredServer server( fixtureText( auth + "/operator.conf" ) );
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+        auto* dialog = openDialog();
+        chooseAuth( dialog, "Credentials file (.creds)" );
+
+        WHEN( "the user starts a capture with the .creds file of an unknown account" )
+        {
+            field( dialog, "authFile" )->setText( auth + "/other.creds" );
+
+            THEN( "the dialog says the server refused the credentials in that file" )
+            {
+                requireStatusAfterStart( host, dialog, server.server->url(),
+                                         "the server refused the credentials in " + auth
+                                             + "/other.creds" );
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+
+    GIVEN( "an initialised plugin and a server that requires a client certificate of the test "
+           "CA" )
+    {
+        ConfiguredServer server( QStringLiteral( "tls {\n"
+                                                 "  cert_file: \"%1/server-cert.pem\"\n"
+                                                 "  key_file: \"%1/server-key.pem\"\n"
+                                                 "  ca_file: \"%1/ca-cert.pem\"\n"
+                                                 "  verify: true\n"
+                                                 "  timeout: 5\n"
+                                                 "}\n" )
+                                     .arg( certs ) );
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+        auto* dialog = openDialog();
+        checkBox( dialog, "tls" )->setChecked( true );
+        field( dialog, "caFile" )->setText( certs + "/ca-cert.pem" );
+
+        WHEN( "the user starts a capture without a client certificate" )
+        {
+            THEN( "the dialog says the server requires (or may require) one" )
+            {
+                // "may": with TLS 1.3 the server closes without saying why.
+                requireStatusAfterStart( host, dialog, server.server->url(),
+                                         "a client certificate, and none is set" );
+            }
+        }
+
+        WHEN( "the user starts a capture with a client certificate of another CA" )
+        {
+            field( dialog, "certFile" )->setText( certs + "/other-client-cert.pem" );
+            field( dialog, "keyFile" )->setText( certs + "/other-client-key.pem" );
+
+            THEN( "the dialog says the server does not (or may not) accept it" )
+            {
+                requireStatusAfterStart( host, dialog, server.server->url(),
+                                         "accept the client certificate " + certs
+                                             + "/other-client-cert.pem" );
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+}
+
+SCENARIO( "a password in the URL is never written to the log, the status or the file",
+          "[plugin][server][auth]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "an initialised plugin and a server that requires a user and password" )
+    {
+        ConfiguredServer server( "authorization { user: alice, password: s3cret }\n" );
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+        auto* dialog = openDialog();
+
+        WHEN( "the user starts a capture on a URL with a wrong password in it, skipping the "
+              "verification of the certificate" )
+        {
+            checkBox( dialog, "tls" )->setChecked( true );
+            checkBox( dialog, "skipVerify" )->setChecked( true );
+            const auto url = server.server->url().replace( "nats://", "nats://alice:wr0ng-pw@" );
+            startFromDialog( host, url, "x" );
+
+            THEN( "the connection fails, and neither the status, the log, the notifications nor "
+                  "the file show the password" )
+            {
+                REQUIRE( host.openedFiles.size() == 1 );
+                const auto path = host.openedFiles.first();
+                REQUIRE(
+                    waitFor( [ & ] { return readLines( path ).join( '\n' ).contains( "failed" ); },
+                             10000 ) );
+                REQUIRE( waitFor( [ & ] { return button( dialog, "start" )->isEnabled(); } ) );
+                const auto everything
+                    = QStringList{ statusText( dialog ), host.logs.join( '\n' ),
+                                   host.notifications.join( '\n' ), readLines( path ).join( '\n' ) }
+                          .join( '\n' );
+                INFO( everything.toStdString() );
+                REQUIRE( everything.contains( "is not verified" ) );
+                REQUIRE( everything.contains( "connection to nats://alice:***@" ) );
+                REQUIRE_FALSE( everything.contains( "wr0ng-pw" ) );
+            }
+        }
+
+        WHEN( "the user starts a capture on a URL with the right password in it" )
+        {
+            const auto url = server.server->url().replace( "nats://", "nats://alice:s3cret@" );
+            startFromDialog( host, url, "x" );
+
+            THEN( "the capture runs, and its connected marker does not show the password" )
+            {
+                REQUIRE( host.openedFiles.size() == 1 );
+                const auto path = host.openedFiles.first();
+                REQUIRE( waitSubscribed( path ) );
+                const auto everything
+                    = QStringList{ statusText( dialog ), host.logs.join( '\n' ),
+                                   host.notifications.join( '\n' ), readLines( path ).join( '\n' ) }
+                          .join( '\n' );
+                INFO( everything.toStdString() );
+                REQUIRE( everything.contains( "connected to nats://alice:***@" ) );
+                REQUIRE_FALSE( everything.contains( "s3cret" ) );
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+}
+
+SCENARIO( "connections are saved as profiles, without passwords or tokens", "[plugin]" )
+{
+    GIVEN( "the dialog filled in with a user, password and TLS, saved as the profile prod" )
+    {
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+        auto* dialog = openDialog();
+        field( dialog, "url" )->setText( "nats://a:4222, nats://b:4222" );
+        chooseAuth( dialog, "User and password" );
+        field( dialog, "user" )->setText( "alice" );
+        field( dialog, "secret" )->setText( "s3cret-password" );
+        checkBox( dialog, "tls" )->setChecked( true );
+        field( dialog, "caFile" )->setText( "/etc/nats/ca.pem" );
+        field( dialog, "certFile" )->setText( "/etc/nats/client.pem" );
+        field( dialog, "keyFile" )->setText( "/etc/nats/client-key.pem" );
+        field( dialog, "serverName" )->setText( "nats.example.com" );
+        comboBox( dialog, "profile" )->setEditText( "prod" );
+        button( dialog, "saveProfile" )->click();
+
+        THEN( "the dialog says it is saved, without the password" )
+        {
+            REQUIRE( statusText( dialog ).contains( "prod" ) );
+            REQUIRE( statusText( dialog ).contains( "saved" ) );
+        }
+
+        THEN( "no file of the plugin's configuration holds the password" )
+        {
+            REQUIRE_FALSE( anyFileContains( host.configDir(), "s3cret-password" ) );
+            REQUIRE( anyFileContains( host.configDir(), "nats.example.com" ) );
+        }
+
+        AND_GIVEN( "a second profile, dev, with a token" )
+        {
+            field( dialog, "url" )->setText( "nats://localhost:4222" );
+            chooseAuth( dialog, "Token" );
+            field( dialog, "secret" )->setText( "s3cret-token" );
+            checkBox( dialog, "tls" )->setChecked( false );
+            comboBox( dialog, "profile" )->setEditText( "dev" );
+            button( dialog, "saveProfile" )->click();
+
+            THEN( "the token is not saved either" )
+            {
+                REQUIRE_FALSE( anyFileContains( host.configDir(), "s3cret-token" ) );
+            }
+
+            AND_WHEN( "the plugin is initialised again and prod chosen in its dialog" )
+            {
+                logsquirl_plugin_shutdown();
+                host.menuActions.clear();
+                REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+                host.menuActions.first().trigger();
+                dialog = openDialog();
+                chooseProfile( dialog, "prod" );
+
+                THEN( "its settings are back, the password empty and asked for" )
+                {
+                    REQUIRE( comboBox( dialog, "profile" )->count() == 2 );
+                    REQUIRE( field( dialog, "url" )->text() == "nats://a:4222, nats://b:4222" );
+                    REQUIRE( comboBox( dialog, "authMethod" )->currentText()
+                             == "User and password" );
+                    REQUIRE( field( dialog, "user" )->text() == "alice" );
+                    REQUIRE( field( dialog, "secret" )->text().isEmpty() );
+                    REQUIRE( checkBox( dialog, "tls" )->isChecked() );
+                    REQUIRE( field( dialog, "caFile" )->text() == "/etc/nats/ca.pem" );
+                    REQUIRE( field( dialog, "certFile" )->text() == "/etc/nats/client.pem" );
+                    REQUIRE( field( dialog, "keyFile" )->text() == "/etc/nats/client-key.pem" );
+                    REQUIRE( field( dialog, "serverName" )->text() == "nats.example.com" );
+                    REQUIRE_FALSE( checkBox( dialog, "skipVerify" )->isChecked() );
+                    REQUIRE( statusText( dialog ).contains( "Enter the password" ) );
+                }
+
+                AND_WHEN( "dev is chosen" )
+                {
+                    chooseProfile( dialog, "dev" );
+
+                    THEN( "its settings are back, the token asked for" )
+                    {
+                        REQUIRE( field( dialog, "url" )->text() == "nats://localhost:4222" );
+                        REQUIRE( comboBox( dialog, "authMethod" )->currentText() == "Token" );
+                        REQUIRE( field( dialog, "secret" )->text().isEmpty() );
+                        REQUIRE_FALSE( checkBox( dialog, "tls" )->isChecked() );
+                        REQUIRE( statusText( dialog ).contains( "Enter the token" ) );
+                    }
+                }
+
+                AND_WHEN( "prod is deleted" )
+                {
+                    button( dialog, "deleteProfile" )->click();
+
+                    THEN( "only dev is left, also after the plugin is initialised again" )
+                    {
+                        REQUIRE( comboBox( dialog, "profile" )->findText( "prod" ) < 0 );
+                        logsquirl_plugin_shutdown();
+                        host.menuActions.clear();
+                        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+                        host.menuActions.first().trigger();
+                        auto* again = openDialog();
+                        REQUIRE( comboBox( again, "profile" )->count() == 1 );
+                        REQUIRE( comboBox( again, "profile" )->itemText( 0 ) == "dev" );
+                    }
+                }
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
+
+    GIVEN( "the dialog without a profile name" )
+    {
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+        auto* dialog = openDialog();
+
+        WHEN( "Save is clicked" )
+        {
+            button( dialog, "saveProfile" )->click();
+
+            THEN( "nothing is saved, and the dialog asks for a name" )
+            {
+                REQUIRE( comboBox( dialog, "profile" )->count() == 0 );
+                REQUIRE( statusText( dialog ).contains( "name" ) );
+            }
+        }
+
+        WHEN( "a URL with a password in it is saved as a profile" )
+        {
+            field( dialog, "url" )->setText( "nats://a:4222, nats://bob:s3cret-url@b:4222" );
+            comboBox( dialog, "profile" )->setEditText( "url" );
+            button( dialog, "saveProfile" )->click();
+
+            THEN( "nothing is saved, and the dialog says to use the authentication fields" )
+            {
+                REQUIRE( comboBox( dialog, "profile" )->count() == 0 );
+                REQUIRE_FALSE( anyFileContains( host.configDir(), "s3cret-url" ) );
+                REQUIRE( statusText( dialog ).contains( "Authentication" ) );
+            }
+        }
+
+        logsquirl_plugin_shutdown();
     }
 }
 

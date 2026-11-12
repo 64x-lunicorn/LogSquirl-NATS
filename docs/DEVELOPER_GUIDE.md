@@ -174,9 +174,9 @@ of the server tests) use limits of a few hundred bytes, and make a rotation
 fail by putting a directory where the next file goes, which works on every
 platform and also for root.
 
-The size limit is the one setting the dialog saves: on Start, to
+The dialog saves the size limit on Start, to
 `nats.ini` (`capture/maxFileMiB`) in the directory the host's
-`get_config_dir` gives; the dialog reads it when it is created. The tests'
+`get_config_dir` gives (next to the connection profiles); the dialog reads it when it is created. The tests'
 `FakeHost` gives each host a configuration directory of its own.
 
 ### The Log Format
@@ -193,10 +193,86 @@ LogSquirl does not match or extract fields from a line longer than
 a message with a large payload, gets no columns in the Table View. The
 regex covers such lines; the test checks that with a 4 MiB payload.
 
-### TLS test certificates
+### Authentication, TLS and connection profiles
 
-`tests/certs/` holds a test CA and a server certificate for `localhost` /
-`127.0.0.1`, valid for 100 years, made by `tests/certs/generate.sh`. They
-are committed, not generated per run, so the TLS test needs no `openssl`
-program (the Windows runners have none) and behaves the same everywhere.
-The keys protect nothing; the CA's key was thrown away.
+`SessionConfig::auth` says how a session logs in (`AuthMethod`: none, user
+and password, token, a `.creds` file, an NKey seed file) and
+`SessionConfig::tls` how it uses TLS (CA file, client certificate and key,
+server name, skipping the verification). `SessionConfig::url` takes
+several comma-separated URLs, the seeds of a cluster; each is trimmed and
+given to nats.c as its server list. [`src/natsoptions.cpp`](../src/natsoptions.cpp)
+turns them into nats.c options, checking each file named first, and
+explains a failed connect in words the user can act on ("the server
+refused the user name or password", "the server's certificate is not
+trusted: set the CA file …"), followed by nats.c's own text. The session
+writes that into its `connection to … failed:` marker and reports it, so
+the dialog shows it in its status line.
+
+- What each method is (its name in a profile, its label in the dialog,
+  whether it takes a user, a secret or a file, what the server refusing it
+  means) is one table, `kAuthMethods` in
+  [`src/authmethods.h`](../src/authmethods.h); `configureAuth()` in
+  natsoptions.cpp sets each on nats.c's options.
+- For an NKey seed file nats.c wants the public key too; the session
+  derives it from the seed (ed25519 through the linked OpenSSL), in
+  [`src/nkey.cpp`](../src/nkey.cpp).
+- The TLS settings apply whenever the connection uses TLS: *Use TLS*
+  checked, or a `tls://` URL (`usesTls()`); the dialog's TLS fields are
+  enabled then, and only then.
+- With TLS 1.3 a server that refuses the client certificate closes the
+  connection after the handshake without saying why, so that message says
+  the server *may* require or refuse a client certificate.
+- With TLS off, nats.c still uses TLS when the server requires it, but
+  without the dialog's CA; the message then says to switch TLS on.
+- Where nats.c's status codes tell the cases apart (refused credentials,
+  TLS required or not offered, the connection closed), the explanation
+  uses them. The TLS failures are all `NATS_SSL_ERROR`, so those are told
+  apart by OpenSSL's text, matched against the pattern lists at the end
+  of natsoptions.cpp's anonymous namespace. That text depends on the
+  OpenSSL version: after updating OpenSSL, run the `[auth]` tests, which
+  fail when a pattern no longer matches.
+- A URL may hold credentials (`nats://bob:s3cret@host`). Wherever a URL is
+  shown or written (the status line, the host log and notifications, the
+  capture file's markers, including nats.c's connected URL) it goes
+  through `redactUrls()`, which replaces the password, or a user
+  information without one (a token), by `***`.
+- The worker clears its copy of the password or token once nats.c's
+  options hold it; `NatsSession` keeps its own, which `start()` needs
+  again.
+
+The dialog saves the connection settings as named **profiles**
+([`src/profiles.h`](../src/profiles.h)) in `nats.ini`, array `profiles`:
+URLs, method, user name, file paths and the TLS settings. Never a password
+or token: those are entered at Start; a URL with credentials in it is not
+saved.
+
+The tests (`[auth]`, part of the server tests) are at the main seam,
+`auth_test.cpp`: a server started with a fixture configuration, a session
+with the right and with a wrong credential or certificate, and the
+message it gives; `plugin_test.cpp` checks the same messages in the
+dialog, and the profiles.
+
+### Test fixtures: certificates and NATS credentials
+
+They are committed, not generated per run, so the tests need no `openssl`
+program (the Windows runners have none) and no `nsc`, and behave the same
+everywhere. None of the keys protects anything; never use them outside the
+tests.
+
+- `tests/certs/`, made by `tests/certs/generate.sh` (openssl 1.1.1 or
+  later), valid for 100 years: a test CA, a server certificate for
+  `localhost` / `127.0.0.1` and a client certificate signed by it, and a
+  client certificate of another CA, which the servers of the tests do not
+  trust. The CAs' keys were thrown away.
+- `tests/auth/`, made by `tests/auth/generate.py` (Python 3.8+ and openssl
+  on the PATH, no nsc): `operator.conf`, a nats-server configuration in
+  operator mode with the operator's JWT and the account JWTs preloaded in
+  a memory resolver; `user.creds`, a user of that account; `other.creds`,
+  a user of an account the server does not know; `nkey.seed` and
+  `nkey.pub`, an NKey user; `other.seed`, an NKey the server does not
+  know. The script signs the JWTs itself with ed25519 keys made by openssl;
+  the JWTs never expire. nats-server checks every signature when the tests
+  run, so a mistake in the script fails them.
+
+To regenerate, run the script and commit what changed; the tests read the
+files as they are, so nothing else changes.

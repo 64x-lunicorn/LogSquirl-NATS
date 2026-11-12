@@ -54,6 +54,7 @@
 
 #include "natssession.h"
 
+#include "natsoptions.h"
 #include "tempdirs.h"
 
 #include <QFile>
@@ -113,13 +114,15 @@ QString lastError( natsStatus status )
     return describe( status, nats_GetLastError( nullptr ) );
 }
 
+/// The URL @p connection is connected to, without its password
+/// (nats.c's has the URL's user information).
 QString connectedUrl( natsConnection* connection )
 {
     char buffer[ 512 ] = {};
     if ( natsConnection_GetConnectedUrl( connection, buffer, sizeof buffer ) != NATS_OK ) {
         return {};
     }
-    return QString::fromUtf8( buffer );
+    return redactUrls( QString::fromUtf8( buffer ) );
 }
 
 /// Make a subject usable as part of a file name on every platform.
@@ -502,7 +505,8 @@ struct Shared {
 
 struct NatsSession::Worker {
     NatsSession* const session; ///< Only posted to; it joins the thread before it goes.
-    const SessionConfig config;
+    /// Its secret is cleared once the connection options hold it.
+    SessionConfig config;
     const int generation;
     Shared* shared = new Shared; ///< Leaked if nats.c does not let go of it.
     /// Whether shared may be freed: nats.c confirmed its last callback (or
@@ -659,12 +663,9 @@ struct NatsSession::Worker {
     }
 
     /// Create the options with the callbacks.
-    natsStatus createOptions( natsOptions** options, const QByteArray& url )
+    natsStatus createOptions( natsOptions** options )
     {
         natsStatus status = natsOptions_Create( options );
-        if ( status == NATS_OK ) {
-            status = natsOptions_SetURL( *options, url.constData() );
-        }
         if ( status == NATS_OK ) {
             // A monitor keeps trying for as long as it runs.
             status = natsOptions_SetMaxReconnect( *options, -1 );
@@ -687,16 +688,25 @@ struct NatsSession::Worker {
     /// Connect and subscribe; false, after an error marker, if that failed.
     bool open( natsOptions** options, natsConnection** connection, natsSubscription** subscription )
     {
-        const auto url = config.url.toUtf8();
-        natsStatus status = createOptions( options, url );
-        if ( status == NATS_OK ) {
-            status = natsConnection_Connect( connection, *options );
-        }
-        if ( status != NATS_OK ) {
+        const auto fail = [ this ]( const QString& why ) {
             shared->pushMarker( QStringLiteral( "connection to %1 failed: %2" )
-                                    .arg( config.url, lastError( status ) ),
+                                    .arg( redactUrls( config.url ), why ),
                                 Event::Error );
             return false;
+        };
+        natsStatus status = createOptions( options );
+        if ( status != NATS_OK ) {
+            return fail( lastError( status ) );
+        }
+        const auto problem = configureConnection( *options, config );
+        // nats.c has its own copy, for reconnecting: no other is kept here.
+        config.auth.secret.clear();
+        if ( !problem.isEmpty() ) {
+            return fail( problem );
+        }
+        status = natsConnection_Connect( connection, *options );
+        if ( status != NATS_OK ) {
+            return fail( explainConnectFailure( config, status, lastError( status ) ) );
         }
 
         const auto subject = config.subject.toUtf8();

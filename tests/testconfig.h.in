@@ -10,6 +10,9 @@
 /// The TLS test certificates (tests/certs).
 #define LOGSQUIRL_NATS_TEST_CERTS "@TESTCONFIG_CERTS@"
 
+/// The NATS credentials of the tests (tests/auth): JWTs, .creds, NKey seeds.
+#define LOGSQUIRL_NATS_TEST_AUTH "@TESTCONFIG_AUTH@"
+
 /// The repository root, for the files the tests read from it: the Log
 /// Format (formats/nats_log.json), plugin.json and .github/plugin-ci.json.
 #define LOGSQUIRL_NATS_TEST_SOURCE_DIR "@TESTCONFIG_SOURCE_DIR@"
