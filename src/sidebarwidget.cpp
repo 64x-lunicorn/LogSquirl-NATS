@@ -61,7 +61,7 @@ QStringList summaryOf( const ConnectionProfile& profile )
         what = QStringLiteral( "Replays %1" ).arg( describeReplay( profile.replay ) );
     }
     else if ( const auto subjects = profile.subscriptions(); !subjects.isEmpty() ) {
-        what = describeSubscriptions( subjects );
+        what = QStringLiteral( "Subjects  %1" ).arg( describeSubscriptions( subjects ) );
     }
     else {
         what = QStringLiteral( "no subject" );
@@ -126,6 +126,8 @@ SidebarWidget::SidebarWidget( Sessions* sessions, QWidget* parent )
     auto* content = new QWidget;
     auto* contentLayout = new QVBoxLayout( content );
     contentLayout->setContentsMargins( 0, 0, 0, 0 );
+    contentLayout->setSpacing( 8 );
+    tiles_->setSpacing( 8 );
     contentLayout->addWidget( empty_ );
     contentLayout->addLayout( tiles_ );
     contentLayout->addStretch();
@@ -228,7 +230,14 @@ void SidebarWidget::confirmDelete( const QString& name )
 void SidebarWidget::updateTile( ConnectionTile* tile )
 {
     const auto status = sessions_->status( tile->name() );
-    tile->setRunning( sessions_->isRunning( tile->name() ) );
+    if ( sessions_->isRunning( tile->name() ) ) {
+        tile->setState( status.state == SessionState::Connecting ? TileState::Connecting
+                                                                 : TileState::Running );
+    }
+    else {
+        tile->setState( status.state == SessionState::Failed ? TileState::Failed
+                                                             : TileState::Stopped );
+    }
     const QLocale locale;
     QStringList details;
     switch ( status.state ) {

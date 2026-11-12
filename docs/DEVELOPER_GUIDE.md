@@ -136,8 +136,10 @@ host's `get_config_dir` gives, and a new connection proposes it. The tests'
 more `Subscription`s, a subject and an optional queue group (empty, the
 default: a session in a queue group takes messages away from the group's
 other members). All of them write into the session's one file,
-`nats_<subjects>.log` (the subjects made safe for a file name, joined by
-`_`, cut to 100 characters), and its first marker names them:
+`nats_<subjects>.log` (the subjects with a token `>` spelled `all` and a
+token `*` spelled `any`, made safe for a file name, joined by `_`, cut to
+100 characters: `orders.>` and `jobs.*` give `nats_orders.all_jobs.any.log`;
+the file's name is the tab's title), and its first marker names them:
 `connected to …, subscribed to orders.>, jobs.* (queue workers)`
 (`describeSubscriptions()`). Pending limits, slow-consumer markers and
 draining on stop are per subscription; `receivedCount()` and
@@ -279,11 +281,19 @@ connection in the order they were saved, rebuilt when the dialog saves or
 deletes one (`ConnectionDialog::profilesChanged`).
 
 - **The tile** ([`src/connectiontile.h`](../src/connectiontile.h)) is a
-  plain `QFrame` that knows nothing of NATS: a title, a summary, details,
-  Start / Stop, Edit and Delete, with a signal for each button. The tab sets
-  its texts. It is meant for Serial and tcpdump too.
+  plain `QFrame` that knows nothing of NATS: a state dot, a title, a
+  summary, details, Start / Stop, Edit and Delete, with a signal for each
+  button. The tab sets its texts and its `TileState` (stopped, connecting,
+  running, failed). It is meant for Serial and tcpdump too.
+- **A card**: a rounded 1 px frame on a background set off the sidebar's,
+  the frame in the accent colour (`QPalette::Highlight`) while the
+  connection connects or runs. The colours are mixed from the palette's
+  window and text colours in `applyStyle()`, again on a palette change, so
+  a light and a dark theme both work. The dot is grey, amber, green or red;
+  the details say the state in words too. The details are smaller and
+  muted, below a thin line, and hidden with it when there are none.
 - **Summary**: the URLs, the authentication method, TLS on or off (as
-  `usesTls()`), the subjects.
+  `usesTls()`), `Subjects  <subjects>` or what the replay reads.
 - **Details**, polled once a second and updated at once on a state change
   (`Sessions::changed`): while running, `running · <n> msgs/s` (the rate
   over the last second), `received · dropped`, the file's name, size and
@@ -293,14 +303,16 @@ deletes one (`ConnectionDialog::profilesChanged`).
 - **Start** reads the profile from `nats.ini` and, when its method takes a
   password or token, asks for it (`QInputDialog`, password echo); it is
   never saved, and an empty answer starts nothing. **Delete** asks
-  (`QMessageBox`) and is disabled while the connection runs; the dialog
-  refuses to delete a running connection too.
+  (`QMessageBox`) and is hidden while the connection connects or runs; the
+  dialog refuses to delete a running connection too.
 - **Edit** while the connection runs: the tile shows the saved settings at
   once, the capture runs on with those it started with (the dialog says
   so) until it is stopped and started again. A connection saved under
   another name is another connection, with a tile of its own.
 
-The tests (`[sidebar]`) drive the tab through `FakeHost`, which records the
+The tile's states are tested on the tile itself (`[tile]`,
+`connectiontile_test.cpp`). The tests (`[sidebar]`) drive the tab through
+`FakeHost`, which records the
 sidebar tabs registered and unregistered: tiles created, updated and
 deleted, Start and Stop, the details of a running tile, two tiles at once,
 and drops on a tile. They answer the password prompt and the delete
