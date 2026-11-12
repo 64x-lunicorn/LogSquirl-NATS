@@ -128,7 +128,7 @@ SessionConfig configFor( const QString& url, const QString& subject )
 {
     SessionConfig config;
     config.url = url;
-    config.subject = subject;
+    config.subscriptions = { { subject, {} } };
     return config;
 }
 

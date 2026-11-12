@@ -24,22 +24,23 @@
  * HOW IT WORKS
  * ────────────
  *   1. start() creates the file and starts the writer thread.
- *   2. The writer thread connects and subscribes; its "connected" marker
- *      is the capture's first line.
+ *   2. The writer thread connects and subscribes to each subject; its
+ *      "connected" marker is the capture's first line.
  *   3. nats.c's callbacks format a line and push it onto the queue under a
  *      mutex, and wake the writer.  The writer swaps the whole queue out,
  *      writes the batch and flushes, so it never holds the mutex while
  *      writing.  A full queue drops the message and counts it; the next
  *      message queued is preceded by the dropped= marker.  Each message
  *      callback (and the slow-consumer error, and the disconnected
- *      callback) also reads nats.c's dropped count and marks what is new.
+ *      callback) also reads nats.c's dropped count of its subscription
+ *      (each, for the disconnected callback) and marks what is new.
  *   4. Before a line that would take the file over the size limit, the
  *      writer opens the next file (NewOnly, so no earlier file is ever
  *      truncated), closes the full one and reports the new path.
  *   5. stop() asks the writer to end.  It lifts the pending limits, so
- *      nats.c drops nothing more, and marks its last dropped count.  It
- *      drains the subscription (or, not connected, waits until nats.c
- *      holds nothing for it), writing all the while, closes the
+ *      nats.c drops nothing more, and marks the last dropped counts.  It
+ *      drains each subscription (or, not connected, waits until nats.c
+ *      holds nothing for them), writing all the while, closes the
  *      connection, waits until nats.c has made its last callback, writes
  *      what is left and a "stopped" marker, and closes the file.
  *
@@ -132,6 +133,21 @@ QString safeFileName( const QString& subject )
     static const QRegularExpression unsafe( QStringLiteral( "[^a-zA-Z0-9._-]" ) );
     name.replace( unsafe, QStringLiteral( "_" ) );
     return name;
+}
+
+/// How long the subjects' part of a file name may be: a file name may have
+/// 255 bytes on every platform, and the path is longer still.
+constexpr int kMaxFileNameSubjects = 100;
+
+/// The subjects of @p subscriptions as the file's name: "orders.__billing._"
+/// for orders.> and billing.*, cut to kMaxFileNameSubjects.
+QString fileNameFor( const QList<Subscription>& subscriptions )
+{
+    QStringList subjects;
+    for ( const auto& subscription : subscriptions ) {
+        subjects << safeFileName( subscription.subject );
+    }
+    return subjects.join( '_' ).left( kMaxFileNameSubjects );
 }
 
 /// File @p number of a capture: <stem>.log, <stem>.2.log, <stem>.3.log, …
@@ -292,12 +308,33 @@ Message toMessage( natsMsg* msg )
     return message;
 }
 
+struct Shared;
+
+/// What drops and messages are counted in, here and in NatsSession.
+using Count = quint64;
+
+/// One subscription of the session, as its callbacks see it.
+struct SubscriptionState {
+    Shared* shared = nullptr; ///< The session's, for the callbacks.
+    /// Set once subscribed; for the disconnected and error callbacks.
+    std::atomic<natsSubscription*> handle{ nullptr };
+    /// nats.c's dropped count of the subscription that the markers cover;
+    /// under Shared::mutex.
+    Count slowConsumerMarked = 0;
+    /// nats.c made the subscription's completion callback; under Shared::mutex.
+    bool done = false;
+    /// nats.c took the completion callback: done is awaited.  Only the
+    /// writer reads and writes it.
+    bool awaitsCompletion = false;
+};
+
 /// What nats.c's callbacks and the writer share.
 struct Shared {
-    /// What drops and messages are counted in, here and in NatsSession.
-    using Count = quint64;
-
     FormatOptions format;
+
+    /// One for each subscription of the config, made before connecting
+    /// and never changed after: the callbacks read it without the mutex.
+    std::vector<std::unique_ptr<SubscriptionState>> subscriptions;
 
     std::mutex mutex;
     std::condition_variable wake;
@@ -306,19 +343,32 @@ struct Shared {
     int queuedMessages = 0;              ///< Message lines in the queue.
     Count queueFullUnmarked = 0;         ///< Dropped from a full queue, not marked yet.
     bool stopRequested = false;
-    bool stopping = false;         ///< The writer closes the connection: no disconnect marker.
-    bool closed = false;           ///< nats.c made the closed callback.
-    bool subscriptionDone = false; ///< nats.c made the subscription's completion callback.
-    /// nats.c's dropped count of the subscription that the markers cover;
-    /// under the mutex.
-    Count slowConsumerMarked = 0;
+    bool stopping = false; ///< The writer closes the connection: no disconnect marker.
+    bool closed = false;   ///< nats.c made the closed callback.
 
     std::atomic<Count> received{ 0 };    ///< Messages nats.c handed over.
     std::atomic<Count> dropped{ 0 };     ///< Drops counted: marked, or to be marked.
-    std::atomic<int> limitMessages{ 0 }; ///< The subscription's pending limits, read back.
+    std::atomic<int> limitMessages{ 0 }; ///< The subscriptions' pending limits, read back.
     std::atomic<int> limitBytes{ 0 };
-    /// The subscription, for the disconnected callback; set once subscribed.
-    std::atomic<natsSubscription*> subscription{ nullptr };
+
+    /// Whether every subscription with a completion callback has completed;
+    /// on the writer, under the mutex.
+    bool subscriptionsDoneLocked() const
+    {
+        return std::all_of( subscriptions.begin(), subscriptions.end(),
+                            []( const auto& s ) { return !s->awaitsCompletion || s->done; } );
+    }
+
+    /// The state of @p handle; null if it is none of the session's.
+    SubscriptionState* find( natsSubscription* handle ) const
+    {
+        for ( const auto& s : subscriptions ) {
+            if ( s->handle.load() == handle ) {
+                return s.get();
+            }
+        }
+        return nullptr;
+    }
 
     /// The counts, each read on its own (see NatsSession::receivedCount()).
     NatsSession::Counts snapshot() const
@@ -388,10 +438,11 @@ struct Shared {
     }
 
     /// Mark the slow-consumer drops of @p subscription not marked yet.
-    void markSlowConsumer( natsSubscription* subscription )
+    void markSlowConsumer( SubscriptionState& subscription )
     {
+        auto* handle = subscription.handle.load();
         int64_t total = 0;
-        if ( natsSubscription_GetDropped( subscription, &total ) != NATS_OK ) {
+        if ( !handle || natsSubscription_GetDropped( handle, &total ) != NATS_OK ) {
             // Closed: nats.c no longer says.  It closes the subscription
             // when the connection closes, before it makes the disconnected
             // and closed callbacks, and discards what is still pending
@@ -404,11 +455,11 @@ struct Shared {
         const auto count = static_cast<Count>( total );
         {
             std::lock_guard<std::mutex> lock( mutex );
-            if ( count <= slowConsumerMarked ) {
+            if ( count <= subscription.slowConsumerMarked ) {
                 return;
             }
-            const auto unmarked = count - slowConsumerMarked;
-            slowConsumerMarked = count;
+            const auto unmarked = count - subscription.slowConsumerMarked;
+            subscription.slowConsumerMarked = count;
             dropped.fetch_add( unmarked );
             pushDroppedLocked( unmarked, "slow consumer" );
         }
@@ -425,10 +476,14 @@ struct Shared {
 
     // ── nats.c callbacks, on nats.c's threads ────────────────────────
 
-    static void onMessage( natsConnection*, natsSubscription* subscription, natsMsg* msg,
-                           void* closure )
+    /// @p closure is the SubscriptionState of the subscription.
+    static void onMessage( natsConnection*, natsSubscription* handle, natsMsg* msg, void* closure )
     {
-        auto* self = static_cast<Shared*>( closure );
+        auto& subscription = *static_cast<SubscriptionState*>( closure );
+        auto* self = subscription.shared;
+        // nats.c may deliver before the writer has stored the handle.
+        natsSubscription* unset = nullptr;
+        subscription.handle.compare_exchange_strong( unset, handle );
         self->received.fetch_add( 1, std::memory_order_relaxed );
         // Drops since the last message: the gap is before this one.
         self->markSlowConsumer( subscription );
@@ -437,12 +492,14 @@ struct Shared {
         self->pushMessage( std::move( line ) );
     }
 
+    /// @p closure is the SubscriptionState of the subscription.
     static void onSubscriptionComplete( void* closure )
     {
-        auto* self = static_cast<Shared*>( closure );
+        auto& subscription = *static_cast<SubscriptionState*>( closure );
+        auto* self = subscription.shared;
         {
             std::lock_guard<std::mutex> lock( self->mutex );
-            self->subscriptionDone = true;
+            subscription.done = true;
         }
         self->wake.notify_all();
     }
@@ -461,8 +518,8 @@ struct Shared {
         // connection now be closed for good.  The writer destroys the
         // subscription only after the closed callback, which comes after
         // this one.
-        if ( auto* subscription = self->subscription.load() ) {
-            self->markSlowConsumer( subscription );
+        for ( const auto& subscription : self->subscriptions ) {
+            self->markSlowConsumer( *subscription );
         }
         self->pushMarker( QStringLiteral( "disconnected" ), Event::Status );
     }
@@ -489,7 +546,9 @@ struct Shared {
     {
         auto* self = static_cast<Shared*>( closure );
         if ( status == NATS_SLOW_CONSUMER && subscription ) {
-            self->markSlowConsumer( subscription );
+            if ( auto* state = self->find( subscription ) ) {
+                self->markSlowConsumer( *state );
+            }
             return;
         }
         const char* detail = nullptr;
@@ -528,6 +587,11 @@ struct NatsSession::Worker {
     {
         shared->format = config.format;
         shared->queueLimit = config.queueLimit;
+        for ( int i = 0; i < config.subscriptions.size(); ++i ) {
+            auto state = std::make_unique<SubscriptionState>();
+            state->shared = shared;
+            shared->subscriptions.push_back( std::move( state ) );
+        }
     }
 
     /// Stops the thread and waits for it.
@@ -685,8 +749,38 @@ struct NatsSession::Worker {
         return status;
     }
 
+    /// Subscribe to @p wanted on @p connection with the pending limits, as
+    /// @p state.
+    natsStatus subscribe( natsConnection* connection, const Subscription& wanted,
+                          SubscriptionState& state, natsSubscription** subscription )
+    {
+        const auto subject = wanted.subject.toUtf8();
+        const auto queueGroup = wanted.queueGroup.toUtf8();
+        natsStatus status
+            = queueGroup.isEmpty()
+                  ? natsConnection_Subscribe( subscription, connection, subject.constData(),
+                                              &Shared::onMessage, &state )
+                  : natsConnection_QueueSubscribe( subscription, connection, subject.constData(),
+                                                   queueGroup.constData(), &Shared::onMessage,
+                                                   &state );
+        if ( status == NATS_OK ) {
+            state.handle = *subscription;
+            status = natsSubscription_SetOnCompleteCB( *subscription,
+                                                       &Shared::onSubscriptionComplete, &state );
+            state.awaitsCompletion = status == NATS_OK;
+        }
+        if ( status == NATS_OK ) {
+            status = natsSubscription_SetPendingLimits(
+                *subscription, config.pendingLimits.messages, config.pendingLimits.bytes );
+        }
+        return status;
+    }
+
     /// Connect and subscribe; false, after an error marker, if that failed.
-    bool open( natsOptions** options, natsConnection** connection, natsSubscription** subscription )
+    /// @p subscriptions gets one for each of the config's, null for those
+    /// not made.
+    bool open( natsOptions** options, natsConnection** connection,
+               std::vector<natsSubscription*>& subscriptions )
     {
         const auto fail = [ this ]( const QString& why ) {
             shared->pushMarker( QStringLiteral( "connection to %1 failed: %2" )
@@ -709,41 +803,40 @@ struct NatsSession::Worker {
             return fail( explainConnectFailure( config, status, lastError( status ) ) );
         }
 
-        const auto subject = config.subject.toUtf8();
-        status = natsConnection_Subscribe( subscription, *connection, subject.constData(),
-                                           &Shared::onMessage, shared );
-        if ( status == NATS_OK ) {
-            shared->subscription = *subscription;
-            status = natsSubscription_SetOnCompleteCB( *subscription,
-                                                       &Shared::onSubscriptionComplete, shared );
+        const auto subscribeFailed = [ this ]( const QString& what, natsStatus failure ) {
+            shared->pushMarker(
+                QStringLiteral( "subscribing to %1 failed: %2" ).arg( what, lastError( failure ) ),
+                Event::Error );
+            return false;
+        };
+        subscriptions.assign( config.subscriptions.size(), nullptr );
+        for ( int i = 0; i < config.subscriptions.size(); ++i ) {
+            const auto& wanted = config.subscriptions.at( i );
+            status = subscribe( *connection, wanted, *shared->subscriptions.at( i ),
+                                &subscriptions.at( i ) );
+            if ( status != NATS_OK ) {
+                return subscribeFailed( describeSubscriptions( { wanted } ), status );
+            }
         }
-        if ( status == NATS_OK ) {
-            status = natsSubscription_SetPendingLimits(
-                *subscription, config.pendingLimits.messages, config.pendingLimits.bytes );
-        }
-        if ( status == NATS_OK ) {
-            int messages = 0;
-            int bytes = 0;
-            status = natsSubscription_GetPendingLimits( *subscription, &messages, &bytes );
-            shared->limitMessages = messages;
-            shared->limitBytes = bytes;
-        }
+        int messages = 0;
+        int bytes = 0;
+        status = natsSubscription_GetPendingLimits( subscriptions.front(), &messages, &bytes );
+        shared->limitMessages = messages;
+        shared->limitBytes = bytes;
         if ( status == NATS_OK ) {
             // A round trip: once the server has answered, it has the
-            // subscription, so the "connected" marker means that every
+            // subscriptions, so the "connected" marker means that every
             // message published from then on is captured.
             status = natsConnection_Flush( *connection );
         }
+        const auto subjects = describeSubscriptions( config.subscriptions );
         if ( status != NATS_OK ) {
-            shared->pushMarker( QStringLiteral( "subscribing to %1 failed: %2" )
-                                    .arg( config.subject, lastError( status ) ),
-                                Event::Error );
-            return false;
+            return subscribeFailed( subjects, status );
         }
 
         const auto server = connectedUrl( *connection );
         shared->pushMarker(
-            QStringLiteral( "connected to %1, subscribed to %2" ).arg( server, config.subject ),
+            QStringLiteral( "connected to %1, subscribed to %2" ).arg( server, subjects ),
             Event::Connected, server );
         return true;
     }
@@ -793,25 +886,34 @@ struct NatsSession::Worker {
         }
     }
 
-    /// End the subscription without losing what nats.c still holds for it:
-    /// nats.c discards the messages pending in a subscription once it is
-    /// closed (dispatch.c), uncounted.
-    void endSubscription( natsConnection* connection, natsSubscription* subscription )
+    /// End the subscriptions without losing what nats.c still holds for
+    /// them: nats.c discards the messages pending in a subscription once it
+    /// is closed (dispatch.c), uncounted.
+    void endSubscriptions( natsConnection* connection,
+                           const std::vector<natsSubscription*>& subscriptions )
     {
         // Lifted, nats.c drops nothing more (it decides under the lock that
         // SetPendingLimits takes), so the count read now is the last.
-        natsSubscription_SetPendingLimits( subscription, -1, -1 );
-        shared->markSlowConsumer( subscription );
-        // Connected: drain.  nats.c sends UNSUB, waits for the server's
-        // answer (so all that was sent before has arrived), delivers what
-        // is pending and then makes the completion callback.  With no
-        // timeout of its own (-1) it never closes the subscription early.
-        if ( natsConnection_Status( connection ) == NATS_CONN_STATUS_CONNECTED
-             && natsSubscription_DrainTimeout( subscription, -1 ) == NATS_OK ) {
+        for ( auto* subscription : subscriptions ) {
+            natsSubscription_SetPendingLimits( subscription, -1, -1 );
+        }
+        for ( const auto& state : shared->subscriptions ) {
+            shared->markSlowConsumer( *state );
+        }
+        // Connected: drain each.  nats.c sends UNSUB, waits for the
+        // server's answer (so all that was sent before has arrived),
+        // delivers what is pending and then makes the completion callback.
+        // With no timeout of its own (-1) it never closes a subscription
+        // early.
+        bool draining = natsConnection_Status( connection ) == NATS_CONN_STATUS_CONNECTED;
+        for ( auto* subscription : subscriptions ) {
+            draining = draining && natsSubscription_DrainTimeout( subscription, -1 ) == NATS_OK;
+        }
+        if ( draining ) {
             writeUntil(
                 [ this ] {
                     std::lock_guard<std::mutex> lock( shared->mutex );
-                    return shared->subscriptionDone;
+                    return shared->subscriptionsDoneLocked();
                 },
                 kDrainTimeout );
             return;
@@ -821,34 +923,42 @@ struct NatsSession::Worker {
         // holds.  A message it has taken from the queue it delivers even if
         // the subscription is closed meanwhile.
         writeUntil(
-            [ subscription ] {
-                int pending = 0;
-                return natsSubscription_GetPending( subscription, &pending, nullptr ) != NATS_OK
-                       || pending == 0;
+            [ &subscriptions ] {
+                return std::all_of(
+                    subscriptions.begin(), subscriptions.end(), []( natsSubscription* s ) {
+                        int pending = 0;
+                        return natsSubscription_GetPending( s, &pending, nullptr ) != NATS_OK
+                               || pending == 0;
+                    } );
             },
             kCallbackTimeout );
-        natsSubscription_Unsubscribe( subscription );
+        for ( auto* subscription : subscriptions ) {
+            natsSubscription_Unsubscribe( subscription ); // a draining one goes on draining
+        }
     }
 
-    /// End the subscription, close and destroy; whether nats.c confirmed
+    /// End the subscriptions, close and destroy; whether nats.c confirmed
     /// that it makes no callback any more.
-    bool close( natsConnection* connection, natsSubscription* subscription )
+    bool close( natsConnection* connection, std::vector<natsSubscription*> subscriptions )
     {
         {
             std::lock_guard<std::mutex> lock( shared->mutex );
             shared->stopping = true;
         }
-        if ( subscription ) {
-            endSubscription( connection, subscription );
+        subscriptions.erase( std::remove( subscriptions.begin(), subscriptions.end(), nullptr ),
+                             subscriptions.end() );
+        if ( !subscriptions.empty() ) {
+            endSubscriptions( connection, subscriptions );
         }
         bool confirmed = true;
         if ( connection ) {
             natsConnection_Close( connection );
-            confirmed = waitUntil( [ subscription ]( const Shared& s ) {
-                return s.closed && ( !subscription || s.subscriptionDone );
-            } );
+            confirmed = waitUntil(
+                []( const Shared& s ) { return s.closed && s.subscriptionsDoneLocked(); } );
         }
-        natsSubscription_Destroy( subscription );
+        for ( auto* subscription : subscriptions ) {
+            natsSubscription_Destroy( subscription );
+        }
         natsConnection_Destroy( connection );
         return confirmed;
     }
@@ -857,9 +967,9 @@ struct NatsSession::Worker {
     {
         natsOptions* options = nullptr;
         natsConnection* connection = nullptr;
-        natsSubscription* subscription = nullptr;
+        std::vector<natsSubscription*> subscriptions;
 
-        const bool opened = open( &options, &connection, &subscription );
+        const bool opened = open( &options, &connection, subscriptions );
         bool stopped = false;
         if ( opened ) {
             stopped = capture();
@@ -869,7 +979,7 @@ struct NatsSession::Worker {
             stopped = shared->stopRequested;
         }
 
-        released = close( connection, subscription );
+        released = close( connection, subscriptions );
         natsOptions_Destroy( options );
 
         {
@@ -897,6 +1007,18 @@ struct NatsSession::Worker {
 
 // ── NatsSession ─────────────────────────────────────────────────────────
 
+QString describeSubscriptions( const QList<Subscription>& subscriptions )
+{
+    QStringList names;
+    for ( const auto& subscription : subscriptions ) {
+        names << ( subscription.queueGroup.isEmpty()
+                       ? subscription.subject
+                       : QStringLiteral( "%1 (queue %2)" )
+                             .arg( subscription.subject, subscription.queueGroup ) );
+    }
+    return names.join( QStringLiteral( ", " ) );
+}
+
 NatsSession::NatsSession( const SessionConfig& config, QObject* parent )
     : QObject( parent )
     , config_( config )
@@ -922,7 +1044,9 @@ bool NatsSession::start()
         Q_EMIT errorOccurred( message );
         return false;
     };
-    if ( config_.subject.trimmed().isEmpty() ) {
+    const auto blank = []( const Subscription& s ) { return s.subject.trimmed().isEmpty(); };
+    if ( config_.subscriptions.isEmpty()
+         || std::any_of( config_.subscriptions.begin(), config_.subscriptions.end(), blank ) ) {
         return fail( QStringLiteral( "No subject to subscribe to." ) );
     }
     if ( !tempDir_.isValid() ) {
@@ -933,7 +1057,7 @@ bool NatsSession::start()
     // Started again, the session goes on in its last file.
     auto worker = std::make_unique<Worker>(
         this, config_, ++generation_,
-        tempDir_.filePath( "nats_" + safeFileName( config_.subject ) ) );
+        tempDir_.filePath( "nats_" + fileNameFor( config_.subscriptions ) ) );
     const bool opened = worker->file.open();
     filePath_ = worker->file.fileName();
     if ( !opened ) {

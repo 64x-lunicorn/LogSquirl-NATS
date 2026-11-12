@@ -19,7 +19,7 @@
 
 /**
  * @file connectiondialog.h
- * @brief Non-modal dialog to start and stop a capture: server URL, subject.
+ * @brief Non-modal dialog to start and stop captures: server URL, subjects.
  *
  * Opened from Plugins ▸ NATS Monitor…  It provides:
  *
@@ -33,21 +33,31 @@
  *     the certificate must be for, and skipping the verification (off, and
  *     marked as insecure); they apply, and can be entered, when the
  *     connection uses TLS: Use TLS checked, or a tls:// URL
- *   - the subject, with the wildcards * and >
+ *   - the subjects, one a line, with the wildcards * and >, each
+ *     optionally followed by a queue group (subjects.h); a warning when
+ *     they overlap, suggesting to drop the narrower one
  *   - how many bytes of a binary payload are written (default 256)
- *   - the subscription's pending limits, messages and MiB (default
+ *   - each subscription's pending limits, messages and MiB (default
  *     1,000,000 and 512 MiB): beyond them nats.c drops as a slow consumer
  *   - the size limit of a file in MiB (default 256, 0 for no limit): each
  *     next file of the capture opens in a new followed tab, with a line in
  *     the host log (no notification: a busy capture rotates often)
- *   - Start, which starts a NatsSession and opens its file in a followed tab
- *   - Stop, which stops it; the tab keeps the file until LogSquirl quits
- *   - a status line with the session's connection events and errors
+ *   - Start, which starts a NatsSession with the settings entered and opens
+ *     its file in a followed tab
+ *   - the list of the running sessions; Stop stops the one selected, Stop
+ *     all every one; the tabs keep the files until LogSquirl quits
+ *   - a status line with the sessions' connection events and errors, each
+ *     with the subjects of its session
  *
- * Starting, stopping with Stop and errors are also host notifications, as
- * in the Serial plugin; stopAll() (shutdown) is not.
+ * Starting, stopping with Stop or Stop all and errors are also host
+ * notifications, as in the Serial plugin; stopAll() (shutdown) is not.
  *
- * One session at a time (several sessions are #7's).
+ * SEVERAL SESSIONS
+ * ────────────────
+ * Each Start starts another session beside those running, as the Serial
+ * plugin does per port: its own connection, file and tab.  The settings
+ * stay editable while sessions run, for the next one.  totals() is what the
+ * status widget (statuswidget.h) shows.
  *
  * SETTINGS
  * ────────
@@ -66,7 +76,8 @@
  * OWNERSHIP
  * ─────────
  * Created by logsquirl_plugin_init(), deleted by logsquirl_plugin_shutdown(),
- * which calls stopAll() first.  The running session is a child of the dialog.
+ * which calls stopAll() first.  The running sessions are children of the
+ * dialog.
  */
 
 #pragma once
@@ -82,6 +93,8 @@ class QCheckBox;
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QListWidget;
+class QPlainTextEdit;
 class QPushButton;
 class QSpinBox;
 
@@ -97,25 +110,46 @@ public:
     explicit ConnectionDialog( QWidget* parent = nullptr );
     ~ConnectionDialog() override;
 
-    /// Stop the running session, keeping its file for the tab.
+    /// Stop every running session, keeping their files for the tabs.
     void stopAll();
 
     /// Whether a session runs.
     bool isCapturing() const;
 
+    /// What the sessions have done, for the status widget.
+    struct Totals {
+        int sessions = 0;     ///< Running.
+        quint64 received = 0; ///< By every session since the dialog was made: only grows.
+        quint64 dropped = 0;  ///< By the running sessions.
+    };
+
+    /// The totals now.
+    Totals totals() const;
+
+Q_SIGNALS:
+    /// A session was started, or has stopped or ended.
+    void sessionsChanged();
+
 private:
-    /// Start a session with the URL and subject entered, and open its file.
+    /// Start a session with the settings entered, and open its file.
     void startCapture();
 
-    /// Stop the running session and say so (Stop button).
-    void stopCapture();
+    /// Stop the session selected in the list and say so (Stop button).
+    void stopSelected();
 
-    /// The session ended on its own: it could not connect, or the
-    /// connection was closed for good.
-    void onSessionFinished();
+    /// Stop every session and say so (Stop all button).
+    void stopAllCaptures();
 
-    /// Let go of the session: keep its file, delete it later.
-    void releaseSession();
+    /// Stop @p session and say so in the status line, and with @p notify
+    /// in a host notification.
+    void stopCapture( NatsSession* session, bool notify );
+
+    /// Let go of @p session, which has stopped or ended on its own: keep
+    /// its file, take it from the list, delete it later.
+    void releaseSession( NatsSession* session );
+
+    /// Show the warning for the subjects entered, if they overlap.
+    void updateSubjectsWarning();
 
     void updateButtons();
 
@@ -159,15 +193,20 @@ private:
     QList<QWidget*> tlsWidgets_; ///< Enabled when the connection uses TLS.
     /// The TLS settings entered in a line edit, by their field.
     QList<std::pair<QLineEdit*, QString TlsConfig::*>> tlsTexts_;
-    QLineEdit* subjectEdit_;
+    QPlainTextEdit* subjectsEdit_;
+    QLabel* subjectsWarning_;
     QSpinBox* maxBinarySpin_;
     QSpinBox* pendingMessagesSpin_;
     QSpinBox* pendingMegabytesSpin_;
     QSpinBox* maxFileSpin_;
     QPushButton* startButton_;
+    QListWidget* sessionList_;
     QPushButton* stopButton_;
+    QPushButton* stopAllButton_;
     QLabel* statusLabel_;
-    NatsSession* session_ = nullptr;
+    /// The running sessions, in the order of sessionList_'s rows.
+    QList<NatsSession*> sessions_;
+    quint64 receivedByEnded_ = 0;  ///< What the sessions no longer running received.
     bool fillingProfiles_ = false; ///< The list is being filled: nothing is loaded.
 };
 

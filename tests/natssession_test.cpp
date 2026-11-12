@@ -42,10 +42,12 @@
 #include <QRegularExpression>
 #include <QTemporaryDir>
 
+#include <atomic>
 #include <memory>
 
 using nats_monitor::NatsSession;
 using nats_monitor::SessionConfig;
+using nats_monitor::Subscription;
 using nats_test::NatsServer;
 using nats_test::NatsServerOptions;
 using nats_test::Publisher;
@@ -59,7 +61,15 @@ SessionConfig configFor( const QString& url, const QString& subject )
 {
     SessionConfig config;
     config.url = url;
-    config.subject = subject;
+    config.subscriptions = { { subject, {} } };
+    return config;
+}
+
+SessionConfig configWith( const QString& url, const QList<Subscription>& subscriptions )
+{
+    SessionConfig config;
+    config.url = url;
+    config.subscriptions = subscriptions;
     return config;
 }
 
@@ -173,6 +183,213 @@ SCENARIO( "a published message shows up as a line in the session's file", "[serv
                     REQUIRE( lines.at( i + 1 ).endsWith( QStringLiteral( " %1" ).arg( i ) ) );
                 }
             }
+        }
+    }
+}
+
+SCENARIO( "a session subscribed to several subjects writes them all into one file",
+          "[server][session][subjects]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session subscribed to orders.eu.* and billing.>" )
+    {
+        NatsServer server;
+        NatsSession session(
+            configWith( server.url(), { { "orders.eu.*", {} }, { "billing.>", {} } } ) );
+        startAndWaitConnected( session, server.url(), "orders.eu.*, billing.>" );
+
+        WHEN( "messages are published on each subject and on another" )
+        {
+            Publisher publisher( server.url() );
+            publisher.publish( "orders.eu.created", "one" );
+            publisher.publish( "billing.invoice.sent", "two" );
+            publisher.publish( "orders.us.created", "none" );
+            publisher.publish( "orders.eu.paid", "three" );
+
+            THEN( "the messages of both subjects are lines of the one file, in order" )
+            {
+                REQUIRE( waitFor( [ & ] {
+                    return anyMatches( readLines( session.filePath() ),
+                                       " orders\\.eu\\.paid - 5 three$" );
+                } ) );
+                const auto lines = readLines( session.filePath() );
+                REQUIRE( lines.size() == 4 );
+                REQUIRE( lines.at( 1 ).endsWith( " orders.eu.created - 3 one" ) );
+                REQUIRE( lines.at( 2 ).endsWith( " billing.invoice.sent - 3 two" ) );
+                REQUIRE( lines.at( 3 ).endsWith( " orders.eu.paid - 5 three" ) );
+            }
+        }
+    }
+}
+
+SCENARIO( "overlapping subjects write a message once for each subscription",
+          "[server][session][subjects]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session subscribed to orders.> and orders.eu.*" )
+    {
+        NatsServer server;
+        NatsSession session(
+            configWith( server.url(), { { "orders.>", {} }, { "orders.eu.*", {} } } ) );
+        startAndWaitConnected( session, server.url(), "orders.>, orders.eu.*" );
+
+        WHEN( "a message matching both and one matching only orders.> are published" )
+        {
+            Publisher publisher( server.url() );
+            publisher.publish( "orders.eu.created", "both" );
+            publisher.publish( "orders.us.created", "wide" );
+            publisher.publish( "end", "x" ); // matches neither
+            publisher.publish( "orders.eu.last", "last" );
+
+            THEN( "the first is written twice, as the server delivered it, the second once" )
+            {
+                REQUIRE( waitFor( [ & ] {
+                    return readLines( session.filePath() )
+                               .filter( " orders.eu.last - 4 last" )
+                               .size()
+                           == 2;
+                } ) );
+                const auto lines = readLines( session.filePath() );
+                REQUIRE( lines.filter( " orders.eu.created - 4 both" ).size() == 2 );
+                REQUIRE( lines.filter( " orders.us.created - 4 wide" ).size() == 1 );
+                REQUIRE( lines.size() == 1 + 2 + 1 + 2 );
+            }
+        }
+
+        WHEN( "the session is stopped" )
+        {
+            session.stop();
+
+            THEN( "it ends with one stopped marker" )
+            {
+                const auto lines = readLines( session.filePath() );
+                REQUIRE( lines.filter( "$NATS-MONITOR - 7 stopped" ).size() == 1 );
+                REQUIRE( lines.last().endsWith( " $NATS-MONITOR - 7 stopped" ) );
+            }
+        }
+    }
+}
+
+namespace {
+
+/// A member of a queue group outside the session, counting what it gets.
+class QueueMember {
+public:
+    QueueMember( const QString& url, const char* subject, const char* queueGroup )
+    {
+        natsOptions* options = nullptr;
+        natsOptions_Create( &options );
+        natsOptions_SetURL( options, url.toUtf8().constData() );
+        const auto status = natsConnection_Connect( &connection_, options );
+        natsOptions_Destroy( options );
+        REQUIRE( status == NATS_OK );
+        REQUIRE( natsConnection_QueueSubscribe( &subscription_, connection_, subject, queueGroup,
+                                                &QueueMember::onMessage, this )
+                 == NATS_OK );
+        REQUIRE( natsConnection_Flush( connection_ ) == NATS_OK );
+    }
+
+    ~QueueMember()
+    {
+        natsSubscription_Unsubscribe( subscription_ );
+        natsSubscription_Destroy( subscription_ );
+        natsConnection_Destroy( connection_ );
+    }
+
+    QueueMember( const QueueMember& ) = delete;
+    QueueMember& operator=( const QueueMember& ) = delete;
+
+    int received() const
+    {
+        return received_.load();
+    }
+
+private:
+    static void onMessage( natsConnection*, natsSubscription*, natsMsg* msg, void* closure )
+    {
+        natsMsg_Destroy( msg );
+        static_cast<QueueMember*>( closure )->received_.fetch_add( 1 );
+    }
+
+    natsConnection* connection_ = nullptr;
+    natsSubscription* subscription_ = nullptr;
+    std::atomic<int> received_{ 0 };
+};
+
+} // namespace
+
+SCENARIO( "a subject may be subscribed in a queue group", "[server][session][subjects]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session subscribed to jobs.> in the queue group workers, and another member" )
+    {
+        NatsServer server;
+        NatsSession session( configWith( server.url(), { { "jobs.>", "workers" } } ) );
+        startAndWaitConnected( session, server.url(), "jobs.> (queue workers)" );
+        QueueMember other( server.url(), "jobs.>", "workers" );
+
+        WHEN( "200 messages are published" )
+        {
+            Publisher publisher( server.url() );
+            for ( int i = 0; i < 200; ++i ) {
+                publisher.publish( "jobs.run", QByteArray::number( i ) );
+            }
+
+            THEN( "the group shares them: each goes to the session or to the other member" )
+            {
+                const auto written = [ & ] {
+                    return readLines( session.filePath() ).filter( " jobs.run - " ).size();
+                };
+                REQUIRE( waitFor( [ & ] { return written() + other.received() == 200; } ) );
+                REQUIRE( written() > 0 );
+                REQUIRE( other.received() > 0 );
+            }
+        }
+    }
+
+    GIVEN( "a session subscribed to jobs.> without a queue group, and a member of a group" )
+    {
+        NatsServer server;
+        NatsSession session( configFor( server.url(), "jobs.>" ) );
+        startAndWaitConnected( session, server.url(), "jobs.>" );
+        QueueMember other( server.url(), "jobs.>", "workers" );
+
+        WHEN( "20 messages are published" )
+        {
+            Publisher publisher( server.url() );
+            for ( int i = 0; i < 20; ++i ) {
+                publisher.publish( "jobs.run", QByteArray::number( i ) );
+            }
+
+            THEN( "the session takes nothing away from the group: both get every one" )
+            {
+                REQUIRE( waitFor( [ & ] {
+                    return readLines( session.filePath() ).filter( " jobs.run - " ).size() == 20
+                           && other.received() == 20;
+                } ) );
+            }
+        }
+    }
+}
+
+SCENARIO( "a session without a subject does not start", "[session][subjects]" )
+{
+    GIVEN( "a session with no subscription, or only a blank subject" )
+    {
+        const auto config = GENERATE( SessionConfig{},
+                                      configFor( "nats://127.0.0.1:1", QStringLiteral( "  " ) ) );
+        NatsSession session( config );
+        QStringList errors;
+        QObject::connect( &session, &NatsSession::errorOccurred,
+                          [ & ]( const QString& message ) { errors << message; } );
+
+        THEN( "start() refuses, and says why" )
+        {
+            REQUIRE_FALSE( session.start() );
+            REQUIRE( errors.join( '\n' ).contains( "subject" ) );
         }
     }
 }
@@ -539,6 +756,55 @@ SCENARIO( "a slow consumer's drops are counted and marked where they happen",
                 REQUIRE( t.dropped() == published - t.written );
                 REQUIRE( session.droppedCount() == static_cast<quint64>( t.dropped() ) );
                 REQUIRE( readLines( session.filePath() ).last().endsWith( " stopped" ) );
+            }
+        }
+    }
+}
+
+SCENARIO( "the drops of all subscriptions of a session add up in its markers",
+          "[server][session][drops][subjects]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session of two subscriptions that may each hold a single pending message" )
+    {
+        NatsServer server;
+        Publisher publisher( server.url() );
+        auto config = configWith( server.url(), { { "a.flood", {} }, { "b.flood", {} } } );
+        config.pendingLimits.messages = 1;
+        NatsSession session( config );
+        startAndWaitConnected( session, server.url(), "a.flood, b.flood" );
+
+        WHEN( "both are flooded faster than it can take the messages, and it is stopped" )
+        {
+            qint64 published = 0;
+            for ( int round = 0; round < 20 && session.droppedCount() == 0; ++round ) {
+                flood( publisher, "a.flood", 5000 );
+                flood( publisher, "b.flood", 5000 );
+                published += 10000;
+                settle( 50 );
+            }
+            REQUIRE( waitFor(
+                [ & ] {
+                    const auto lines = readLines( session.filePath() );
+                    return tally( lines, "a.flood" ).written + tally( lines, "b.flood" ).written
+                               + static_cast<qint64>( session.droppedCount() )
+                           >= published;
+                },
+                30000 ) );
+            session.stop();
+
+            THEN( "the session's slow-consumer markers add up to the messages of both not "
+                  "written" )
+            {
+                const auto lines = readLines( session.filePath() );
+                const auto a = tally( lines, "a.flood" );
+                const auto b = tally( lines, "b.flood" );
+                REQUIRE( a.unknown == 0 );
+                REQUIRE( a.slowConsumer > 0 );
+                REQUIRE( a.dropped() == published - a.written - b.written );
+                REQUIRE( session.droppedCount() == static_cast<quint64>( a.dropped() ) );
+                REQUIRE( lines.last().endsWith( " stopped" ) );
             }
         }
     }

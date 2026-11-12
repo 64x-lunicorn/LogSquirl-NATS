@@ -22,7 +22,7 @@
  * @brief In-process stand-in for the LogSquirl host API, for tests.
  *
  * A FakeHost hands the plugin a host API table that records every log
- * message, notification, opened file and menu entry for the test to
+ * message, notification, opened file, menu entry and status widget for the test to
  * inspect, and gives it a configuration directory of its own, which lasts
  * as long as the host: a plugin initialised again on the same host finds
  * the settings it saved.  The test passes api() and handle() to logsquirl_plugin_init().
@@ -39,6 +39,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTemporaryDir>
+#include <QWidget>
 
 #include <stdexcept>
 
@@ -77,6 +78,14 @@ public:
         api_.open_file = []( void* handle, const char* filePath, int follow ) {
             self( handle )->openedFiles << QString::fromUtf8( filePath );
             self( handle )->openedFollow << ( follow != 0 );
+        };
+        api_.register_status_widget = []( void* handle, void* widget ) {
+            self( handle )->statusWidgets << static_cast<QWidget*>( widget );
+        };
+        api_.unregister_status_widget = []( void* handle, void* widget ) {
+            auto* host = self( handle );
+            host->unregisteredStatusWidgets << static_cast<QWidget*>( widget );
+            host->statusWidgets.removeAll( static_cast<QWidget*>( widget ) );
         };
         api_.register_menu_action = []( void* handle, const char* menuPath, const char* label,
                                         void ( *callback )( void* ), void* userData ) {
@@ -130,6 +139,8 @@ public:
     QStringList openedFiles;
     QList<bool> openedFollow; ///< For each of openedFiles: whether it is followed.
     QList<MenuAction> menuActions;
+    QList<QWidget*> statusWidgets;             ///< Registered, not unregistered yet.
+    QList<QWidget*> unregisteredStatusWidgets; ///< Unregistered, in that order.
     /// register_menu_action() throws, as a broken host might.
     bool failMenuAction = false;
 
