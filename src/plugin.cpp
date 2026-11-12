@@ -78,6 +78,16 @@ QString settingsFile()
     return QString::fromUtf8( dir ) + QStringLiteral( "/nats.ini" );
 }
 
+void logFailure( const char* what, const char* reason ) noexcept
+{
+    try {
+        hostLog( LOGSQUIRL_LOG_ERROR, QStringLiteral( "NATS Monitor plugin: %1 failed: %2" )
+                                          .arg( what, QString::fromUtf8( reason ) ) );
+    } catch ( ... ) {
+        // Nothing left to report it with.
+    }
+}
+
 void hostNotify( const QString& message )
 {
     if ( g_state.api && g_state.handle ) {
@@ -106,34 +116,7 @@ static const LogSquirlPluginInfo kPluginInfo = {
 
 // ── Internal helpers ─────────────────────────────────────────────────────
 
-/// Log that work for the host failed.
-static void logFailure( const char* what, const char* reason ) noexcept
-{
-    try {
-        nats_monitor::hostLog( LOGSQUIRL_LOG_ERROR,
-                               QStringLiteral( "NATS Monitor plugin: %1 failed: %2" )
-                                   .arg( what, QString::fromUtf8( reason ) ) );
-    } catch ( ... ) {
-        // Nothing left to report it with.
-    }
-}
-
-/// Run work for the host, logging instead of throwing: the host is C, and
-/// an exception escaping into it would terminate LogSquirl.
-/// Returns false if it threw.
-template <typename Work>
-static bool guarded( const char* what, Work&& work ) noexcept
-{
-    try {
-        work();
-        return true;
-    } catch ( const std::exception& e ) {
-        logFailure( what, e.what() );
-    } catch ( ... ) {
-        logFailure( what, "unknown exception" );
-    }
-    return false;
-}
+using nats_monitor::guarded;
 
 // ── Menu action callback ─────────────────────────────────────────────────
 

@@ -441,6 +441,14 @@ void ConnectionDialog::saveProfile()
     saveMaxFileMiB( profile.maxFileMiB );
     fillProfileList( profile.name );
     const char* secret = authMethodInfo( profile.auth.method ).secret;
+    if ( sessions_ && sessions_->isRunning( profile.name ) ) {
+        statusLabel_->setText( QStringLiteral( "Connection %1 saved. Its capture runs on with "
+                                               "the settings it started with: stop and start it "
+                                               "to use the new ones." )
+                                   .arg( profile.name ) );
+        Q_EMIT profilesChanged();
+        return;
+    }
     statusLabel_->setText(
         secret ? QStringLiteral( "Connection %1 saved, without the %2: start it in the NATS "
                                  "sidebar." )

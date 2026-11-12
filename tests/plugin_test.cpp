@@ -1344,7 +1344,7 @@ SCENARIO( "each saved connection is a tile in the sidebar", "[plugin][sidebar]" 
             AND_WHEN( "Delete is clicked on dev, and the question cancelled" )
             {
                 answerQuestion( QMessageBox::Cancel );
-                tileButton( host, "dev", "remove" )->click();
+                tileButton( host, "dev", "delete" )->click();
 
                 THEN( "dev stays" )
                 {
@@ -1355,7 +1355,7 @@ SCENARIO( "each saved connection is a tile in the sidebar", "[plugin][sidebar]" 
             AND_WHEN( "Delete is clicked on dev, and confirmed" )
             {
                 answerQuestion( QMessageBox::Yes );
-                tileButton( host, "dev", "remove" )->click();
+                tileButton( host, "dev", "delete" )->click();
 
                 THEN( "its tile goes, and so does the saved connection" )
                 {
@@ -1416,7 +1416,7 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
                         QFileInfo( name == QStringLiteral( "orders" ) ? first : second )
                             .fileName() ) );
                     REQUIRE( tileButton( host, name, "startStop" )->text().contains( "Stop" ) );
-                    REQUIRE_FALSE( tileButton( host, name, "remove" )->isEnabled() );
+                    REQUIRE_FALSE( tileButton( host, name, "delete" )->isEnabled() );
                 }
                 REQUIRE( sidebarButton( host, "stopAll" )->isEnabled() );
                 {
@@ -1469,7 +1469,7 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
                     REQUIRE( tileDetails( host, "orders" ).startsWith( "stopped" ) );
                     REQUIRE(
                         tileButton( host, "orders", "startStop" )->text().contains( "Start" ) );
-                    REQUIRE( tileButton( host, "orders", "remove" )->isEnabled() );
+                    REQUIRE( tileButton( host, "orders", "delete" )->isEnabled() );
                     REQUIRE( waitFor( [ & ] {
                         return tileDetails( host, "metrics" ).startsWith( "running" );
                     } ) );
@@ -1496,6 +1496,22 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
                     REQUIRE( tileDetails( host, "orders" ).startsWith( "stopped" ) );
                     REQUIRE( tileDetails( host, "metrics" ).startsWith( "stopped" ) );
                     REQUIRE_FALSE( sidebarButton( host, "stopAll" )->isEnabled() );
+                }
+            }
+
+            AND_WHEN( "a connection that runs is edited and saved" )
+            {
+                tileButton( host, "metrics", "edit" )->click();
+                subjectsField( openDialog() )->setPlainText( "metrics.cpu" );
+                button( openDialog(), "saveProfile" )->click();
+
+                THEN( "the tile shows the new subjects, and the dialog says the capture runs on "
+                      "with the old ones until started again" )
+                {
+                    REQUIRE( tileSummary( host, "metrics" ).contains( "metrics.cpu" ) );
+                    REQUIRE( statusText( openDialog() ).contains( "runs on" ) );
+                    REQUIRE(
+                        tileButton( host, "metrics", "startStop" )->text().contains( "Stop" ) );
                 }
             }
 

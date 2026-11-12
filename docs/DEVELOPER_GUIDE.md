@@ -29,8 +29,9 @@ plugin.cpp            entry points (logsquirl_plugin_*), each through guarded()
 ### The plugin's lifetime
 
 [`src/plugin.cpp`](../src/plugin.cpp) holds the entry points. No exception
-may leave one or a host callback (the host is C), so their work runs through
-`guarded()`, which logs a failure to the host log instead.
+may leave one, a host callback or a slot the host's event loop calls (the
+host is C), so their work runs through `guarded()` (plugin.h), which logs
+a failure to the host log instead.
 
 - **init** removes the temporary directories of LogSquirl processes that no
   longer run, creates `Sessions`, the dialog (parentless: it must not die
@@ -194,6 +195,10 @@ deletes one (`ConnectionDialog::profilesChanged`).
   never saved, and an empty answer starts nothing. **Delete** asks
   (`QMessageBox`) and is disabled while the connection runs; the dialog
   refuses to delete a running connection too.
+- **Edit** while the connection runs: the tile shows the saved settings at
+  once, the capture runs on with those it started with (the dialog says
+  so) until it is stopped and started again. A connection saved under
+  another name is another connection, with a tile of its own.
 
 The tests (`[sidebar]`) drive the tab through `FakeHost`, which records the
 sidebar tabs registered and unregistered: tiles created, updated and

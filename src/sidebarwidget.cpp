@@ -55,13 +55,12 @@ constexpr int kSampleMs = 1000;
 /// What @p profile is, for its tile.
 QStringList summaryOf( const ConnectionProfile& profile )
 {
-    const auto subjects = parseSubscriptions( profile.subjects ).subscriptions;
+    const auto subjects = profile.subscriptions();
     return {
         redactUrls( profile.url ),
         QStringLiteral( "%1 · TLS %2" )
             .arg( QLatin1String( authMethodInfo( profile.auth.method ).label ),
-                  usesTls( profile.url, profile.tls.enabled ) ? QStringLiteral( "on" )
-                                                              : QStringLiteral( "off" ) ),
+                  profile.usesTls() ? QStringLiteral( "on" ) : QStringLiteral( "off" ) ),
         subjects.isEmpty() ? QStringLiteral( "no subject" ) : describeSubscriptions( subjects ),
     };
 }
@@ -132,18 +131,20 @@ SidebarWidget::SidebarWidget( Sessions* sessions, QWidget* parent )
     layout->addWidget( scroll, 1 );
 
     connect( newConnection, &QPushButton::clicked, this, &SidebarWidget::newConnectionRequested );
+    // Every slot runs in the host's event loop: nothing may throw into it.
     connect( stopAll_, &QPushButton::clicked, this, [ this ] {
-        for ( const auto& name : tileByName_.keys() ) {
-            sessions_->stop( name );
-        }
+        guarded( "stopping every capture", [ this ] { sessions_->stopAll( true ); } );
     } );
     connect( sessions_, &Sessions::changed, this, [ this ]( const QString& name ) {
-        if ( auto* tile = tileByName_.value( name ) ) {
-            updateTile( tile );
-        }
-        updateStopAll();
+        guarded( "showing a capture", [ this, &name ] {
+            if ( auto* tile = tileByName_.value( name ) ) {
+                updateTile( tile );
+            }
+            updateStopAll();
+        } );
     } );
-    connect( timer_, &QTimer::timeout, this, &SidebarWidget::sample );
+    connect( timer_, &QTimer::timeout, this,
+             [ this ] { guarded( "counting the captures", [ this ] { sample(); } ); } );
     timer_->start( kSampleMs );
 
     reload();
@@ -163,13 +164,17 @@ void SidebarWidget::reload()
         auto* tile = new ConnectionTile( profile.name, this );
         tile->setSummary( summaryOf( profile ) );
         const auto name = profile.name;
-        connect( tile, &ConnectionTile::startClicked, this, [ this, name ] { start( name ); } );
-        connect( tile, &ConnectionTile::stopClicked, this,
-                 [ this, name ] { sessions_->stop( name ); } );
+        connect( tile, &ConnectionTile::startClicked, this, [ this, name ] {
+            guarded( "starting a capture", [ this, &name ] { start( name ); } );
+        } );
+        connect( tile, &ConnectionTile::stopClicked, this, [ this, name ] {
+            guarded( "stopping a capture", [ this, &name ] { sessions_->stop( name ); } );
+        } );
         connect( tile, &ConnectionTile::editClicked, this,
                  [ this, name ] { Q_EMIT editRequested( name ); } );
-        connect( tile, &ConnectionTile::deleteClicked, this,
-                 [ this, name ] { confirmDelete( name ); } );
+        connect( tile, &ConnectionTile::deleteClicked, this, [ this, name ] {
+            guarded( "deleting a connection", [ this, &name ] { confirmDelete( name ); } );
+        } );
         tiles_->addWidget( tile );
         tileByName_.insert( name, tile );
         updateTile( tile );
@@ -243,7 +248,7 @@ void SidebarWidget::updateTile( ConnectionTile* tile )
 void SidebarWidget::sample()
 {
     for ( auto* tile : std::as_const( tileByName_ ) ) {
-        const auto& name = tile->name();
+        const auto name = tile->name();
         if ( !sessions_->isRunning( name ) ) {
             samples_.remove( name );
             continue;

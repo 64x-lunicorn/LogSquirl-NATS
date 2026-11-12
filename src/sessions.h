@@ -93,8 +93,9 @@ public:
     /// so in a host notification.  No-op if it does not run.
     void stop( const QString& name, bool notify = true );
 
-    /// Stop every session, keeping their files for the tabs; no notification.
-    void stopAll();
+    /// Stop every session, keeping their files for the tabs, and with
+    /// @p notify say so for each in a host notification.
+    void stopAll( bool notify = false );
 
     /// Whether the session of the connection @p name runs.
     bool isRunning( const QString& name ) const;

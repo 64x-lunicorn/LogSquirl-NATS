@@ -145,6 +145,16 @@ void writeCapture( QSettings& settings, const ConnectionProfile& profile )
 
 } // namespace
 
+QList<Subscription> ConnectionProfile::subscriptions() const
+{
+    return parseSubscriptions( subjects ).subscriptions;
+}
+
+bool ConnectionProfile::usesTls() const
+{
+    return nats_monitor::usesTls( url, tls.enabled );
+}
+
 std::optional<ConnectionProfile> findProfile( const QString& settingsFile, const QString& name )
 {
     for ( const auto& profile : loadProfiles( settingsFile ) ) {
@@ -174,8 +184,7 @@ QString startProblem( const ConnectionProfile& profile )
     if ( method.file && profile.auth.file.isEmpty() ) {
         return QStringLiteral( "Choose the %1." ).arg( QLatin1String( method.file ) );
     }
-    if ( usesTls( profile.url, profile.tls.enabled )
-         && profile.tls.certFile.isEmpty() != profile.tls.keyFile.isEmpty() ) {
+    if ( profile.usesTls() && profile.tls.certFile.isEmpty() != profile.tls.keyFile.isEmpty() ) {
         return QStringLiteral( "Choose both the client certificate and its key, or neither." );
     }
     return {};
@@ -186,10 +195,10 @@ SessionConfig sessionConfig( const ConnectionProfile& profile )
     SessionConfig config;
     config.url = profile.url;
     config.auth = profile.auth;
-    if ( usesTls( profile.url, profile.tls.enabled ) ) {
+    if ( profile.usesTls() ) {
         config.tls = profile.tls; // also for a tls:// URL with Use TLS unchecked
     }
-    config.subscriptions = parseSubscriptions( profile.subjects ).subscriptions;
+    config.subscriptions = profile.subscriptions();
     config.format.maxBinaryBytes = profile.maxBinaryBytes;
     config.pendingLimits = profile.pendingLimits;
     config.maxFileBytes = profile.maxFileMiB * kBytesPerMiB;

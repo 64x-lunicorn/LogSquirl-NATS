@@ -102,6 +102,7 @@ private:
     /// The counts polled: the rate of each running session.
     void sample();
 
+    /// Stop all is enabled while some capture runs.
     void updateStopAll();
 
     Sessions* sessions_;

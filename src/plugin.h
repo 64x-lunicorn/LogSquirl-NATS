@@ -34,6 +34,8 @@
 #include <QPointer>
 #include <QString>
 
+#include <exception>
+
 namespace nats_monitor {
 
 class ConnectionDialog;
@@ -73,5 +75,26 @@ QString settingsFile();
 /// Show a host notification (no-op if not initialised).
 /// The host decodes the message as UTF-8.
 void hostNotify( const QString& message );
+
+/// Log that work for the host failed: @p what, because of @p reason.
+void logFailure( const char* what, const char* reason ) noexcept;
+
+/// Run @p work for the host, logging instead of throwing: the host is C, and
+/// an exception escaping into it (from an entry point, a host callback or a
+/// slot its event loop calls) would terminate LogSquirl.  Returns false if
+/// it threw.
+template <typename Work>
+bool guarded( const char* what, Work&& work ) noexcept
+{
+    try {
+        work();
+        return true;
+    } catch ( const std::exception& e ) {
+        logFailure( what, e.what() );
+    } catch ( ... ) {
+        logFailure( what, "unknown exception" );
+    }
+    return false;
+}
 
 } // namespace nats_monitor

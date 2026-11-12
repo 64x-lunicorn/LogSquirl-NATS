@@ -94,40 +94,53 @@ bool Sessions::start( const ConnectionProfile& profile )
 
     const auto subjects = describeSubscriptions( config.subscriptions );
     auto* session = new NatsSession( config, this );
+    // The session's signals come through the host's event loop: nothing
+    // may throw into it.
     connect( session, &NatsSession::statusChanged, this, [ this, name ]( const QString& text ) {
-        auto& status = entries_[ name ].status;
-        status.detail = text;
-        if ( text == QLatin1String( "disconnected" ) ) {
-            status.state = SessionState::Connecting;
-            status.server.clear();
-        }
-        Q_EMIT changed( name );
+        guarded( "showing a connection event", [ this, &name, &text ] {
+            auto& status = entries_[ name ].status;
+            status.detail = text;
+            if ( text == QLatin1String( "disconnected" ) ) {
+                status.state = SessionState::Connecting;
+                status.server.clear();
+            }
+            Q_EMIT changed( name );
+        } );
     } );
     connect( session, &NatsSession::connected, this, [ this, name ]( const QString& url ) {
-        auto& status = entries_[ name ].status;
-        status.state = SessionState::Running;
-        status.server = redactUrls( url );
-        Q_EMIT changed( name );
+        guarded( "showing a connection", [ this, &name, &url ] {
+            auto& status = entries_[ name ].status;
+            status.state = SessionState::Running;
+            status.server = redactUrls( url );
+            Q_EMIT changed( name );
+        } );
     } );
     connect( session, &NatsSession::errorOccurred, this, [ subjects ]( const QString& message ) {
-        const auto text = QStringLiteral( "NATS Monitor (%1): %2" ).arg( subjects, message );
-        hostLog( LOGSQUIRL_LOG_WARNING, text );
-        hostNotify( text );
+        guarded( "reporting a capture error", [ &subjects, &message ] {
+            const auto text = QStringLiteral( "NATS Monitor (%1): %2" ).arg( subjects, message );
+            hostLog( LOGSQUIRL_LOG_WARNING, text );
+            hostNotify( text );
+        } );
     } );
     // Ended on its own: its last event says why; the tab keeps what was
     // captured.
-    connect( session, &NatsSession::finished, this,
-             [ this, name ] { release( name, SessionState::Failed ); } );
+    connect( session, &NatsSession::finished, this, [ this, name ] {
+        guarded( "ending a capture", [ this, &name ] { release( name, SessionState::Failed ); } );
+    } );
     // In the session's context, not this one's: release() disconnects this
     // object, and a file the session goes on in while it stops still gets
     // its tab (the queued signal comes before the session's deleteLater()).
-    connect( session, &NatsSession::fileRotated, session,
-             [ session ]( const QString& path ) { openRotatedFile( session->config(), path ); } );
+    connect( session, &NatsSession::fileRotated, session, [ session ]( const QString& path ) {
+        guarded( "opening the next file",
+                 [ session, &path ] { openRotatedFile( session->config(), path ); } );
+    } );
     connect( session, &NatsSession::fileRotated, this, [ this, name ]( const QString& path ) {
-        auto& status = entries_[ name ].status;
-        status.filePath = path;
-        ++status.files;
-        Q_EMIT changed( name );
+        guarded( "showing the next file", [ this, &name, &path ] {
+            auto& status = entries_[ name ].status;
+            status.filePath = path;
+            ++status.files;
+            Q_EMIT changed( name );
+        } );
     } );
 
     entries_[ name ].status.state = SessionState::Connecting;
@@ -166,12 +179,12 @@ void Sessions::stop( const QString& name, bool notify )
     }
 }
 
-void Sessions::stopAll()
+void Sessions::stopAll( bool notify )
 {
     // Stopped one after the other: each waits for its writer.
     const auto names = entries_.keys();
     for ( const auto& name : names ) {
-        stop( name, false );
+        stop( name, notify );
     }
 }
 

@@ -36,7 +36,7 @@
  * captures).
  *
  * Its children are named for tests: "title", "summary", "details",
- * "startStop", "edit", "remove".
+ * "startStop", "edit", "delete".
  */
 
 #pragma once
@@ -57,6 +57,7 @@ public:
     /// A tile titled @p name, stopped, without a summary or details.
     explicit ConnectionTile( const QString& name, QWidget* parent = nullptr );
 
+    /// The name of the connection it shows.
     QString name() const
     {
         return name_;
@@ -72,9 +73,13 @@ public:
     void setRunning( bool running );
 
 Q_SIGNALS:
+    /// Start was clicked, the connection being stopped.
     void startClicked();
+    /// Stop was clicked, the connection running.
     void stopClicked();
+    /// Edit… was clicked.
     void editClicked();
+    /// Delete was clicked (it cannot be while the connection runs).
     void deleteClicked();
 
 private:
@@ -83,7 +88,7 @@ private:
     QLabel* summary_;
     QLabel* details_;
     QPushButton* startStop_;
-    QPushButton* remove_;
+    QPushButton* delete_;
 };
 
 } // namespace nats_monitor

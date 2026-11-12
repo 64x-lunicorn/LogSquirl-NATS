@@ -52,7 +52,7 @@ ConnectionTile::ConnectionTile( const QString& name, QWidget* parent )
     , summary_( textLabel( "summary", this ) )
     , details_( textLabel( "details", this ) )
     , startStop_( new QPushButton( this ) )
-    , remove_( new QPushButton( QStringLiteral( "Delete" ), this ) )
+    , delete_( new QPushButton( QStringLiteral( "Delete" ), this ) )
 {
     setFrameShape( QFrame::StyledPanel );
     setObjectName( "tile" );
@@ -73,7 +73,7 @@ ConnectionTile::ConnectionTile( const QString& name, QWidget* parent )
     auto* edit = new QPushButton( QStringLiteral( "Edit…" ), this );
     edit->setObjectName( "edit" );
     edit->setToolTip( QStringLiteral( "Change the settings of this connection" ) );
-    remove_->setObjectName( "remove" );
+    delete_->setObjectName( "delete" );
 
     auto* head = new QHBoxLayout;
     head->addWidget( title, 1 );
@@ -82,7 +82,7 @@ ConnectionTile::ConnectionTile( const QString& name, QWidget* parent )
     auto* foot = new QHBoxLayout;
     foot->addStretch();
     foot->addWidget( edit );
-    foot->addWidget( remove_ );
+    foot->addWidget( delete_ );
 
     auto* layout = new QVBoxLayout( this );
     layout->setContentsMargins( 6, 6, 6, 6 );
@@ -101,7 +101,7 @@ ConnectionTile::ConnectionTile( const QString& name, QWidget* parent )
         }
     } );
     connect( edit, &QPushButton::clicked, this, &ConnectionTile::editClicked );
-    connect( remove_, &QPushButton::clicked, this, &ConnectionTile::deleteClicked );
+    connect( delete_, &QPushButton::clicked, this, &ConnectionTile::deleteClicked );
 
     setRunning( false );
 }
@@ -123,8 +123,8 @@ void ConnectionTile::setRunning( bool running )
     startStop_->setText( running ? QStringLiteral( "■ Stop" ) : QStringLiteral( "▶ Start" ) );
     startStop_->setToolTip( running ? QStringLiteral( "Stop the capture; its tab keeps the file" )
                                     : QStringLiteral( "Connect, and capture into a new tab" ) );
-    remove_->setEnabled( !running );
-    remove_->setToolTip( running ? QStringLiteral( "Stop the capture to delete the connection" )
+    delete_->setEnabled( !running );
+    delete_->setToolTip( running ? QStringLiteral( "Stop the capture to delete the connection" )
                                  : QStringLiteral( "Delete this saved connection" ) );
 }
 

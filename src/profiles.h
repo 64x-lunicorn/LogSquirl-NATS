@@ -59,6 +59,12 @@ struct ConnectionProfile {
     int maxBinaryBytes = kDefaultMaxBinaryBytes;
     PendingLimits pendingLimits = kDefaultPendingLimits;
     int maxFileMiB = kDefaultMaxFileMiB; ///< 0 for no limit.
+
+    /// The subscriptions of subjects; those before an error if a line is wrong.
+    QList<Subscription> subscriptions() const;
+
+    /// Whether the connection uses TLS: enabled, or a tls:// URL.
+    bool usesTls() const;
 };
 
 /// The profiles saved in the settings file @p settingsFile.
