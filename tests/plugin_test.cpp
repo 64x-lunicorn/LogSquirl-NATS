@@ -1417,7 +1417,7 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
                         QFileInfo( name == QStringLiteral( "orders" ) ? first : second )
                             .fileName() ) );
                     REQUIRE( tileButton( host, name, "startStop" )->text().contains( "Stop" ) );
-                    REQUIRE_FALSE( tileButton( host, name, "delete" )->isEnabled() );
+                    REQUIRE( tileButton( host, name, "delete" )->isHidden() );
                 }
                 REQUIRE( sidebarButton( host, "stopAll" )->isEnabled() );
                 {
@@ -1470,7 +1470,7 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
                     REQUIRE( tileDetails( host, "orders" ).startsWith( "stopped" ) );
                     REQUIRE(
                         tileButton( host, "orders", "startStop" )->text().contains( "Start" ) );
-                    REQUIRE( tileButton( host, "orders", "delete" )->isEnabled() );
+                    REQUIRE_FALSE( tileButton( host, "orders", "delete" )->isHidden() );
                     REQUIRE( waitFor( [ & ] {
                         return tileDetails( host, "metrics" ).startsWith( "running" );
                     } ) );

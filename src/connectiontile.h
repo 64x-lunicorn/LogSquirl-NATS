@@ -21,34 +21,54 @@
  * @file connectiontile.h
  * @brief One saved connection as a tile (card) in the sidebar.
  *
- *   ┌───────────────────────────────────────┐
- *   │ prod                       [▶ Start]  │  title, Start / Stop
- *   │ nats://a:4222 · User and password ·   │  summary: what the
- *   │ TLS · orders.>, jobs.*                │  connection is
- *   │ running · 1,234 msgs/s                │  details: what it does,
+ *   ╭───────────────────────────────────────╮
+ *   │ ● prod                     [■ Stop]   │  state dot, title, Start / Stop
+ *   │ nats://a:4222                         │  summary: what the
+ *   │ User and password · TLS on            │  connection is
+ *   │ Subjects  orders.>, jobs.*            │
+ *   │ ───────────────────────────────────── │  separator, with the details
+ *   │ running · 1,234 msgs/s                │  details (muted): what it does,
  *   │ received 5,000 · dropped 0 · …        │  while it runs or why it failed
- *   │                       [Edit] [Delete] │
- *   └───────────────────────────────────────┘
+ *   │                               [Edit…] │  Delete only while it is idle
+ *   ╰───────────────────────────────────────╯
+ *
+ * A card: a rounded 1 px frame on a background set off the sidebar's, the
+ * frame in the accent colour while the connection is active.  Its colours
+ * are taken from the palette, so a light and a dark theme both work, and
+ * follow a change of the palette.  The dot is grey (stopped), amber
+ * (connecting), green (running) or red (failed); the details say the same
+ * in words, for whoever cannot tell the colours apart.
  *
  * A plain widget that knows nothing of NATS: the sidebar (sidebarwidget.h)
- * sets its texts and acts on its signals.  The same tile is meant for the
- * other LogSquirl plugins with saved connections (Serial ports, tcpdump
- * captures).
+ * sets its texts and state and acts on its signals.  The same tile is meant
+ * for the other LogSquirl plugins with saved connections (Serial ports,
+ * tcpdump captures).
  *
- * Its children are named for tests: "title", "summary", "details",
- * "startStop", "edit", "delete".
+ * Its children are named for tests: "state" (its property "state" is
+ * stopped, connecting, running or failed), "title", "summary",
+ * "separator", "details", "startStop", "edit", "delete".
  */
 
 #pragma once
 
 #include <QFrame>
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 
+class QEvent;
 class QLabel;
 class QPushButton;
 
 namespace nats_monitor {
+
+/// What a tile's connection does.
+enum class TileState {
+    Stopped,    ///< Idle: never started, stopped, or done.
+    Connecting, ///< Started, not (yet, or again) connected.
+    Running,    ///< Connected and capturing.
+    Failed,     ///< Ended by an error.
+};
 
 class ConnectionTile : public QFrame {
     Q_OBJECT
@@ -69,8 +89,13 @@ public:
     /// What it does or did, one line each; none hides them.
     void setDetails( const QStringList& lines );
 
-    /// Whether it runs: the button stops it then, and it cannot be deleted.
-    void setRunning( bool running );
+    /// What it does.  While it connects or runs, the button stops it and
+    /// it cannot be deleted (Delete is hidden).
+    void setState( TileState state );
+
+protected:
+    void changeEvent( QEvent* event ) override;
+    bool eventFilter( QObject* watched, QEvent* event ) override;
 
 Q_SIGNALS:
     /// Start was clicked, the connection being stopped.
@@ -83,9 +108,18 @@ Q_SIGNALS:
     void deleteClicked();
 
 private:
+    /// Style the card from the palette around it, if that changed.
+    void applyStyle();
+
     QString name_;
-    bool running_ = false;
+    bool active_ = false;
+    /// The palette colours the stylesheet was made for.
+    QString styledFor_;
+    /// The parent whose palette changes it follows.
+    QPointer<QWidget> watched_;
+    QLabel* state_;
     QLabel* summary_;
+    QFrame* separator_;
     QLabel* details_;
     QPushButton* startStop_;
     QPushButton* delete_;
