@@ -49,6 +49,7 @@ set(LOGSQUIRL_NATS_SOURCES
     src/capturesink.cpp
     src/connectiondialog.cpp
     src/connectiontile.cpp
+    src/hostadapter.cpp
     src/lineformat.cpp
     src/natsoptions.cpp
     src/natssession.cpp

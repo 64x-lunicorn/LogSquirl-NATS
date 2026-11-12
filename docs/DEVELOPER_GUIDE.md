@@ -45,8 +45,8 @@ host is C), so their work runs through `guarded()` (plugin.h), which logs
 a failure to the host log instead.
 
 - **init** removes the temporary directories of LogSquirl processes that no
-  longer run, creates `Sessions` (with the temporary root its sessions
-  write below), the profile store on `nats.ini` (told by `Sessions` which
+  longer run, creates `Sessions` (with the plugin's host adapter and the
+  temporary root its sessions write below), the profile store on `nats.ini` (told by `Sessions` which
   connections run), the dialog (parentless: it must not die
   with a main window) and the sidebar tab, connects the tab's requests (new,
   edit) to the dialog, registers the menu action and the tab, and logs
@@ -209,6 +209,19 @@ It is the one owner of each connection's status, which the tile shows
 (below). That stays after the session ended, until the connection is
 started again.
 
+**The host adapter.** `Sessions` reaches LogSquirl only through the
+`HostAdapter` it is created with
+([`src/hostadapter.h`](../src/hostadapter.h)): open a file in a followed
+tab, show a notification, write to the host log. It never reads the
+plugin's global state. Init gives it the plugin's adapter, `pluginHost()`
+(plugin.h), which calls the host API (`open_file` with follow,
+`show_notification`, `log_message`) and does nothing before init or after
+shutdown; the tests give an in-memory one (below). The plugin API header
+does not change for it. `guarded()` takes the adapter it logs a failure
+to; the plugin's `guarded()` (plugin.h) is that on `pluginHost()`. The
+profile store, the dialog and the tab still log through the plugin's
+`hostLog()` and `hostNotify()`.
+
 **Transitions and the connection status.** A session reports each step of
 its life once, as a typed `Transition`
 ([`src/sessionstatus.h`](../src/sessionstatus.h)) with a detail text:
@@ -229,7 +242,8 @@ the clock it was given (a test gives its own). It says `changed()` at once
 for a transition, and after a sample when the counts or the rate moved.
 Nothing reads a state out of a text. The status is tested without a server
 or a clock (`[status]`, `sessionstatus_test.cpp`), `Sessions` with an
-injected clock (`[sessions]`, `sessions_test.cpp`), the transitions of a
+injected clock and an in-memory host (`[sessions]`, `sessions_test.cpp`),
+the transitions of a
 session in `natssession_test.cpp` and `replay_test.cpp`
 (`nats_test::Transitions` records them).
 
@@ -708,6 +722,13 @@ options of one with JetStream.
   through the sink's `FileFactory`), and the writer thread fed from two
   threads. Only the slow-consumer accounting, which comes from nats.c,
   needs the server tests.
+- **Sessions on an in-memory host** (`sessions_test.cpp`, `[sessions]`):
+  `Sessions` is given a `nats_test::MemoryHost`
+  ([`tests/memoryhost.h`](../tests/memoryhost.h)) instead of the plugin's
+  host adapter, with no plugin initialised, and the test asserts on the
+  followed tabs it opened, its notifications and its log lines (with
+  their levels). `FakeHost` stays the stand-in for the whole C host API,
+  for the tests that drive the plugin's entry points.
 - **The formatter** (`lineformat_test.cpp`): `formatLine()` is a pure
   function from a message to one line.
 - **The replay plan** (`replayplan_test.cpp`): `planReplay()` is a pure

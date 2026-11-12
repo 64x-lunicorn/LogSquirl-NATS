@@ -29,12 +29,13 @@
 
 #pragma once
 
+#include "hostadapter.h"
 #include "logsquirl_plugin_api.h"
 
 #include <QPointer>
 #include <QString>
 
-#include <exception>
+#include <utility>
 
 namespace nats_monitor {
 
@@ -84,25 +85,20 @@ QString tempRoot();
 /// The host decodes the message as UTF-8.
 void hostNotify( const QString& message );
 
+/// The plugin's host adapter (hostadapter.h), which init gives Sessions: it
+/// calls the host API through PluginState, as hostLog() and hostNotify() do,
+/// and does nothing before init or after shutdown.
+HostAdapter& pluginHost();
+
 /// Log that work for the host failed: @p what, because of @p reason.
 void logFailure( const char* what, const char* reason ) noexcept;
 
-/// Run @p work for the host, logging instead of throwing: the host is C, and
-/// an exception escaping into it (from an entry point, a host callback or a
-/// slot its event loop calls) would terminate LogSquirl.  Returns false if
-/// it threw.
+/// Run @p work for the host, logging to the plugin's host instead of
+/// throwing (guarded(), hostadapter.h).  Returns false if it threw.
 template <typename Work>
 bool guarded( const char* what, Work&& work ) noexcept
 {
-    try {
-        work();
-        return true;
-    } catch ( const std::exception& e ) {
-        logFailure( what, e.what() );
-    } catch ( ... ) {
-        logFailure( what, "unknown exception" );
-    }
-    return false;
+    return guarded( pluginHost(), what, std::forward<Work>( work ) );
 }
 
 } // namespace nats_monitor

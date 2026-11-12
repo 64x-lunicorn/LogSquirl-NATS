@@ -24,9 +24,10 @@
 
 #include "sessions.h"
 
+#include "hostadapter.h"
+#include "logsquirl_plugin_api.h"
 #include "natsoptions.h"
 #include "natssession.h"
-#include "plugin.h"
 #include "profiles.h"
 #include "replay.h"
 
@@ -42,14 +43,6 @@ namespace {
 /// How often the counts are sampled.
 constexpr int kSampleMs = 1000;
 
-/// Open @p path in a new followed tab.
-void openFollowed( const QString& path )
-{
-    if ( g_state.api && g_state.handle ) {
-        g_state.api->open_file( g_state.handle, path.toUtf8().constData(), 1 );
-    }
-}
-
 /// What a session of @p config does, for the notifications and the log: "capture of
 /// orders.>" or "replay of stream ORDERS, the last 10 messages".
 QString describeSession( const SessionConfig& config )
@@ -61,17 +54,17 @@ QString describeSession( const SessionConfig& config )
 }
 
 /// The capture of @p config reached its size limit and goes on in @p path:
-/// open it in a new followed tab, and log why.  Not notified, as in
-/// LogSquirl-Serial: a busy capture rotates often.
-void openRotatedFile( const SessionConfig& config, const QString& path )
+/// open it in a new followed tab on @p host, and log why.  Not notified, as
+/// in LogSquirl-Serial: a busy capture rotates often.
+void openRotatedFile( HostAdapter& host, const SessionConfig& config, const QString& path )
 {
-    openFollowed( path );
-    hostLog( LOGSQUIRL_LOG_INFO,
-             QStringLiteral( "NATS Monitor: the %1 reached its size limit of %2 MiB; "
-                             "it goes on in %3." )
-                 .arg( describeSession( config ) )
-                 .arg( config.maxFileBytes / kBytesPerMiB )
-                 .arg( path ) );
+    host.openFollowed( path );
+    host.log( LOGSQUIRL_LOG_INFO,
+              QStringLiteral( "NATS Monitor: the %1 reached its size limit of %2 MiB; "
+                              "it goes on in %3." )
+                  .arg( describeSession( config ) )
+                  .arg( config.maxFileBytes / kBytesPerMiB )
+                  .arg( path ) );
 }
 
 /// The steady clock, in milliseconds.
@@ -82,26 +75,27 @@ qint64 steadyMs()
         .count();
 }
 
-/// Log @p message about the session described as @p description as a
-/// warning, and show it in a host notification.
-void reportError( const QString& description, const QString& message )
+/// Log @p message about the session described as @p description to
+/// @p host as a warning, and show it in a host notification.
+void reportError( HostAdapter& host, const QString& description, const QString& message )
 {
     const auto text = QStringLiteral( "NATS Monitor (%1): %2" ).arg( description, message );
-    hostLog( LOGSQUIRL_LOG_WARNING, text );
-    hostNotify( text );
+    host.log( LOGSQUIRL_LOG_WARNING, text );
+    host.notify( text );
 }
 
 } // namespace
 
-Sessions::Sessions( const QString& tempRoot, QObject* parent, Clock clock )
+Sessions::Sessions( HostAdapter& host, const QString& tempRoot, QObject* parent, Clock clock )
     : QObject( parent )
+    , host_( host )
     , tempRoot_( tempRoot )
     , clock_( clock ? std::move( clock ) : Clock( steadyMs ) )
     , timer_( new QTimer( this ) )
 {
     // The timer runs in the host's event loop: nothing may throw into it.
     connect( timer_, &QTimer::timeout, this,
-             [ this ] { guarded( "counting the captures", [ this ] { sample(); } ); } );
+             [ this ] { guarded( host_, "counting the captures", [ this ] { sample(); } ); } );
     timer_->start( kSampleMs );
 }
 
@@ -125,9 +119,10 @@ bool Sessions::start( const ConnectionProfile& profile )
     }
     const auto config = sessionConfig( profile );
     if ( config.tls.skipVerify ) {
-        hostLog( LOGSQUIRL_LOG_WARNING,
-                 QStringLiteral( "NATS Monitor: the certificate of %1 is not verified (insecure)." )
-                     .arg( redactUrls( config.url ) ) );
+        host_.log(
+            LOGSQUIRL_LOG_WARNING,
+            QStringLiteral( "NATS Monitor: the certificate of %1 is not verified (insecure)." )
+                .arg( redactUrls( config.url ) ) );
     }
 
     const auto description = describeSession( config );
@@ -136,33 +131,37 @@ bool Sessions::start( const ConnectionProfile& profile )
     // may throw into it.
     connect( session, &NatsSession::transitioned, this,
              [ this, name, description ]( const Transition& transition ) {
-                 guarded( "showing a capture", [ this, &name, &description, &transition ] {
+                 guarded( host_, "showing a capture", [ this, &name, &description, &transition ] {
                      onTransition( name, transition );
                      if ( transition.kind == Transition::Kind::Failed ) {
-                         reportError( description, transition.detail );
+                         reportError( host_, description, transition.detail );
                      }
                      else if ( transition.kind == Transition::Kind::Completed ) {
-                         hostNotify( QStringLiteral( "NATS %1 complete." ).arg( description ) );
+                         host_.notify( QStringLiteral( "NATS %1 complete." ).arg( description ) );
                      }
                  } );
              } );
     connect( session, &NatsSession::errorOccurred, this,
              [ this, name, description ]( const QString& message ) {
-                 guarded( "reporting a capture error", [ this, &name, &description, &message ] {
-                     entries_[ name ].status.reported( message );
-                     Q_EMIT changed( name );
-                     reportError( description, message );
-                 } );
+                 guarded( host_, "reporting a capture error",
+                          [ this, &name, &description, &message ] {
+                              entries_[ name ].status.reported( message );
+                              Q_EMIT changed( name );
+                              reportError( host_, description, message );
+                          } );
              } );
     // In the session's context, not this one's: release() disconnects this
     // object, and a file the session goes on in while it stops still gets
     // its tab (the queued signal comes before the session's deleteLater()).
-    connect( session, &NatsSession::fileRotated, session, [ session ]( const QString& path ) {
-        guarded( "opening the next file",
-                 [ session, &path ] { openRotatedFile( session->config(), path ); } );
-    } );
+    // The host adapter outlives Sessions, and so its sessions.
+    connect( session, &NatsSession::fileRotated, session,
+             [ host = &host_, session ]( const QString& path ) {
+                 guarded( *host, "opening the next file", [ host, session, &path ] {
+                     openRotatedFile( *host, session->config(), path );
+                 } );
+             } );
     connect( session, &NatsSession::fileRotated, this, [ this, name ]( const QString& path ) {
-        guarded( "showing the next file", [ this, &name, &path ] {
+        guarded( host_, "showing the next file", [ this, &name, &path ] {
             entries_[ name ].status.rotated( path );
             Q_EMIT changed( name );
         } );
@@ -174,8 +173,8 @@ bool Sessions::start( const ConnectionProfile& profile )
         return false;
     }
 
-    openFollowed( session->filePath() );
-    hostNotify(
+    host_.openFollowed( session->filePath() );
+    host_.notify(
         QStringLiteral( "NATS %1 started on %2." ).arg( description, redactUrls( config.url ) ) );
     return true;
 }
@@ -190,7 +189,7 @@ void Sessions::stop( const QString& name, bool notify )
     const auto description = describeSession( session->config() );
     session->stop(); // its Stopped transition lets go of it
     if ( notify ) {
-        hostNotify( QStringLiteral( "NATS %1 stopped." ).arg( description ) );
+        host_.notify( QStringLiteral( "NATS %1 stopped." ).arg( description ) );
     }
 }
 

@@ -63,6 +63,15 @@ and the msgs/s it samples on its clock (`ConnectionStatus`, read as a
 `SessionStatus`). The tile only shows it.
 _Avoid_: Tile state (the tile's dot, mapped from it)
 
+### Host
+
+**Host adapter**:
+What Sessions needs of LogSquirl, given to it: open a file in a followed
+tab, show a notification, write to the host log (`HostAdapter`). The
+plugin's calls the plugin API; a test's records in memory what was opened,
+notified and logged, with no plugin initialised.
+_Avoid_: Host API (the C function table the plugin's adapter calls)
+
 ### Replay
 
 **Replay**:

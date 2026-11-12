@@ -88,12 +88,7 @@ QString tempRoot()
 
 void logFailure( const char* what, const char* reason ) noexcept
 {
-    try {
-        hostLog( LOGSQUIRL_LOG_ERROR, QStringLiteral( "NATS Monitor plugin: %1 failed: %2" )
-                                          .arg( what, QString::fromUtf8( reason ) ) );
-    } catch ( ... ) {
-        // Nothing left to report it with.
-    }
+    logFailure( pluginHost(), what, reason );
 }
 
 void hostNotify( const QString& message )
@@ -101,6 +96,37 @@ void hostNotify( const QString& message )
     if ( g_state.api && g_state.handle ) {
         g_state.api->show_notification( g_state.handle, message.toUtf8().constData() );
     }
+}
+
+namespace {
+
+/// The host adapter on the host API of PluginState.
+class PluginHost : public HostAdapter {
+public:
+    void openFollowed( const QString& path ) override
+    {
+        if ( g_state.api && g_state.handle ) {
+            g_state.api->open_file( g_state.handle, path.toUtf8().constData(), 1 );
+        }
+    }
+
+    void notify( const QString& message ) override
+    {
+        hostNotify( message );
+    }
+
+    void log( int level, const QString& message ) override
+    {
+        hostLog( level, message );
+    }
+};
+
+} // namespace
+
+HostAdapter& pluginHost()
+{
+    static PluginHost host; // stateless: it reads PluginState at each call
+    return host;
 }
 
 /// How long shutdown waits for nats.c's threads to end before the host may
@@ -225,7 +251,8 @@ LOGSQUIRL_PLUGIN_EXPORT int logsquirl_plugin_init( const LogSquirlHostApi* api, 
         nats_monitor::removeStaleTempDirs( nats_monitor::tempRoot() );
 
         auto& st = nats_monitor::g_state;
-        st.sessions = new nats_monitor::Sessions( nats_monitor::tempRoot() );
+        st.sessions
+            = new nats_monitor::Sessions( nats_monitor::pluginHost(), nats_monitor::tempRoot() );
         // The one owner of nats.ini; it deletes no connection that runs.
         st.profiles = new nats_monitor::ProfileStore(
             nats_monitor::settingsFile(), [ sessions = st.sessions ]( const QString& name ) {

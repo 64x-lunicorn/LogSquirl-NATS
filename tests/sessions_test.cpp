@@ -20,11 +20,13 @@
 /**
  * @file sessions_test.cpp
  * @brief BDD tests for Sessions, the one owner of each connection's status
- *        (issue #29).
+ *        (issue #29), which reaches the host through a host adapter
+ *        (issue #30).
  *
- * Sessions is driven without the host (its notifications and tabs go
- * nowhere) and with a clock of the test's, so that the rate is exact.  The
- * status is read with status(), and what changed() announced is recorded.
+ * Sessions is driven without the plugin: an in-memory host (memoryhost.h)
+ * records the tabs it opens, its notifications and its log, and a clock of
+ * the test's makes the rate exact.  The status is read with status(), and
+ * what changed() announced is recorded.
  */
 
 // First: on Windows nats.h includes winsock2.h, which must come before any
@@ -33,6 +35,7 @@
 
 #include <catch2/catch.hpp>
 
+#include "memoryhost.h"
 #include "natsserver.h"
 #include "profiles.h"
 #include "sessions.h"
@@ -48,6 +51,7 @@ using nats_monitor::ConnectionProfile;
 using nats_monitor::SessionState;
 using nats_monitor::Sessions;
 using nats_monitor::SessionStatus;
+using nats_test::MemoryHost;
 using nats_test::NatsServer;
 using nats_test::Publisher;
 using nats_test::sessionTempRoot;
@@ -104,11 +108,12 @@ SCENARIO( "Sessions keeps the state, counts and rate of each connection",
 {
     SKIP_WITHOUT_NATS_SERVER();
 
-    GIVEN( "Sessions on a clock of the test's, and a server" )
+    GIVEN( "Sessions on an in-memory host and a clock of the test's, and a server" )
     {
         NatsServer server;
+        MemoryHost host;
         auto nowMs = std::make_shared<qint64>( 10000 );
-        Sessions sessions( sessionTempRoot(), nullptr, [ nowMs ] { return *nowMs; } );
+        Sessions sessions( host, sessionTempRoot(), nullptr, [ nowMs ] { return *nowMs; } );
         Announced announced( sessions, "orders" );
 
         WHEN( "the connection orders is started" )
@@ -123,6 +128,28 @@ SCENARIO( "Sessions keeps the state, counts and rate of each connection",
                 REQUIRE_FALSE( status.filePath.isEmpty() );
                 REQUIRE( status.files == 1 );
                 REQUIRE( sessions.isRunning( "orders" ) );
+            }
+
+            THEN( "its file is opened in one followed tab, and a notification says it started" )
+            {
+                REQUIRE( host.followedTabs
+                         == QStringList{ sessions.status( "orders" ).filePath } );
+                REQUIRE( host.notifications
+                         == QStringList{ "NATS capture of orders.> started on " + server.url()
+                                         + "." } );
+            }
+
+            AND_WHEN( "it is stopped with a notification" )
+            {
+                sessions.stop( "orders" );
+
+                THEN( "a notification says it stopped, and no other tab is opened" )
+                {
+                    REQUIRE( host.notifications.size() == 2 );
+                    REQUIRE( host.notifications.last()
+                             == "NATS capture of orders.> stopped." );
+                    REQUIRE( host.followedTabs.size() == 1 );
+                }
             }
 
             AND_WHEN( "it is subscribed, and receives 5 messages within a second" )
@@ -164,13 +191,15 @@ SCENARIO( "Sessions keeps the state, counts and rate of each connection",
                     }
                 }
 
-                AND_WHEN( "it is stopped" )
+                AND_WHEN( "it is stopped without a notification" )
                 {
                     sessions.stop( "orders", false );
 
                     THEN( "it is stopped, what it captured kept, and each transition was "
                           "announced once" )
                     {
+                        REQUIRE( host.notifications.size() == 1 ); // started
+
                         const auto status = sessions.status( "orders" );
                         REQUIRE( status.state == SessionState::Stopped );
                         REQUIRE( status.detail == "stopped" );
@@ -209,6 +238,45 @@ SCENARIO( "Sessions keeps the state, counts and rate of each connection",
                 REQUIRE( announced.states()
                          == QList<SessionState>{ SessionState::Connecting,
                                                  SessionState::Failed } );
+
+                AND_THEN( "a notification says why, and the host log has it as a warning" )
+                {
+                    const auto reason = "NATS Monitor (capture of x): " + status.detail;
+                    REQUIRE( host.notifications.size() == 2 );
+                    REQUIRE( host.notifications.last() == reason );
+                    REQUIRE( host.logged( LOGSQUIRL_LOG_WARNING ) == QStringList{ reason } );
+                }
+            }
+        }
+
+        WHEN( "a connection with a size limit of 1 MiB captures more than that" )
+        {
+            auto orders = profile( "orders", server.url(), "orders.>" );
+            orders.maxFileMiB = 1;
+            REQUIRE( sessions.start( orders ) );
+            REQUIRE( waitFor(
+                [ & ] { return sessions.status( "orders" ).state == SessionState::Running; },
+                10000 ) );
+            {
+                Publisher publisher( server.url() );
+                const QByteArray payload( 64 * 1024, 'x' );
+                for ( int i = 0; i < 20; ++i ) {
+                    publisher.publish( "orders.eu", payload );
+                }
+            }
+
+            THEN( "the next file is opened in a second followed tab, and the host log says "
+                  "why" )
+            {
+                REQUIRE( waitFor( [ & ] { return host.followedTabs.size() == 2; } ) );
+                const auto status = sessions.status( "orders" );
+                REQUIRE( status.files == 2 );
+                REQUIRE( host.followedTabs.last() == status.filePath );
+                REQUIRE( host.logged( LOGSQUIRL_LOG_INFO )
+                         == QStringList{ "NATS Monitor: the capture of orders.> reached its size "
+                                         "limit of 1 MiB; it goes on in "
+                                         + status.filePath + "." } );
+                REQUIRE( host.notifications.size() == 1 ); // started, not rotated
             }
         }
     }
@@ -218,10 +286,12 @@ SCENARIO( "a connection that cannot start has failed, saying why", "[sessions]" 
 {
     GIVEN( "a connection without a subject" )
     {
-        Sessions sessions( sessionTempRoot() );
+        MemoryHost host;
+        Sessions sessions( host, sessionTempRoot() );
         Announced announced( sessions, "x" );
 
-        THEN( "it does not start, and its status says why, announced once" )
+        THEN( "it does not start, and its status says why, announced once; no tab is opened "
+              "and nothing notified" )
         {
             REQUIRE_FALSE( sessions.start( profile( "x", "nats://127.0.0.1:1", "" ) ) );
             const auto status = sessions.status( "x" );
@@ -229,6 +299,8 @@ SCENARIO( "a connection that cannot start has failed, saying why", "[sessions]" 
             REQUIRE( status.detail == "Enter the subject to capture." );
             REQUIRE_FALSE( sessions.isRunning( "x" ) );
             REQUIRE( announced.states() == QList<SessionState>{ SessionState::Failed } );
+            REQUIRE( host.followedTabs.isEmpty() );
+            REQUIRE( host.notifications.isEmpty() );
         }
     }
 
@@ -236,7 +308,8 @@ SCENARIO( "a connection that cannot start has failed, saying why", "[sessions]" 
     {
         QTemporaryDir parent;
         REQUIRE( parent.isValid() );
-        Sessions sessions( parent.filePath( "missing/root" ) );
+        MemoryHost host;
+        Sessions sessions( host, parent.filePath( "missing/root" ) );
         Announced announced( sessions, "x" );
 
         THEN( "the session refuses to start, and the status says why, announced once" )
@@ -248,6 +321,44 @@ SCENARIO( "a connection that cannot start has failed, saying why", "[sessions]" 
             REQUIRE( status.detail.startsWith( "Cannot create a temporary directory" ) );
             REQUIRE_FALSE( sessions.isRunning( "x" ) );
             REQUIRE( announced.states() == QList<SessionState>{ SessionState::Failed } );
+
+            AND_THEN( "no tab is opened, and a notification says why" )
+            {
+                REQUIRE( host.followedTabs.isEmpty() );
+                REQUIRE( host.notifications
+                         == QStringList{ "NATS Monitor (capture of x): " + status.detail } );
+            }
+        }
+    }
+}
+
+SCENARIO( "Sessions tells the host when it does not verify a server's certificate",
+          "[sessions]" )
+{
+    GIVEN( "Sessions on an in-memory host, and a connection with TLS that does not verify "
+           "the certificate" )
+    {
+        MemoryHost host;
+        Sessions sessions( host, sessionTempRoot() );
+        auto insecure = profile( "x", "nats://127.0.0.1:1", "x" );
+        insecure.tls.enabled = true;
+        insecure.tls.skipVerify = true;
+
+        WHEN( "it is started" )
+        {
+            REQUIRE( sessions.start( insecure ) );
+
+            THEN( "the host log warns of it first, and its file is opened in one followed tab" )
+            {
+                REQUIRE_FALSE( host.logs.isEmpty() );
+                REQUIRE( host.logs.first().level == LOGSQUIRL_LOG_WARNING );
+                REQUIRE( host.logs.first().message
+                         == "NATS Monitor: the certificate of nats://127.0.0.1:1 is not verified "
+                            "(insecure)." );
+                REQUIRE( host.followedTabs
+                         == QStringList{ sessions.status( "x" ).filePath } );
+            }
+            sessions.stopAll();
         }
     }
 }

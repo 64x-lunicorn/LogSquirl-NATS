@@ -37,17 +37,22 @@
  * connection is started again: the sidebar shows why it failed and what it
  * captured.
  *
- * Starting, stopping (with notify) and errors are host notifications, as
- * in the Serial plugin; stopAll() (shutdown) notifies nothing.  A session's
- * file is kept for its tab when the session ends; the plugin removes the
- * temporary files when LogSquirl quits.  Each session writes below the
- * temporary root Sessions was created with: the plugin's (tempRoot(),
- * plugin.h).
+ * Sessions reaches the host only through the host adapter it was created
+ * with (hostadapter.h): the plugin's (pluginHost(), plugin.h), or a test's
+ * in-memory one; never through the plugin's global state.  Starting,
+ * stopping (with notify) and errors are host notifications, as in the
+ * Serial plugin; stopAll() (shutdown) notifies nothing.  A rotation opens a
+ * followed tab and writes to the host log; so does a failure, and a
+ * certificate not verified (insecure).  A session's file is kept for its
+ * tab when the session ends; the plugin removes the temporary files when
+ * LogSquirl quits.  Each session writes below the temporary root Sessions
+ * was created with: the plugin's (tempRoot(), plugin.h).
  *
  * OWNERSHIP
  * ─────────
  * Created by logsquirl_plugin_init(), deleted by logsquirl_plugin_shutdown()
- * after stopAll().  The running NatsSessions are its children.
+ * after stopAll().  The running NatsSessions are its children.  The host
+ * adapter is not owned: it outlives Sessions.
  */
 
 #pragma once
@@ -64,6 +69,7 @@ class QTimer;
 
 namespace nats_monitor {
 
+class HostAdapter;
 class NatsSession;
 struct ConnectionProfile;
 
@@ -74,9 +80,11 @@ public:
     /// A monotonic clock in milliseconds, which the rate is computed on.
     using Clock = std::function<qint64()>;
 
-    /// Sessions whose temporary directories go below @p tempRoot (tempdirs.h),
-    /// computing the rate on @p clock (the steady clock if none).
-    explicit Sessions( const QString& tempRoot, QObject* parent = nullptr, Clock clock = {} );
+    /// Sessions that reach the host through @p host, whose temporary
+    /// directories go below @p tempRoot (tempdirs.h), computing the rate on
+    /// @p clock (the steady clock if none).
+    Sessions( HostAdapter& host, const QString& tempRoot, QObject* parent = nullptr,
+              Clock clock = {} );
     ~Sessions() override;
 
     /**
@@ -132,6 +140,7 @@ private:
     /// its file (if it wrote one), and delete it later.
     void release( Entry& entry );
 
+    HostAdapter& host_; ///< Not owned.
     const QString tempRoot_; ///< Given to each session it starts.
     const Clock clock_;
     QTimer* timer_;
