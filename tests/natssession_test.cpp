@@ -1226,6 +1226,9 @@ SCENARIO( "a session started again goes on in its last file, within the size lim
         NatsSession session( config, sessionTempRoot() );
         Transitions transitions( session );
         startAndWaitConnected( session, server.url(), "again" );
+        // The marker is written before its Running is delivered; stopped
+        // first, the session drops that Running, its worker gone.
+        REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Running ) == 1; }, 10000 ) );
         const auto first = session.filePath();
 
         int published = 0;
