@@ -26,13 +26,14 @@
  * The session replays (natssession.h, REPLAY); this is what the dialog,
  * the profiles, the tiles, the notifications and the session need of a
  * ReplayConfig.  All of it is pure: no nats.c, no server, no clock.  Before
- * it subscribes the session plans the replay from the stream's state
- * (planReplay()), turns the plan into nats.c's consumer options, and hands
- * each message's pending count and stored time to the plan's ReplayStep.
+ * it subscribes the replay's connection path (replaysubscription.h) plans
+ * the replay from the stream's state (planReplay()), turns the plan into
+ * nats.c's consumer options, and hands each message's pending count and
+ * stored time to the plan's ReplayStep.
  *
  * A new start position is a row in kReplayStarts, a case in describeReplay()
- * and one in planReplay(); with a new DeliverFrom, the session maps it to
- * nats.c's deliver policy too (natssession.cpp, subscribeReplay).  The
+ * and one in planReplay(); with a new DeliverFrom, the connection path maps
+ * it to nats.c's deliver policy too (ReplaySubscription::subscribe()).  The
  * streams to choose from are listed apart (streams.h): that connects.
  */
 
@@ -44,6 +45,7 @@
 #include <QString>
 
 #include <array>
+#include <limits>
 
 namespace nats_monitor {
 
@@ -71,12 +73,53 @@ inline const ReplayStartInfo& replayStartInfo( ReplayStart start )
     return kReplayStarts.front();
 }
 
+/// The largest stream sequence: a stream counts its messages in 64 bits.
+inline constexpr quint64 kMaxStreamSequence = std::numeric_limits<quint64>::max();
+
+/// The most messages a replay of the last ones can replay: a stream holds
+/// no more than it has sequences.
+inline constexpr quint64 kMaxLastMessages = kMaxStreamSequence;
+
+/// The earliest start time of a replay, in microseconds since the epoch:
+/// 1970-01-01 00:00:01 UTC.  nats.c sends the time 0 as no time at all, and
+/// the plan may round a start down to its whole second (planReplay()).
+inline constexpr qint64 kMinReplayTimeUs = 1000000;
+
+/// The latest start time of a replay, in microseconds since the epoch: the
+/// last whole second whose nanoseconds, as the consumer is given the time,
+/// a qint64 holds (2262-04-11 23:47:16 UTC).
+inline constexpr qint64 kMaxReplayTimeUs
+    = std::numeric_limits<qint64>::max() / 1000000000 * 1000000;
+
+/// Read @p text, a decimal number, as the start sequence of @p replay: the
+/// dialog's field, or nats.ini's value.  One that is not a number from 0 to
+/// kMaxStreamSequence is kept as it was (ReplayConfig::unreadSequence), for
+/// replayProblem() to refuse; an empty one is the sequence 0.
+void readStartSequence( ReplayConfig& replay, const QString& text );
+
+/// Read @p text, a decimal number of microseconds since the epoch, as the
+/// start time of @p replay, as nats.ini holds it.  One that is not a number
+/// a qint64 holds is kept as it was (ReplayConfig::unreadTime), for
+/// replayProblem() to refuse; an empty one is the time 0.
+void readStartTime( ReplayConfig& replay, const QString& text );
+
+/// Read @p text, a decimal number, as how many last messages @p replay
+/// replays: the dialog's field, or nats.ini's value.  One that is not a
+/// number from 0 to kMaxLastMessages is kept as it was
+/// (ReplayConfig::unreadLastMessages), for replayProblem() to refuse; an
+/// empty one is 0.
+void readLastMessages( ReplayConfig& replay, const QString& text );
+
 /// @p replay as the marker lines and the dialog name it: "stream ORDERS,
 /// subject orders.eu.>, the last 100 messages, then live".
 QString describeReplay( const ReplayConfig& replay );
 
 /// Why @p replay, enabled, cannot start, for the user; empty if it can: no
-/// stream, the last 0 messages, sequence 0, a filter that is not one subject.
+/// stream, a number of last messages that is 0 or cannot be read, a start
+/// sequence that is 0 or cannot be
+/// read, a start time that cannot be read or is not from kMinReplayTimeUs
+/// to kMaxReplayTimeUs, a filter that is not one subject.  Only the start
+/// the replay has is checked.
 /// What the config alone tells: the stream's own rules are the plan's
 /// (ReplayPlan::refusal).  The start check of a connection makes it
 /// (startProblem(), profiles.h).

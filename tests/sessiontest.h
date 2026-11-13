@@ -20,8 +20,8 @@
 /**
  * @file sessiontest.h
  * @brief What tests of a capture session use: its configuration, its
- *        transitions, waiting, reading the session's file, and publishing
- *        with nats.c.
+ *        transitions, waiting, reading the session's file, a file whose
+ *        writes fail, and publishing with nats.c.
  *
  * The lines read here are read into fields by the line reader, capture.h.
  */
@@ -46,6 +46,7 @@
 #include <QStringList>
 #include <QThread>
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <utility>
@@ -196,6 +197,39 @@ inline QStringList captureFiles( const QString& first )
     }
 }
 
+/// A file whose writes fail once @p failing is set: a full disk, a volume
+/// gone.  A capture sink's, or a session's, is given it to open its files.
+class FailingFile : public QFile {
+public:
+    FailingFile( const QString& path, const std::shared_ptr<std::atomic<bool>>& failing )
+        : QFile( path )
+        , failing_( failing )
+    {
+    }
+
+protected:
+    qint64 writeData( const char* data, qint64 length ) override
+    {
+        if ( failing_->load() ) {
+            setErrorString( QStringLiteral( "No space left on device" ) );
+            return -1;
+        }
+        return QFile::writeData( data, length );
+    }
+
+private:
+    std::shared_ptr<std::atomic<bool>> failing_;
+};
+
+/// Opens the files of a capture as FailingFiles, failing once @p failing
+/// is set.
+inline auto failingFiles( const std::shared_ptr<std::atomic<bool>>& failing )
+{
+    return [ failing ]( const QString& path ) -> std::unique_ptr<QFile> {
+        return std::make_unique<FailingFile>( path, failing );
+    };
+}
+
 /// The size of the file at @p path in bytes; 0 if there is none.
 inline qint64 sizeOf( const QString& path )
 {
@@ -291,6 +325,10 @@ public:
         // Unbounded, a burst overruns the server's ingest queue, which then
         // refuses messages.
         options.PublishAsync.MaxPending = 1000;
+        // With that many acks outstanding, a publish waits for one: nats.c's
+        // default of 200 ms is too short for a loaded machine, and the wait
+        // ends as soon as an ack arrives, so an idle one is as fast as before.
+        options.PublishAsync.StallWait = 60000;
         Publisher::check( natsConnection_JetStream( &js_, publisher.connection(), &options ),
                           "natsConnection_JetStream" );
     }

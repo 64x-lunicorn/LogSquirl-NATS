@@ -29,6 +29,7 @@
 #include "plugin.h"
 #include "profiles.h"
 #include "replay.h"
+#include "secrets.h"
 #include "sessions.h"
 #include "streams.h"
 #include "subjects.h"
@@ -52,6 +53,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 namespace nats_monitor {
 
@@ -108,7 +110,7 @@ ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sess
     , listStreamsButton_( new QPushButton( QStringLiteral( "List" ), this ) )
     , replayFilterEdit_( new QLineEdit( this ) )
     , replayStartCombo_( new QComboBox( this ) )
-    , replayLastSpin_( new QSpinBox( this ) )
+    , replayLastEdit_( new QLineEdit( this ) )
     , replaySequenceEdit_( new QLineEdit( this ) )
     , replayTimeEdit_( new QDateTimeEdit( this ) )
     , replayFollowCheck_(
@@ -191,7 +193,7 @@ ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sess
         static_cast<int>( kDefaultPendingLimits.bytes / kBytesPerMiB ) );
     for ( auto* spin : { pendingMessagesSpin_, pendingMegabytesSpin_ } ) {
         spin->setToolTip( QStringLiteral(
-            "How much the NATS client holds for the capture while it writes: beyond it, "
+            "How much the NATS client holds for the session while it writes: beyond it, "
             "messages are dropped as a slow consumer, and the file says how many" ) );
     }
     maxFileSpin_->setObjectName( "maxFileMiB" );
@@ -200,7 +202,7 @@ ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sess
     maxFileSpin_->setSuffix( QStringLiteral( " MiB" ) );
     maxFileSpin_->setSpecialValueText( QStringLiteral( "No limit" ) );
     maxFileSpin_->setToolTip(
-        QStringLiteral( "When a file reaches this size, the capture goes on in a new file, "
+        QStringLiteral( "When a file reaches this size, the session goes on in a new file, "
                         "opened in a new tab; a new connection proposes the last one saved" ) );
     replayCheck_->setObjectName( "replay" );
     replayCheck_->setToolTip(
@@ -222,10 +224,12 @@ ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sess
     for ( const auto& info : kReplayStarts ) {
         replayStartCombo_->addItem( QLatin1String( info.label ), static_cast<int>( info.start ) );
     }
-    replayLastSpin_->setObjectName( "replayLast" );
-    replayLastSpin_->setRange( 1, std::numeric_limits<int>::max() );
-    replayLastSpin_->setGroupSeparatorShown( true );
-    replayLastSpin_->setSuffix( QStringLiteral( " messages" ) );
+    // A field, not a spin box: it holds every number a stream may hold,
+    // and one saved that cannot be read (readLastMessages(), replay.h).
+    replayLastEdit_->setObjectName( "replayLast" );
+    replayLastEdit_->setValidator( new QRegularExpressionValidator(
+        QRegularExpression( QStringLiteral( "[1-9][0-9]{0,19}" ) ), replayLastEdit_ ) );
+    replayLastEdit_->setPlaceholderText( QStringLiteral( "Number of messages, from 1" ) );
     replaySequenceEdit_->setObjectName( "replaySequence" );
     replaySequenceEdit_->setValidator( new QRegularExpressionValidator(
         QRegularExpression( QStringLiteral( "[1-9][0-9]{0,19}" ) ), replaySequenceEdit_ ) );
@@ -234,6 +238,10 @@ ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sess
     replayTimeEdit_->setTimeZone( QTimeZone::UTC );
     replayTimeEdit_->setDisplayFormat( QStringLiteral( "yyyy-MM-dd HH:mm:ss.zzz 'UTC'" ) );
     replayTimeEdit_->setCalendarPopup( true );
+    // The times a replay can start from (replayProblem(), replay.h).
+    replayTimeEdit_->setDateTimeRange(
+        QDateTime::fromMSecsSinceEpoch( kMinReplayTimeUs / 1000, QTimeZone::UTC ),
+        QDateTime::fromMSecsSinceEpoch( kMaxReplayTimeUs / 1000, QTimeZone::UTC ) );
     replayFollowCheck_->setObjectName( "replayFollow" );
     statusLabel_->setObjectName( "status" );
     statusLabel_->setWordWrap( true );
@@ -305,7 +313,7 @@ ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sess
     streamRow->addWidget( listStreamsButton_ );
     auto* startRow = new QHBoxLayout;
     startRow->addWidget( replayStartCombo_ );
-    startRow->addWidget( replayLastSpin_, 1 );
+    startRow->addWidget( replayLastEdit_, 1 );
     startRow->addWidget( replaySequenceEdit_, 1 );
     startRow->addWidget( replayTimeEdit_, 1 );
     auto* replay = new QFormLayout;
@@ -322,7 +330,7 @@ ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sess
     replayRow( QStringLiteral( "Start at" ), startRow );
     replay->addRow( replayFollowCheck_ );
     replayWidgets_ << replayStreamCombo_ << listStreamsButton_ << replayFilterEdit_
-                   << replayStartCombo_ << replayLastSpin_ << replaySequenceEdit_ << replayTimeEdit_
+                   << replayStartCombo_ << replayLastEdit_ << replaySequenceEdit_ << replayTimeEdit_
                    << replayFollowCheck_;
     auto* replayBox = new QGroupBox( QStringLiteral( "JetStream replay" ), this );
     replayBox->setLayout( replay );
@@ -395,8 +403,9 @@ ConnectionProfile ConnectionDialog::currentProfile() const
         replay.stream = replayStreamCombo_->currentText().trimmed();
         replay.filterSubject = replayFilterEdit_->text().trimmed();
         replay.start = static_cast<ReplayStart>( replayStartCombo_->currentData().toInt() );
-        replay.lastMessages = static_cast<quint64>( replayLastSpin_->value() );
-        replay.sequence = std::max<quint64>( replaySequenceEdit_->text().toULongLong(), 1 );
+        // One it cannot read is refused with the reason (replayProblem()).
+        readLastMessages( replay, replayLastEdit_->text() );
+        readStartSequence( replay, replaySequenceEdit_->text() );
         replay.timeUs = replayTimeEdit_->dateTime().toMSecsSinceEpoch() * 1000;
         replay.followLive = replayFollowCheck_->isChecked();
     }
@@ -426,9 +435,13 @@ void ConnectionDialog::showProfile( const ConnectionProfile& profile )
     replayFilterEdit_->setText( replay.filterSubject );
     replayStartCombo_->setCurrentIndex(
         replayStartCombo_->findData( static_cast<int>( replay.start ) ) );
-    replayLastSpin_->setValue( static_cast<int>(
-        std::min<quint64>( replay.lastMessages, std::numeric_limits<int>::max() ) ) );
-    replaySequenceEdit_->setText( QString::number( replay.sequence ) );
+    // As saved, also when they cannot be read: Save then says why.
+    replayLastEdit_->setText( replay.unreadLastMessages.isEmpty()
+                                  ? QString::number( replay.lastMessages )
+                                  : replay.unreadLastMessages );
+    replaySequenceEdit_->setText( replay.unreadSequence.isEmpty()
+                                      ? QString::number( replay.sequence )
+                                      : replay.unreadSequence );
     // No time saved: an hour ago, a start that usually holds something.
     replayTimeEdit_->setDateTime(
         replay.timeUs > 0 ? QDateTime::fromMSecsSinceEpoch( replay.timeUs / 1000, QTimeZone::UTC )
@@ -497,7 +510,7 @@ void ConnectionDialog::saveProfile()
     }
     const char* secret = authMethodInfo( profile.auth.method ).secret;
     if ( sessions_ && sessions_->isRunning( profile.name ) ) {
-        statusLabel_->setText( QStringLiteral( "Connection %1 saved. Its capture runs on with "
+        statusLabel_->setText( QStringLiteral( "Connection %1 saved. Its session runs on with "
                                                "the settings it started with: stop and start it "
                                                "to use the new ones." )
                                    .arg( profile.name ) );
@@ -556,7 +569,7 @@ void ConnectionDialog::updateButtons()
     listStreamsButton_->setEnabled( replay && !listingStreams_ );
     subjectsEdit_->setEnabled( !replay );
     const auto start = static_cast<ReplayStart>( replayStartCombo_->currentData().toInt() );
-    replayLastSpin_->setVisible( start == ReplayStart::Last );
+    replayLastEdit_->setVisible( start == ReplayStart::Last );
     replaySequenceEdit_->setVisible( start == ReplayStart::Sequence );
     replayTimeEdit_->setVisible( start == ReplayStart::Time );
 }
@@ -589,7 +602,11 @@ void ConnectionDialog::listStreams()
     // destructor joins the thread (streams.h, listStreams(), says how
     // long it may take), and Qt drops the answer if the dialog is gone
     // before it is delivered.
-    listing_ = std::thread( [ this, config = sessionConfig( profile ) ] {
+    auto config = sessionConfig( profile );
+    // The listing's copy of the secret is the one left, unshared, so that
+    // the listing's wipe overwrites it (secrets.h).
+    wipe( profile.auth.secret );
+    listing_ = std::thread( [ this, config = std::move( config ) ]() mutable {
         QString error;
         const auto names = nats_monitor::listStreams( config, &error );
         QMetaObject::invokeMethod(

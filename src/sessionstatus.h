@@ -24,7 +24,8 @@
  *
  * A session (natssession.h) reports each step of its life as a typed
  * Transition: connecting, running at a server, reconnecting, failed with a
- * reason, completed, stopped.  Nobody reads a state out of its texts.
+ * reason, completed, stopping, stopped.  Nobody reads a state out of its
+ * texts.
  *
  * Sessions (sessions.h) keeps a ConnectionStatus for each connection: the
  * state the transitions lead to, the detail of the last one, the server,
@@ -48,13 +49,16 @@ struct Transition {
         Running,      ///< Connected, or connected again, and subscribed: to server.
         Reconnecting, ///< The connection broke; nats.c connects again.
         Failed,       ///< Ended on its own: it could not start, connect or subscribe,
-                      ///< or the connection was closed for good; detail says why.
+                      ///< the connection was closed for good, or its file could no
+                      ///< longer be written; detail says why.
         Completed,    ///< A replay that does not follow live has caught up and ended.
-        Stopped,      ///< stop() ended it.
+        Stopping,     ///< Asked to stop: it ends in the background.  Not in the file.
+        Stopped,      ///< The stop has ended it: its file is closed.
     };
     Kind kind = Kind::Stopped;
     /// In words, as in the file: "connecting to …", "connected to …",
-    /// "disconnected", why it failed, "replay complete", "stopped".
+    /// "disconnected", why it failed, "replay complete", "stopped"; and
+    /// "stopping…", which the file does not have.
     QString detail;
     QString server; ///< Running: the URL it is connected to (redacted).
 
@@ -69,12 +73,16 @@ enum class SessionState {
     Stopped,    ///< Never started, stopped by the user, or a replay complete.
     Connecting, ///< Started and not connected yet, or reconnecting.
     Running,    ///< Connected and subscribed.
-    Failed,     ///< Ended on its own: it could not start or connect, or was closed for good.
+    Stopping,   ///< Asked to stop, and not ended yet: it cannot be started, saved or deleted.
+    Failed,     ///< Ended on its own: it could not start, connect or write, or was closed for good.
 };
 
 /// What a connection's session does, or did last.
 struct SessionStatus {
     SessionState state = SessionState::Stopped;
+    /// It replays a stream (replay.h), else it captures subjects: as it was
+    /// started, whatever its profile was saved as since.  Sessions sets it.
+    bool replay = false;
     QString detail;   ///< The last transition, or error, in words; why it failed.
     QString server;   ///< The server it is connected to (redacted); empty while not connected.
     QString filePath; ///< The file it writes, or wrote last; empty if never started.

@@ -24,11 +24,14 @@
 
 #include "nkey.h"
 
-#include <QRegularExpression>
-#include <QString>
+#include "secrets.h"
 
+#include <QScopeGuard>
+
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 
@@ -45,11 +48,14 @@ constexpr char kBase32[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 constexpr unsigned char kPrefixSeed = 18 << 3;
 constexpr unsigned char kPrefixUser = 20 << 3;
 
-quint16 crc16( const QByteArray& data )
+constexpr int kSeedLength = 58;    ///< "SU" and 56 more base32 characters.
+constexpr int kDecodedLength = 36; ///< Two prefix bytes, the key and the CRC.
+
+quint16 crc16( const char* data, qsizetype size )
 {
     quint16 crc = 0;
-    for ( const char c : data ) {
-        crc ^= static_cast<quint16>( static_cast<unsigned char>( c ) << 8 );
+    for ( qsizetype at = 0; at < size; ++at ) {
+        crc ^= static_cast<quint16>( static_cast<unsigned char>( data[ at ] ) << 8 );
         for ( int i = 0; i < 8; ++i ) {
             crc = ( crc & 0x8000 ) ? static_cast<quint16>( ( crc << 1 ) ^ 0x1021 )
                                    : static_cast<quint16>( crc << 1 );
@@ -58,14 +64,19 @@ quint16 crc16( const QByteArray& data )
     return crc;
 }
 
+/// Decoded into a buffer reserved at once: a seed is not left behind in a
+/// buffer outgrown.
 QByteArray base32Decode( const QByteArray& text )
 {
     QByteArray out;
+    out.reserve( text.size() * 5 / 8 + 1 );
     quint32 buffer = 0;
     int bits = 0;
     for ( const char c : text ) {
         const char* at = std::strchr( kBase32, c );
         if ( !at || !c ) {
+            wipe( out );
+            OPENSSL_cleanse( &buffer, sizeof buffer );
             return {};
         }
         buffer = ( buffer << 5 ) | static_cast<quint32>( at - kBase32 );
@@ -75,6 +86,7 @@ QByteArray base32Decode( const QByteArray& text )
             out.append( static_cast<char>( ( buffer >> bits ) & 0xff ) );
         }
     }
+    OPENSSL_cleanse( &buffer, sizeof buffer );
     return out;
 }
 
@@ -97,27 +109,28 @@ QByteArray base32Encode( const QByteArray& data )
     return out;
 }
 
-/// The public key ("U…") of the user seed @p seed ("SU…"); empty if it is none.
+/// The public key ("U…") of the user seed @p seed ("SU…"); empty if it is
+/// none.  The seed decoded is wiped; OpenSSL wipes its copy in the key.
 QByteArray publicKeyOfSeed( const QByteArray& seed )
 {
-    const auto raw = base32Decode( seed );
-    if ( raw.size() != 2 + 32 + 2 ) {
+    auto raw = base32Decode( seed );
+    const auto wiped = qScopeGuard( [ &raw ] { wipe( raw ); } );
+    if ( raw.size() != kDecodedLength ) {
         return {};
     }
-    const auto body = raw.left( 34 );
+    const char* body = raw.constData(); // the prefix and the key: what the CRC is of
     const auto crc = static_cast<quint16>( static_cast<unsigned char>( raw.at( 34 ) )
                                            | static_cast<unsigned char>( raw.at( 35 ) ) << 8 );
     const auto b1 = static_cast<unsigned char>( raw.at( 0 ) );
     const auto b2 = static_cast<unsigned char>( raw.at( 1 ) );
     const auto type = static_cast<unsigned char>( ( b1 & 7 ) << 5 | ( b2 & 0xf8 ) >> 3 );
-    if ( crc16( body ) != crc || ( b1 & 0xf8 ) != kPrefixSeed || type != kPrefixUser ) {
+    if ( crc16( body, 34 ) != crc || ( b1 & 0xf8 ) != kPrefixSeed || type != kPrefixUser ) {
         return {};
     }
 
     const std::unique_ptr<EVP_PKEY, decltype( &EVP_PKEY_free )> key(
-        EVP_PKEY_new_raw_private_key(
-            EVP_PKEY_ED25519, nullptr,
-            reinterpret_cast<const unsigned char*>( body.constData() + 2 ), 32 ),
+        EVP_PKEY_new_raw_private_key( EVP_PKEY_ED25519, nullptr,
+                                      reinterpret_cast<const unsigned char*>( body + 2 ), 32 ),
         &EVP_PKEY_free );
     unsigned char publicKey[ 32 ] = {};
     size_t length = sizeof publicKey;
@@ -127,7 +140,7 @@ QByteArray publicKeyOfSeed( const QByteArray& seed )
     }
     QByteArray encoded( 1, static_cast<char>( kPrefixUser ) );
     encoded.append( reinterpret_cast<const char*>( publicKey ), sizeof publicKey );
-    const auto sum = crc16( encoded );
+    const auto sum = crc16( encoded.constData(), encoded.size() );
     encoded.append( static_cast<char>( sum & 0xff ) );
     encoded.append( static_cast<char>( sum >> 8 ) );
     return base32Encode( encoded );
@@ -137,10 +150,22 @@ QByteArray publicKeyOfSeed( const QByteArray& seed )
 
 QByteArray nkeyUserPublicKey( const QByteArray& seedFile )
 {
-    // As nats.c reads it: the first user seed in the file.
-    static const QRegularExpression seed( QStringLiteral( "SU[A-Z2-7]{56}" ) );
-    const auto match = seed.match( QString::fromLatin1( seedFile ) );
-    return match.hasMatch() ? publicKeyOfSeed( match.captured().toLatin1() ) : QByteArray();
+    // As nats.c reads it: the first user seed in the file, "SU" and 56 base32
+    // characters.  Looked for in the bytes themselves, not in a QString
+    // copy of the file left unwiped.
+    const auto isBase32
+        = []( char c ) { return ( c >= 'A' && c <= 'Z' ) || ( c >= '2' && c <= '7' ); };
+    for ( qsizetype at = 0; at + kSeedLength <= seedFile.size(); ++at ) {
+        if ( seedFile.at( at ) != 'S' || seedFile.at( at + 1 ) != 'U' ) {
+            continue;
+        }
+        const auto* const begin = seedFile.constData() + at + 2;
+        if ( std::all_of( begin, begin + kSeedLength - 2, isBase32 ) ) {
+            // No copy: the seed is read where it is in seedFile.
+            return publicKeyOfSeed( QByteArray::fromRawData( begin - 2, kSeedLength ) );
+        }
+    }
+    return {};
 }
 
 } // namespace nats_monitor

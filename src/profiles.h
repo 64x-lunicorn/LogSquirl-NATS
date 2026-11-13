@@ -57,6 +57,7 @@
 #pragma once
 
 #include "sessionconfig.h"
+#include "sessionstatus.h"
 
 #include <QList>
 #include <QObject>
@@ -125,13 +126,18 @@ class ProfileStore : public QObject {
     Q_OBJECT
 
 public:
-    /// Whether the connection @p name runs: it is not deleted then.
-    using IsRunning = std::function<bool( const QString& name )>;
+    /// What the session of the connection @p name does (Sessions::status()):
+    /// while it connects or runs, it is not deleted, and the refusal names
+    /// what it does, a replay or a capture; while it is stopping, it is
+    /// neither saved nor deleted.  The store reads only its state and
+    /// whether it replays.
+    using StatusOf = std::function<SessionStatus( const QString& name )>;
 
     /// The store of @p settingsFile, which need not exist yet; empty, the
     /// store has no profile and saves none (no host to say where).
-    /// @p isRunning tells which connections run; none if it is empty.
-    explicit ProfileStore( const QString& settingsFile, IsRunning isRunning = {},
+    /// @p statusOf tells what each connection's session does; if it is
+    /// empty, none runs.
+    explicit ProfileStore( const QString& settingsFile, StatusOf statusOf = {},
                            QObject* parent = nullptr );
 
     /// The file the store reads and writes.
@@ -150,11 +156,13 @@ public:
     /// Save @p profile under its name, replacing the profile of that name
     /// where it is in the list, or after the others, and remember its size
     /// limit for newProfile().  Never its auth.secret.  Empty if it was
-    /// saved, else why not: its saveProblem(), or the file.
+    /// saved, else why not: its saveProblem(), its session stopping, or the
+    /// file.
     QString upsert( const ConnectionProfile& profile );
 
-    /// Delete the profile named @p name, unless it runs.  Empty if it was
-    /// deleted, else why not.
+    /// Delete the profile named @p name, unless its session runs or is
+    /// stopping.  Empty if it was deleted, else why not: for one that runs,
+    /// whether it replays or captures as its session was started.
     QString remove( const QString& name );
 
 Q_SIGNALS:
@@ -167,7 +175,10 @@ private:
     bool write( const QList<ConnectionProfile>& profiles, std::optional<int> maxFileMiB );
 
     QString settingsFile_;
-    IsRunning isRunning_;
+    /// What the session of @p name does: stopped if no statusOf was given.
+    SessionStatus statusOf( const QString& name ) const;
+
+    StatusOf statusOf_;
 };
 
 } // namespace nats_monitor

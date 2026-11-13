@@ -53,8 +53,8 @@ connection event, a count of dropped messages, the end of the capture.
 **Transition**:
 A step of a session's life as the session reports it, once, typed:
 connecting, running at a server, reconnecting, failed with a reason,
-completed, stopped (`Transition`), with a detail text for the user. Nothing
-reads a state out of that text.
+completed, stopping, stopped (`Transition`), with a detail text for the
+user. Nothing reads a state out of that text.
 _Avoid_: Status change, event (the capture sink's reports)
 
 **Connection status**:
@@ -97,6 +97,12 @@ what it skips, and whether it is caught up at once (`ReplayPlan`).
 **Replay step**:
 The rule applied to each message a replay's consumer delivers: write or skip
 it, and whether the replay has caught up with it (`ReplayStep`).
+
+**Replay connection path**:
+What a replay does on the connection, beside its pure plan: read the stream
+state, subscribe the ordered consumer as the plan says, take each replayed
+message and tell when it has caught up (`ReplaySubscription`). The session
+keeps what a capture and a replay share.
 
 **Caught up**:
 A replay has written the last message its stream held: it is then complete,

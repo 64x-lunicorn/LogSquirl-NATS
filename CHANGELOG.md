@@ -41,9 +41,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where they were `nats__.log`, `nats_orders._.log` and
   `nats_billing._.log` (#23).
 - **A failed delete says why.** When a connection cannot be deleted from
-  its tile, a warning says why (it is capturing, it is no longer saved, or
-  nats.ini could not be written) instead of a notification that it could
-  not be deleted (#31).
+  its tile, a warning says why (it is capturing or replaying, as its
+  session was started even if it was saved as the other kind since; it is
+  no longer saved; or nats.ini could not be written) instead of a
+  notification that it could not be deleted (#31, #41, #50).
+- **The texts say session, capture and replay as the glossary does.** A
+  tooltip, a dialog message or a log line says *session* where it means a
+  capture or a replay, and *capture* or *replay* only for that kind: Stop
+  all stops every session, and a running replay cannot be deleted because
+  it is replaying (#41).
+
+### Fixed
+- **Stop returns at once; a tile says stopping until its session has
+  ended.** Stop and *Stop all* held LogSquirl until the connection had
+  ended, up to about half a minute against a server that does not answer,
+  and *Stop all* and unloading the plugin stopped the sessions one after the
+  other. Now the tile says *stopping…* (amber dot, the button disabled)
+  until the last lines are written and the file is closed, then *stopped*,
+  and the notification comes then; meanwhile the connection cannot be
+  started, edited or deleted. Unloading the plugin or quitting LogSquirl
+  still waits until every session has ended, but stops them all at once, so
+  it waits for the slowest, not for their sum (#37).
+- **A write error ends the session as failed, and its tile says why.**
+  When the capture's file can no longer be written (disk full, the file
+  removed, no permission), the session ends as a stop does, but failed:
+  the tile's dot turns red and its detail names the write error and the
+  file, and *received* stops growing. It went on as running before,
+  counting lines that were never written. The connection can be started
+  again once the cause is fixed (#39).
+- **The connected marker is always a capture's first line.** A message
+  delivered during the round trip that confirms the subscriptions was
+  written before the `connected to …, subscribed to …` marker; it is now
+  held back and written right after it, in its order, none lost and none
+  counted twice. Should that round trip fail, the failure is written and
+  the held messages are not (#40). A line queued before the hold and not
+  yet written (an earlier marker) stays before the `connected` marker, in
+  its order, and is not discarded with the held ones (#49).
+- **A replay start that cannot be read is refused.** A stream sequence
+  above the largest one (18446744073709551615) or left empty is not saved,
+  where it was replayed from sequence 1; a sequence or time in nats.ini that
+  is not a number, or a time before 1970-01-01 00:00:01 or after
+  2262-04-11 23:47:16 UTC, keeps the connection from starting, and its tile
+  says why (#38). Saving or deleting another connection keeps such a
+  sequence or time as it was, where it became sequence 1 or the time 0
+  (#44).
+- **A number of last messages that cannot be read is refused.** A
+  `lastMessages` in nats.ini that is not a number, is 0 or is above
+  18446744073709551615 keeps the connection from starting, and its tile
+  says why, where the last 100 messages were replayed; one not saved still
+  replays the last 100. The dialog's *Last messages* field is a text field
+  like the sequence's: it takes any number up to 18446744073709551615, where
+  it stopped at 2147483647, and shows a saved number that cannot be read as
+  it is, so Save says why (#42).
+
+### Security
+- **Secrets are wiped from memory once nats.c has them.** A password or
+  token, and an NKey seed file's contents and its decoded seed, are
+  overwritten as soon as nats.c's connection options hold what they need;
+  a running capture keeps no copy of the password or token (#36).
+- **The secret's copies on the way to a session are wiped too.** The
+  password or token asked for at Start, and the copies made of it on the
+  way to the session, are overwritten once the session has its own; the
+  one asked for to list the streams, once the listing has connected (#43).
 
 ## [0.1.0]
 

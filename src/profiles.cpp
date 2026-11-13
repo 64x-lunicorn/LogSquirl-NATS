@@ -163,15 +163,16 @@ ReplayConfig readReplay( QSettings& settings )
             replay.start = info.start;
         }
     }
-    bool ok = false;
-    if ( const auto last = settings.value( "lastMessages" ).toULongLong( &ok ); ok && last > 0 ) {
-        replay.lastMessages = last;
+    // A start that cannot be read is kept for the start check to refuse,
+    // never taken for another (replayProblem(), replay.h); one not saved
+    // keeps its default.
+    if ( settings.contains( "lastMessages" ) ) {
+        readLastMessages( replay, settings.value( "lastMessages" ).toString() );
     }
-    if ( const auto sequence = settings.value( "sequence" ).toULongLong( &ok );
-         ok && sequence > 0 ) {
-        replay.sequence = sequence;
+    if ( settings.contains( "sequence" ) ) {
+        readStartSequence( replay, settings.value( "sequence" ).toString() );
     }
-    replay.timeUs = settings.value( "timeUs", 0 ).toLongLong();
+    readStartTime( replay, settings.value( "timeUs" ).toString() );
     replay.followLive = settings.value( "followLive", false ).toBool();
     settings.endGroup();
     return replay;
@@ -183,9 +184,26 @@ void writeReplay( QSettings& settings, const ReplayConfig& replay )
     settings.setValue( "stream", replay.stream );
     settings.setValue( "filterSubject", replay.filterSubject );
     settings.setValue( "start", QString::fromLatin1( replayStartInfo( replay.start ).savedName ) );
-    settings.setValue( "lastMessages", replay.lastMessages );
-    settings.setValue( "sequence", replay.sequence );
-    settings.setValue( "timeUs", replay.timeUs );
+    // One that cannot be read stays so (readLastMessages(),
+    // readStartSequence(), readStartTime()).
+    if ( replay.unreadLastMessages.isEmpty() ) {
+        settings.setValue( "lastMessages", replay.lastMessages );
+    }
+    else {
+        settings.setValue( "lastMessages", replay.unreadLastMessages );
+    }
+    if ( replay.unreadSequence.isEmpty() ) {
+        settings.setValue( "sequence", replay.sequence );
+    }
+    else {
+        settings.setValue( "sequence", replay.unreadSequence );
+    }
+    if ( replay.unreadTime.isEmpty() ) {
+        settings.setValue( "timeUs", replay.timeUs );
+    }
+    else {
+        settings.setValue( "timeUs", replay.unreadTime );
+    }
     settings.setValue( "followLive", replay.followLive );
     settings.endGroup();
 }
@@ -287,10 +305,10 @@ SessionConfig sessionConfig( const ConnectionProfile& profile )
     return config;
 }
 
-ProfileStore::ProfileStore( const QString& settingsFile, IsRunning isRunning, QObject* parent )
+ProfileStore::ProfileStore( const QString& settingsFile, StatusOf statusOf, QObject* parent )
     : QObject( parent )
     , settingsFile_( settingsFile )
-    , isRunning_( std::move( isRunning ) )
+    , statusOf_( std::move( statusOf ) )
 {
 }
 
@@ -348,10 +366,19 @@ ConnectionProfile ProfileStore::newProfile() const
     return profile;
 }
 
+SessionStatus ProfileStore::statusOf( const QString& name ) const
+{
+    return statusOf_ ? statusOf_( name ) : SessionStatus{};
+}
+
 QString ProfileStore::upsert( const ConnectionProfile& profile )
 {
     if ( const auto problem = saveProblem( profile ); !problem.isEmpty() ) {
         return problem;
+    }
+    if ( statusOf( profile.name ).state == SessionState::Stopping ) {
+        return QStringLiteral( "The connection %1 is stopping: save it once it has stopped." )
+            .arg( profile.name );
     }
     auto profiles = list();
     const auto existing = std::find_if( profiles.begin(), profiles.end(),
@@ -372,9 +399,15 @@ QString ProfileStore::upsert( const ConnectionProfile& profile )
 
 QString ProfileStore::remove( const QString& name )
 {
-    if ( isRunning_ && isRunning_( name ) ) {
-        return QStringLiteral( "The connection %1 is capturing: stop it to delete it." )
+    const auto status = statusOf( name );
+    if ( status.state == SessionState::Stopping ) {
+        return QStringLiteral( "The connection %1 is stopping: delete it once it has stopped." )
             .arg( name );
+    }
+    if ( status.state == SessionState::Connecting || status.state == SessionState::Running ) {
+        return QStringLiteral( "The connection %1 is %2: stop it to delete it." )
+            .arg( name,
+                  status.replay ? QStringLiteral( "replaying" ) : QStringLiteral( "capturing" ) );
     }
     auto profiles = list();
     if ( profiles.removeIf( [ & ]( const auto& p ) { return p.name == name; } ) == 0 ) {

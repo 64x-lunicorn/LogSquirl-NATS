@@ -37,6 +37,54 @@ constexpr qint64 kNsPerMs = 1000000;
 
 } // namespace
 
+void readStartSequence( ReplayConfig& replay, const QString& text )
+{
+    replay.unreadSequence.clear();
+    if ( text.trimmed().isEmpty() ) {
+        replay.sequence = 0;
+        return;
+    }
+    bool ok = false;
+    const auto sequence = text.toULongLong( &ok );
+    if ( !ok || text.trimmed().startsWith( '-' ) ) {
+        replay.unreadSequence = text;
+        return;
+    }
+    replay.sequence = sequence;
+}
+
+void readStartTime( ReplayConfig& replay, const QString& text )
+{
+    replay.unreadTime.clear();
+    if ( text.trimmed().isEmpty() ) {
+        replay.timeUs = 0;
+        return;
+    }
+    bool ok = false;
+    const auto timeUs = text.toLongLong( &ok );
+    if ( !ok ) {
+        replay.unreadTime = text;
+        return;
+    }
+    replay.timeUs = timeUs;
+}
+
+void readLastMessages( ReplayConfig& replay, const QString& text )
+{
+    replay.unreadLastMessages.clear();
+    if ( text.trimmed().isEmpty() ) {
+        replay.lastMessages = 0;
+        return;
+    }
+    bool ok = false;
+    const auto count = text.toULongLong( &ok );
+    if ( !ok || text.trimmed().startsWith( '-' ) ) {
+        replay.unreadLastMessages = text;
+        return;
+    }
+    replay.lastMessages = count;
+}
+
 QString describeReplay( const ReplayConfig& replay )
 {
     QString text = QStringLiteral( "stream %1" ).arg( replay.stream );
@@ -71,11 +119,38 @@ QString replayProblem( const ReplayConfig& replay )
     if ( replay.stream.trimmed().isEmpty() ) {
         return QStringLiteral( "No stream to replay." );
     }
-    if ( replay.start == ReplayStart::Last && replay.lastMessages == 0 ) {
-        return QStringLiteral( "Replaying the last 0 messages replays nothing." );
+    if ( replay.start == ReplayStart::Last ) {
+        if ( !replay.unreadLastMessages.isEmpty() ) {
+            return QStringLiteral( "%1 is not a number of messages: it goes from 1 to %2." )
+                .arg( replay.unreadLastMessages )
+                .arg( kMaxLastMessages );
+        }
+        if ( replay.lastMessages == 0 ) {
+            return QStringLiteral( "Replaying the last 0 messages replays nothing." );
+        }
     }
-    if ( replay.start == ReplayStart::Sequence && replay.sequence == 0 ) {
-        return QStringLiteral( "A stream's sequences start at 1." );
+    if ( replay.start == ReplayStart::Sequence ) {
+        if ( !replay.unreadSequence.isEmpty() ) {
+            return QStringLiteral( "%1 is not a stream sequence: they go from 1 to %2." )
+                .arg( replay.unreadSequence )
+                .arg( kMaxStreamSequence );
+        }
+        if ( replay.sequence == 0 ) {
+            return QStringLiteral( "A stream's sequences start at 1." );
+        }
+    }
+    if ( replay.start == ReplayStart::Time ) {
+        if ( !replay.unreadTime.isEmpty() ) {
+            return QStringLiteral(
+                       "%1 is not a start time: one is a number of microseconds since 1970." )
+                .arg( replay.unreadTime );
+        }
+        // Planned as nanoseconds (planReplay()), which a later time overflows.
+        if ( replay.timeUs < kMinReplayTimeUs || replay.timeUs > kMaxReplayTimeUs ) {
+            return QStringLiteral( "The start time must be from %1 to %2." )
+                .arg( QString::fromLatin1( formatTimestamp( kMinReplayTimeUs ) ),
+                      QString::fromLatin1( formatTimestamp( kMaxReplayTimeUs ) ) );
+        }
     }
     if ( !replay.filterSubject.isEmpty() ) {
         const auto parsed = parseSubscriptions( replay.filterSubject );

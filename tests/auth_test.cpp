@@ -42,6 +42,8 @@
 
 #include <QFile>
 
+#include <memory>
+
 using nats_monitor::AuthMethod;
 using nats_monitor::NatsSession;
 using nats_monitor::SessionConfig;
@@ -268,6 +270,50 @@ SCENARIO( "a session authenticates with a token", "[server][auth]" )
             THEN( "it fails, saying the server refused the token" )
             {
                 requireError( run, "the server refused the token" );
+            }
+        }
+    }
+}
+
+SCENARIO( "a running session keeps no copy of its password, and nats.c logs in again with it",
+          "[server][auth]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session logged in as alice with the password s3cret" )
+    {
+        const QString authorization( "authorization { user: alice, password: s3cret }\n" );
+        auto server = std::make_unique<ConfiguredServer>( authorization );
+        const int port = server->port();
+        const QString url = server->url();
+        auto config = sessionConfig( url, { "auth.>" } );
+        config.auth.method = AuthMethod::UserPassword;
+        config.auth.user = "alice";
+        config.auth.secret = "s3cret";
+        Run run( config );
+        requireSubscribed( run );
+
+        THEN( "its configuration no longer holds the password" )
+        {
+            REQUIRE( run.session.config().auth.secret.isEmpty() );
+            REQUIRE( run.session.config().auth.user == "alice" );
+        }
+
+        WHEN( "the server goes away and comes back on the same port" )
+        {
+            server.reset();
+            REQUIRE( waitFor( [ & ] { return run.transitions.count( Kind::Reconnecting ) == 1; },
+                              10000 ) );
+            nats_test::NatsServerOptions options;
+            options.port = port;
+            server = std::make_unique<ConfiguredServer>( authorization, options );
+
+            THEN( "it logs in again and captures what is published" )
+            {
+                REQUIRE( waitFor( [ & ] { return run.transitions.count( Kind::Running ) == 2; },
+                                  15000 ) );
+                REQUIRE( run.captures( url, userInfo( "alice", "s3cret" ) ) );
+                REQUIRE( run.session.config().auth.secret.isEmpty() );
             }
         }
     }

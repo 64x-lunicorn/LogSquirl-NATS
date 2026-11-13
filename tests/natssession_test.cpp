@@ -38,6 +38,7 @@
 #include "natssession.h"
 #include "profiles.h"
 #include "sessiontest.h"
+#include "tcpproxy.h"
 
 #include <QDir>
 #include <QElapsedTimer>
@@ -66,6 +67,7 @@ using nats_test::sessionConfig;
 using nats_test::sessionTempRoot;
 using nats_test::settle;
 using nats_test::sizeOf;
+using nats_test::TcpProxy;
 using nats_test::Transitions;
 using nats_test::waitFor;
 using Kind = nats_monitor::Transition::Kind;
@@ -172,6 +174,93 @@ SCENARIO( "a published message shows up as a line in the session's file", "[serv
                     REQUIRE( capture.at( i + 1 ).fields()
                              == liveFields( "orders.eu.created", QString::number( i ) ) );
                 }
+            }
+        }
+    }
+}
+
+namespace {
+
+/// "@p from", … "@p to".
+QStringList numbers( int from, int to )
+{
+    QStringList list;
+    for ( int i = from; i <= to; ++i ) {
+        list << QString::number( i );
+    }
+    return list;
+}
+
+} // namespace
+
+SCENARIO( "the connected marker is the first line, also when messages arrive during the round "
+          "trip that confirms the subscriptions",
+          "[server][session]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session starting through a proxy that holds back its round trip, while messages "
+           "are published to the subscription the server already has" )
+    {
+        NatsServer server;
+        TcpProxy proxy( server.port() );
+        proxy.holdRoundTrip();
+        Publisher publisher( server.url() );
+        NatsSession session( sessionConfig( proxy.url(), { "ticks" } ), sessionTempRoot() );
+        Transitions transitions( session );
+        REQUIRE( session.start() );
+        REQUIRE( waitFor( [ & ] { return proxy.holdingRoundTrip(); }, 10000 ) );
+        // Each flushed: the server queued it to the session before it reads
+        // the session's PING, so it arrives before the answer.
+        for ( const auto& payload : numbers( 1, 100 ) ) {
+            publisher.publish( "ticks", payload.toUtf8() );
+        }
+        REQUIRE( waitFor( [ & ] { return session.receivedCount() == 100; }, 10000 ) );
+
+        WHEN( "the round trip completes, and publishing goes on" )
+        {
+            proxy.releaseRoundTrip();
+            REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Running ) == 1; }, 10000 ) );
+            for ( const auto& payload : numbers( 101, 200 ) ) {
+                publisher.publish( "ticks", payload.toUtf8() );
+            }
+            REQUIRE( waitFor(
+                [ & ] { return Capture::read( session.filePath() ).messages().size() == 200; },
+                10000 ) );
+            session.stop();
+
+            THEN( "the marker is the first line, every message after it, once, in order" )
+            {
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.first().fields()
+                         == markerFields( connectedText( proxy.url(), "ticks" ) ) );
+                REQUIRE( capture.payloadsOn( "ticks" ) == numbers( 1, 200 ) );
+                REQUIRE( capture.size() == 202 ); // the marker, 200 messages, stopped
+                REQUIRE( capture.last().fields() == markerFields( "stopped" ) );
+            }
+
+            THEN( "the counts are those of the file" )
+            {
+                REQUIRE( session.receivedCount() == 200 );
+                REQUIRE( session.droppedCount() == 0 );
+            }
+        }
+
+        WHEN( "the connection breaks during the round trip, and cannot come back" )
+        {
+            proxy.refuse();
+            proxy.cut();
+            REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Failed ) == 1; }, 20000 ) );
+
+            THEN( "the failure is written, and the held messages are not, nor counted" )
+            {
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.hasMarkerStartingWith( "subscribing to ticks failed: " ) );
+                REQUIRE_FALSE( capture.hasMarkerStartingWith( "connected to " ) );
+                REQUIRE( capture.messages().isEmpty() );
+                REQUIRE( session.receivedCount() == 0 );
+                REQUIRE( session.droppedCount() == 0 );
+                REQUIRE( transitions.count( Kind::Running ) == 0 );
             }
         }
     }
@@ -478,13 +567,15 @@ SCENARIO( "stopping a session closes the connection and keeps the file", "[serve
                 REQUIRE( Capture::read( path ).last().fields() == markerFields( "stopped" ) );
             }
 
-            THEN( "it reported each step once: connecting, running at the server, stopped" )
+            THEN( "it reported each step once: connecting, running at the server, stopping, "
+                  "stopped" )
             {
                 settle( 100 ); // nothing more comes
                 REQUIRE( transitions.all()
                          == QList<Transition>{
                              { Kind::Connecting, "connecting to " + server.url() + "…", {} },
                              { Kind::Running, "connected to " + server.url(), server.url() },
+                             { Kind::Stopping, "stopping…", {} },
                              { Kind::Stopped, "stopped", {} } } );
             }
 
@@ -531,6 +622,91 @@ SCENARIO( "stopping a session closes the connection and keeps the file", "[serve
                 {
                     REQUIRE_FALSE( QFileInfo::exists( QFileInfo( path ).path() ) );
                 }
+            }
+        }
+    }
+}
+
+SCENARIO( "a stop returns at once, even while connecting to a server that never answers",
+          "[session][stop]" )
+{
+    GIVEN( "a session connecting to a server that never answers" )
+    {
+        TcpProxy proxy( 0 );
+        proxy.stopAnswering();
+        auto session = std::make_unique<NatsSession>( sessionConfig( proxy.url(), { "x" } ),
+                                                      sessionTempRoot() );
+        Transitions transitions( *session );
+        REQUIRE( session->start() );
+        const auto path = session->filePath();
+        // In nats.c's connect, which waits up to its timeout of 2 s.
+        REQUIRE( waitFor( [ & ] { return proxy.accepted() == 1; } ) );
+
+        WHEN( "it is asked to stop" )
+        {
+            QElapsedTimer timer;
+            timer.start();
+            session->requestStop();
+            const auto stopMs = timer.elapsed();
+
+            THEN( "it returns at once, the session stopping" )
+            {
+                REQUIRE( stopMs < 1000 );
+                REQUIRE( session->isStopping() );
+                REQUIRE( session->isRunning() );
+                REQUIRE( transitions.all()
+                         == QList<Transition>{
+                             { Kind::Connecting, "connecting to " + proxy.url() + "…", {} },
+                             { Kind::Stopping, "stopping…", {} } } );
+            }
+
+            THEN( "once the connect has timed out it has stopped, its file ending with the "
+                  "stopped marker" )
+            {
+                REQUIRE(
+                    waitFor( [ & ] { return transitions.count( Kind::Stopped ) == 1; }, 10000 ) );
+                REQUIRE( transitions.kinds()
+                         == QList<Kind>{ Kind::Connecting, Kind::Stopping, Kind::Stopped } );
+                REQUIRE_FALSE( session->isRunning() );
+                REQUIRE_FALSE( session->isStopping() );
+                REQUIRE( Capture::read( path ).last().fields() == markerFields( "stopped" ) );
+            }
+
+            THEN( "it cannot be started, nor asked to stop, again until it has stopped" )
+            {
+                REQUIRE_FALSE( session->start() );
+                session->requestStop();
+                REQUIRE( transitions.kinds() == QList<Kind>{ Kind::Connecting, Kind::Stopping } );
+                REQUIRE(
+                    waitFor( [ & ] { return transitions.count( Kind::Stopped ) == 1; }, 10000 ) );
+                REQUIRE( session->start() );
+                REQUIRE( transitions.count( Kind::Connecting ) == 2 );
+                session->stop();
+            }
+
+            AND_WHEN( "it is destroyed while stopping" )
+            {
+                session.reset();
+
+                THEN( "it waited until the session had ended, and its directory is removed" )
+                {
+                    REQUIRE_FALSE( QFileInfo::exists( QFileInfo( path ).path() ) );
+                }
+            }
+        }
+
+        WHEN( "it is stopped and waited for" )
+        {
+            session->stop();
+
+            THEN( "it has ended once stop() returns: stopping, then stopped, its file closed" )
+            {
+                REQUIRE( transitions.kinds()
+                         == QList<Kind>{ Kind::Connecting, Kind::Stopping, Kind::Stopped } );
+                REQUIRE_FALSE( session->isRunning() );
+                REQUIRE( Capture::read( path ).last().fields() == markerFields( "stopped" ) );
+                settle( 100 ); // the thread's own report of its end comes to nothing
+                REQUIRE( transitions.count( Kind::Stopped ) == 1 );
             }
         }
     }
@@ -1137,6 +1313,9 @@ SCENARIO( "a session started again goes on in its last file, within the size lim
         NatsSession session( config, sessionTempRoot() );
         Transitions transitions( session );
         startAndWaitConnected( session, server.url(), "again" );
+        // The marker is written before its Running is delivered; stopped
+        // first, the session drops that Running, its worker gone.
+        REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Running ) == 1; }, 10000 ) );
         const auto first = session.filePath();
 
         int published = 0;
@@ -1233,6 +1412,77 @@ SCENARIO( "a rotation that fails is reported by the session, which goes on in th
                 REQUIRE( captureFiles( first ) == QStringList{ first } );
                 REQUIRE( sizeOf( first ) > 1000 );
                 REQUIRE( Capture::read( first ).payloadsOn( "rf" ).size() == 12 );
+            }
+        }
+    }
+}
+
+SCENARIO( "a write error ends the session as failed, saying why", "[server][session]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a running session whose file can be written until the disk is full" )
+    {
+        NatsServer server;
+        Publisher publisher( server.url() );
+        auto failing = std::make_shared<std::atomic<bool>>( false );
+        NatsSession session( sessionConfig( server.url(), { "wf" } ), sessionTempRoot(), nullptr,
+                             nats_test::failingFiles( failing ) );
+        Transitions transitions( session );
+        QStringList errors;
+        QObject::connect( &session, &NatsSession::errorOccurred,
+                          [ & ]( const QString& message ) { errors << message; } );
+        startAndWaitConnected( session, server.url(), "wf" );
+        publisher.publish( "wf", "m1" );
+        REQUIRE( waitFor( [ & ] {
+            return Capture::read( session.filePath() ).payloadsOn( "wf" ) == QStringList{ "m1" };
+        } ) );
+
+        WHEN( "the disk is full when the next message is written" )
+        {
+            failing->store( true );
+            publisher.publish( "wf", "m2" );
+            REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Failed ) == 1; }, 10000 ) );
+
+            THEN( "the session ends as failed, naming the error and the file" )
+            {
+                REQUIRE_FALSE( session.isRunning() );
+                const auto failed = transitions.all().last();
+                REQUIRE( failed.kind == Kind::Failed );
+                REQUIRE( failed.detail.startsWith( "Cannot write to " + session.filePath() ) );
+                REQUIRE( failed.detail.contains( "No space left on device" ) );
+                REQUIRE( errors.isEmpty() ); // the transition says it, once
+            }
+
+            THEN( "received no longer grows" )
+            {
+                const auto received = session.receivedCount();
+                REQUIRE( received == 2 );
+                publisher.publish( "wf", "m3" );
+                settle( 200 );
+                REQUIRE( session.receivedCount() == received );
+            }
+
+            AND_WHEN( "the cause is fixed and the session is started again" )
+            {
+                failing->store( false );
+                REQUIRE( session.start() );
+
+                THEN( "it runs again, and captures" )
+                {
+                    // The first start's "connected" marker is in the file
+                    // already: the second Running is this start's.
+                    REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Running ) == 2; },
+                                      10000 ) );
+                    publisher.publish( "wf", "m4" );
+                    REQUIRE( waitFor( [ & ] {
+                        return Capture::read( session.filePath() )
+                            .payloadsOn( "wf" )
+                            .contains( "m4" );
+                    } ) );
+                    REQUIRE( session.isRunning() );
+                    REQUIRE( transitions.last( Kind::Running ).server == server.url() );
+                }
             }
         }
     }

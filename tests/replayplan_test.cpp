@@ -33,14 +33,23 @@
 
 #include "replay.h"
 
+#include <limits>
 #include <vector>
 
 using nats_monitor::caughtUpOnSubscribing;
 using nats_monitor::DeliverFrom;
 using nats_monitor::describeReplay;
+using nats_monitor::kMaxLastMessages;
+using nats_monitor::kMaxReplayTimeUs;
+using nats_monitor::kMaxStreamSequence;
+using nats_monitor::kMinReplayTimeUs;
 using nats_monitor::planReplay;
+using nats_monitor::readLastMessages;
+using nats_monitor::readStartSequence;
+using nats_monitor::readStartTime;
 using nats_monitor::ReplayConfig;
 using nats_monitor::ReplayPlan;
+using nats_monitor::replayProblem;
 using nats_monitor::replaySaveProblem;
 using nats_monitor::ReplaySkip;
 using nats_monitor::ReplayStart;
@@ -342,6 +351,147 @@ SCENARIO( "a replay is named by its stream, subject, start and what follows", "[
         DYNAMIC_SECTION( row.what )
         {
             REQUIRE( describeReplay( row.config ) == QString::fromUtf8( row.name ) );
+        }
+    }
+}
+
+SCENARIO( "a replay's start is read from its text, or kept as it was for the check",
+          "[replay][checks]" )
+{
+    struct Row {
+        const char* text;
+        quint64 sequence; ///< When read.
+        const char* unread;
+    };
+    const std::vector<Row> sequences{
+        { "1", 1, "" },
+        { "42", 42, "" },
+        { "18446744073709551615", kMaxStreamSequence, "" },
+        { "0", 0, "" },
+        { "", 0, "" },
+        { "18446744073709551616", 1, "18446744073709551616" },
+        { "99999999999999999999", 1, "99999999999999999999" },
+        { "-1", 1, "-1" },
+        { "seven", 1, "seven" },
+    };
+    for ( const auto& row : sequences ) {
+        DYNAMIC_SECTION( "the sequence \"" << row.text << "\"" )
+        {
+            auto config = fromSequence( 1 );
+            readStartSequence( config, QString::fromUtf8( row.text ) );
+            REQUIRE( config.unreadSequence == QString::fromUtf8( row.unread ) );
+            REQUIRE( config.sequence == row.sequence );
+        }
+    }
+
+    struct TimeRow {
+        const char* text;
+        qint64 timeUs; ///< When read.
+        const char* unread;
+    };
+    const std::vector<TimeRow> times{
+        { "1794391200000000", kSecondUs, "" },
+        { "-5", -5, "" },
+        { "9223372036854775807", std::numeric_limits<qint64>::max(), "" },
+        { "", 0, "" },
+        { "9223372036854775808", kSecondUs, "9223372036854775808" },
+        { "yesterday", kSecondUs, "yesterday" },
+    };
+    for ( const auto& row : times ) {
+        DYNAMIC_SECTION( "the time \"" << row.text << "\"" )
+        {
+            auto config = fromTime( kSecondUs );
+            readStartTime( config, QString::fromUtf8( row.text ) );
+            REQUIRE( config.unreadTime == QString::fromUtf8( row.unread ) );
+            REQUIRE( config.timeUs == row.timeUs );
+        }
+    }
+
+    struct CountRow {
+        const char* text;
+        quint64 lastMessages; ///< When read.
+        const char* unread;
+    };
+    const std::vector<CountRow> counts{
+        { "1", 1, "" },
+        { "250", 250, "" },
+        { "18446744073709551615", kMaxLastMessages, "" },
+        { "0", 0, "" },
+        { "", 0, "" },
+        { "18446744073709551616", 7, "18446744073709551616" },
+        { "-1", 7, "-1" },
+        { "abc", 7, "abc" },
+    };
+    for ( const auto& row : counts ) {
+        DYNAMIC_SECTION( "the last messages \"" << row.text << "\"" )
+        {
+            auto config = last( 7 );
+            readLastMessages( config, QString::fromUtf8( row.text ) );
+            REQUIRE( config.unreadLastMessages == QString::fromUtf8( row.unread ) );
+            REQUIRE( config.lastMessages == row.lastMessages );
+        }
+    }
+}
+
+SCENARIO( "a replay's start that cannot be read, or is out of range, is refused",
+          "[replay][checks]" )
+{
+    const QString timeRange = "The start time must be from 1970-01-01 00:00:01.000000Z to "
+                              "2262-04-11 23:47:16.000000Z.";
+    auto unreadSequence = fromSequence( 1 );
+    unreadSequence.unreadSequence = "18446744073709551616";
+    auto unreadTime = fromTime( kSecondUs );
+    unreadTime.unreadTime = "yesterday";
+    // An unread start of another kind than the replay's is not used.
+    auto lastWithUnread = last( 3 );
+    lastWithUnread.unreadSequence = "seven";
+    lastWithUnread.unreadTime = "yesterday";
+    auto timeWithUnreadSequence = fromTime( kSecondUs );
+    timeWithUnreadSequence.unreadSequence = "seven";
+    auto unreadLast = last( 100 );
+    unreadLast.unreadLastMessages = "abc";
+    auto sequenceWithUnreadLast = fromSequence( 1 );
+    sequenceWithUnreadLast.unreadLastMessages = "abc";
+
+    struct Row {
+        const char* what;
+        ReplayConfig config;
+        QString problem; ///< Empty: none.
+    };
+    const std::vector<Row> rows{
+        { "sequence 1", fromSequence( 1 ), {} },
+        { "the largest sequence", fromSequence( kMaxStreamSequence ), {} },
+        { "sequence 0", fromSequence( 0 ), "A stream's sequences start at 1." },
+        { "one above the largest sequence", unreadSequence,
+          "18446744073709551616 is not a stream sequence: they go from 1 to "
+          "18446744073709551615." },
+        { "the earliest time", fromTime( kMinReplayTimeUs ), {} },
+        { "the latest time", fromTime( kMaxReplayTimeUs ), {} },
+        { "a time", fromTime( kSecondUs ), {} },
+        { "one microsecond before the earliest", fromTime( kMinReplayTimeUs - 1 ), timeRange },
+        { "the time 0", fromTime( 0 ), timeRange },
+        { "a negative time", fromTime( -kSecondUs ), timeRange },
+        { "one microsecond after the latest", fromTime( kMaxReplayTimeUs + 1 ), timeRange },
+        { "a time whose nanoseconds overflow", fromTime( std::numeric_limits<qint64>::max() ),
+          timeRange },
+        { "a time that is not a number", unreadTime,
+          "yesterday is not a start time: one is a number of microseconds since 1970." },
+        { "the last 3, with a sequence and a time that cannot be read", lastWithUnread, {} },
+        { "a time, with a sequence that cannot be read", timeWithUnreadSequence, {} },
+        { "the last message", last( 1 ), {} },
+        { "the most last messages", last( kMaxLastMessages ), {} },
+        { "the last 0 messages", last( 0 ), "Replaying the last 0 messages replays nothing." },
+        { "a number of last messages that cannot be read", unreadLast,
+          "abc is not a number of messages: it goes from 1 to 18446744073709551615." },
+        { "a sequence, with a number of last messages that cannot be read",
+          sequenceWithUnreadLast,
+          {} },
+    };
+    for ( const auto& row : rows ) {
+        DYNAMIC_SECTION( row.what )
+        {
+            REQUIRE( replayProblem( row.config ) == row.problem );
+            REQUIRE( planReplay( row.config, stream( 1, 10 ) ).refusal == row.problem );
         }
     }
 }

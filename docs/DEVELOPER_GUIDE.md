@@ -24,6 +24,7 @@ plugin.cpp            entry points (logsquirl_plugin_*), each through guarded()
        └─ NatsSession × N   children of Sessions: the nats.c adapter
             ├─ connection thread  connects, subscribes, waits; drains and closes
             ├─ nats.c threads     callbacks: format a line, hand it to the sink
+            ├─ ReplaySubscription a replay's connection path: stream info, ordered consumer (replaysubscription.h)
             └─ CaptureSink        everything between a message and the file (capturesink.h)
                  ├─ queue           bounded, mutex + condition variables; drops, or waits (replay)
                  └─ writer thread   writes in batches, rotates, ends the capture
@@ -46,8 +47,8 @@ a failure to the host log instead.
 
 - **init** removes the temporary directories of LogSquirl processes that no
   longer run, creates `Sessions` (with the plugin's host adapter and the
-  temporary root its sessions write below), the profile store on `nats.ini` (told by `Sessions` which
-  connections run), the dialog (parentless: it must not die
+  temporary root its sessions write below), the profile store on `nats.ini` (told by `Sessions` where
+  each connection's session is), the dialog (parentless: it must not die
   with a main window) and the sidebar tab, connects the tab's requests (new,
   edit) to the dialog, registers the menu action and the tab, and logs
   which nats.c and OpenSSL it carries. The dialog and the tab follow the
@@ -55,8 +56,10 @@ a failure to the host log instead.
 - **shutdown** unregisters and deletes the sidebar tab (before the sessions
   it shows; `PluginState` holds it in a `QPointer`, since the host parents
   it and a host window deleted first takes it along), deletes the dialog
-  and then the profile store, stops every session (`Sessions::stopAll()`: files flushed and kept for
-  the tabs) and deletes `Sessions`. Only when LogSquirl quits
+  and then the profile store, stops every session and waits until each has
+  ended (`Sessions::stopAllAndWait()`: files flushed and kept for the tabs;
+  all asked at once, so it waits for the slowest stop, not their sum, at
+  most the longest stop below) and deletes `Sessions`. Only when LogSquirl quits
   (it saw `aboutToQuit`), not when the plugin is disabled or updated with
   its tabs still open, does it remove this process's temporary directories.
   Last, `nats_CloseAndWait()` (5 s) waits for nats.c's threads, which run
@@ -104,6 +107,21 @@ message queued is preceded by its `dropped=<n> (queue full)` marker; a
 replay's (`Mode::WaitForRoom`) makes the callback wait until the writer has
 taken the queue. Marker lines (connection events, drops) are always queued.
 
+**The connected marker first.** A live capture's subscriptions deliver as
+soon as the server has them, before the round trip
+(`natsConnection_Flush`) that confirms them and after which the session
+writes `connected to …, subscribed to …`. So the session has the sink hold
+back what it takes from subscribing on (`CaptureSink::holdMessages()`):
+counted and dropped as ever, written by none. Confirmed, the marker goes
+before all of it (`releaseHeld()`); the round trip failed, the held
+messages and those nats.c still delivers are discarded uncounted
+(`discardHeld()`), and the failure is written. Only what was queued since
+the hold is held: the sink remembers where its queue stood, so a line
+queued before and not yet written stays before the marker, and is not
+discarded. A replay needs none of
+this: it writes its `connected to …, replaying …` marker before it
+subscribes.
+
 Before that, nats.c holds up to each subscription's pending limits
 (`SessionConfig::pendingLimits`, 1,000,000 messages and 512 MiB by default,
 set with `natsSubscription_SetPendingLimits`) and drops beyond them as a
@@ -120,21 +138,48 @@ The sink's writer waits on its condition variable until lines are queued
 or the sink is finished. It then swaps the whole queue out, so it never
 holds the mutex while writing, writes the batch and flushes once:
 LogSquirl, following the file, sees whole lines. Before each line it checks
-the size limit (below). A write or flush that fails (disk full, volume
-gone) is reported once (`Event::FileError`), on the tile and as a
-notification, and later lines are not written.
+the size limit (below). A write or flush that fails (disk full, the file
+removed, no permission) is reported once (`Event::WriteFailed`) and ends
+the writing: later lines are not written, and from then on the sink
+discards every message, uncounted, as a stopped replay's does, so
+*received* does not grow for lines that are never written. The session
+ends on it as a stop does (the subscriptions go), but as *failed*, its
+detail the write error with the file's name (`Cannot write to <file>:
+<why>`): the tile's dot turns red, a notification says why, and the
+connection can be started again once the cause is fixed.
 
-**Stopping.** `stop()` asks the connection thread to end and waits for it.
-That thread lifts the pending limits, so nats.c drops nothing more, and
-marks the last dropped counts. It drains each subscription
-(`natsSubscription_DrainTimeout`, at most 15 s; not connected, it waits up
-to 5 s until nats.c holds nothing for them), the sink writing all the
-while, closes the connection, waits for nats.c's last callback and
-finishes the sink (`CaptureSink::finish()`): the queue-full drops not
-marked yet, what is left, the `stopped` marker, the file closed and the
-writer joined. Nothing that reached the session before `stop()` is lost
-uncounted. A connection closed for good ends the same way with
-`connection closed`, a complete replay with `replay complete`.
+**Stopping.** `requestStop()` asks the connection thread to end and
+returns at once, with the transition *Stopping*; Stop and *Stop all* in
+the tab go this way, so LogSquirl is never held up by a session that
+stops. The thread sees the request once what nats.c is in the middle of
+returns: a connect, the round trip after subscribing or a replay's
+JetStream requests, none of which nats.c can interrupt. It then lifts the
+pending limits, so nats.c drops nothing more, and marks the last dropped
+counts. It drains each subscription (`natsSubscription_DrainTimeout`,
+waited for up to `kDrainTimeout`, 15 s; nats.c itself gives up after its
+round trip's 10 s; not connected, it waits up to `kCallbackTimeout`, 5 s,
+until nats.c holds nothing for them), the sink writing all the while,
+closes the connection, waits up to `kCallbackTimeout`, 5 s, for nats.c's
+last callback and finishes the sink (`CaptureSink::finish()`): the
+queue-full drops not marked yet, what is left, the `stopped` marker, the
+file closed and the writer joined. Then it posts its end to the GUI
+thread, where the session joins it (at once by then) and emits *Stopped*.
+Nothing that reached the session before the stop is lost uncounted. A
+connection closed for good ends the same way with `connection closed`, a
+complete replay with `replay complete`, a write error with the write
+error.
+
+The longest stop, with a server that does not answer: what is left of the
+start (nats.c's connect timeout, 2 s for each server of the URL list; then
+a capture's round trip, 10 s, or a replay's three JetStream requests, 5 s
+each), the drain (15 s at most) and the close (5 s): 2 s for each server
+and 30 s for a capture, 35 s for a replay (`natssession.h`, STOPPING).
+Then the writer writes what was still queued, which no timeout bounds: it
+takes what the queue and the disk take. `stop()` does the same as
+`requestStop()` and waits for it; the destructor too, since nats.c's
+callbacks use what the session frees and its threads run the library's
+code. A session is therefore never destroyed while its threads run:
+`Sessions` lets go of one only once it has ended, and shutdown waits.
 
 **Temporary files.** Each session writes into its own directory
 `logsquirl-nats-<pid>-XXXXXX` ([`src/tempdirs.h`](../src/tempdirs.h)),
@@ -231,12 +276,15 @@ its life once, as a typed `Transition`
 `Event::Reconnected`), *Reconnecting* (`Event::Disconnected`), and the end,
 which the connection thread decides: *Failed* with why it could not start,
 connect or subscribe, or `connection closed`; *Completed* for a replay
-that caught up; *Stopped* from `stop()`. A transition the sink reported
-after `stop()` is dropped, so *Stopped* is the last. `errorOccurred()` is
+that caught up; *Stopped* once a stop has ended it. *Stopping*, the one
+transition with no marker in the file, comes from `requestStop()` at once;
+a transition the sink reported after it is dropped, so only the end
+follows *Stopping*: *Stopped*, or what the thread had decided before it saw
+the stop, as the file's last marker says. `errorOccurred()` is
 only for an error the session runs on after (nats.c's, a file's); an error
 that ends it is the *Failed* transition, so each event is one signal.
 `Sessions` applies the transitions to a `ConnectionStatus` per connection:
-the `SessionState` (connecting, running, failed, stopped), the detail, the
+the `SessionState` (connecting, running, stopping, failed, stopped), the detail, the
 server, the file and how many files it rotated into, and the counts and
 msgs/s it samples from the session once a second (`Sessions::sample()`) on
 the clock it was given (a test gives its own). It says `changed()` at once
@@ -268,6 +316,19 @@ with flow control and heartbeats, which nats.c recreates from the last
 stream sequence after a gap or a reconnect. The filter subject is the
 `ReplayConfig::filterSubject`, or `>` for all of the stream's.
 
+The replay's nats.c side is a module of its own, `ReplaySubscription`
+([`src/replaysubscription.h`](../src/replaysubscription.h)): it reads the
+stream's info, plans, subscribes the ordered consumer, takes each
+replayed message and tells when the replay has caught up. The session
+gives it the connection and owns what a capture and a replay share: the
+subscription once made (its completion callback and pending limits, set
+in one place, `Shared::setUp`; its drain and end), the drops and the
+sink. The replay reaches them through its `Outlet` (in natssession.cpp,
+`Shared`): the subscription to set up, a replayed `Message` to write, a
+status marker, whether the session is discarding, and that the replay is
+complete. `toMessage()` ([`src/natsmessage.h`](../src/natsmessage.h)) makes
+the formatter's `Message` of a nats.c message for both.
+
 - **The plan.** Before subscribing, the connection thread reads the stream's state
   (`js_GetStreamInfo`: retention, first and last sequence, message count,
   as a `StreamState`) and plans the replay: `planReplay()` (replay.h) makes
@@ -275,12 +336,13 @@ stream sequence after a gap or a reconnect. The filter subject is the
   refused or warned of, where the consumer starts (`DeliverFrom` and a
   start sequence or time), what the step skips (`ReplaySkip`), whether
   there is nothing to replay (caught up at once), and whether it follows
-  live. The plan is pure; `subscribeReplay` (natssession.cpp) only turns it
+  live. The plan is pure; `ReplaySubscription::subscribe()` only turns it
   into `jsSubOptions` and hands each message's `NumPending` and stored time
   to the plan's `ReplayStep`, which says whether to write the message and
   whether the replay has caught up. A new start position is a row in
   `kReplayStarts`, a case in `describeReplay()` and one in `planReplay()`;
-  only a new `DeliverFrom` needs the session too, to map it to nats.c.
+  only a new `DeliverFrom` needs the connection path too, to map it to
+  nats.c.
 - **Start.** *All*: `js_DeliverAll`. *Sequence*: `js_DeliverByStartSequence`
   with `OptStartSeq`. *Time*: `js_DeliverByStartTime` with `OptStartTime`
   (nanoseconds). nats.c (3.14) writes that time's fraction of a second
@@ -294,7 +356,7 @@ stream sequence after a gap or a reconnect. The filter subject is the
   *Last N* with a filter: which messages match is the server's to know, so
   it delivers all and the step skips while the message's `NumPending`
   (metadata) is N or more, until the first one written.
-- **The line.** `onReplayMessage` reads `natsMsg_GetMetaData`: the stored
+- **The line.** `ReplaySubscription::onMessage` reads `natsMsg_GetMetaData`: the stored
   time (`Timestamp`) and the stream sequence go into `Message`, and the
   reply is cleared (nats.c's is the consumer's; the stream keeps none).
 - **Caught up.** A message with `NumPending` 0 is the last one there was:
@@ -332,7 +394,7 @@ stream sequence after a gap or a reconnect. The filter subject is the
   neither counted nor marked as dropped, since the user stopped it; what
   was written until then is in order, followed by `stopped`. A test stops
   a replay through a queue of one, whose backlog in nats.c is largest.
-  Unload and quit stop the same way (`Sessions::stopAll()`). A lost
+  Unload and quit stop the same way (`Sessions::stopAllAndWait()`). A lost
   connection keeps the consumer, so the replay resumes on reconnect; a
   Stop while disconnected leaves it to the inactive threshold (PLAN.md,
   Decisions).
@@ -392,7 +454,7 @@ tile.
   plain `QFrame` that knows nothing of NATS: a state dot, a title, a
   summary, details, Start / Stop, Edit and Delete, with a signal for each
   button. The tab sets its texts and its `TileState` (stopped, connecting,
-  running, failed). It is meant for Serial and tcpdump too.
+  running, stopping, failed). It is meant for Serial and tcpdump too.
 - **A card**: a rounded 1 px frame on a background set off the sidebar's,
   the frame in the accent colour (`QPalette::Highlight`) while the
   connection connects or runs. The colours are mixed from the palette's
@@ -408,17 +470,28 @@ tile.
   `TileState` for each `SessionState`, and while running, `running · <n>
   msgs/s` (the status's rate over the last second), `received · dropped`,
   the file's name, size and number after a rotation, and `connected to
-  <server>`; while connecting, the last event; after a failure, `failed:
-  <why>`; after Stop, what it captured. It computes no rate of its own.
+  <server>`; while connecting, the last event; while stopping, `stopping…`
+  and the counts; after a failure, `failed: <why>`; after Stop, what it
+  captured. It computes no rate of its own.
+- **Stop** returns at once (`Sessions::stop()`, `NatsSession::requestStop()`):
+  the tile is *stopping* (amber dot, the button reads *Stopping…* and is
+  disabled, as is *Edit…*, Delete hidden) until the session has ended,
+  then *stopped*, and the notification says so then. While a connection
+  is stopping, `Sessions::start()` refuses it and the profile store
+  neither saves nor deletes it (it is told each connection's
+  `SessionState`), so the dialog cannot either. *Stop all* asks every
+  session at once and is disabled while none is left to stop.
 - **Start** finds the profile in the store and, when its method takes a
   password or token, asks for it (`QInputDialog`, password echo); it is
   never saved, and an empty answer starts nothing. **Delete** asks
   (`QMessageBox`), then deletes through the store, not the dialog; it is
   hidden while the connection connects or runs, and the store refuses to
   delete a running connection too. When the store cannot delete, a warning
-  says why (it runs, it is no longer saved, the file could not be written).
+  says why (it is capturing or replaying, as its session was started, not
+  as it is saved since; it is no longer
+  saved; the file could not be written).
 - **Edit** while the connection runs: the tile shows the saved settings at
-  once, the capture runs on with those it started with (the dialog says
+  once, the session runs on with those it started with (the dialog says
   so) until it is stopped and started again. A connection saved under
   another name is another connection, with a tile of its own.
 
@@ -493,9 +566,25 @@ the connection's tile shows it (`failed: …`) and a notification says it.
   capture file's markers, including nats.c's connected URL) it goes
   through `redactUrls()`, which replaces the password, or a user
   information without one (a token), by `***`.
-- The worker clears its copy of the password or token once nats.c's
-  options hold it; `NatsSession` keeps its own, which `start()` needs
-  again.
+- A secret is held no longer than needed, and wiped with `wipe()`
+  ([`src/secrets.h`](../src/secrets.h), `OPENSSL_cleanse()`, which the
+  compiler cannot leave out): `NatsSession::start()` hands the password or
+  token to the worker, a copy of its own, and wipes the session's, so a
+  running session's `config()` has none; the worker wipes its copy once
+  nats.c's options hold it, and `configureAuth()` the UTF-8 copies it
+  passes to nats.c. nats.c keeps its own copy, for reconnecting. Of an
+  NKey seed file, the file's bytes (read unbuffered) and the seed decoded
+  from them are wiped once the public key is derived; nats.c reads the
+  seed from the file itself. A session started again after `stop()` has
+  no secret left; `Sessions` makes a new session for each start.
+  `wipe()` overwrites only data no other `QString` shares, so every copy
+  on the way is wiped, and the last to let go overwrites it:
+  `Sessions::start()` wipes the profile the sidebar filled in and the
+  session config it made of it, started or not (the session wipes its
+  own, the last if it never started). The dialog's stream listing hands
+  its thread the one copy left, and `listStreams()` wipes it once
+  `connectTo()` returns, so a caller that still needs the secret lists
+  with a copy.
 
 The dialog saves each connection as a named **profile**
 ([`src/profiles.h`](../src/profiles.h)) in `nats.ini`, array `profiles`:
@@ -515,7 +604,21 @@ check, so the dialog's Save does; `Sessions` makes the start check at
 Start, and `NatsSession::start()` again as a backstop on its
 `SessionConfig` (an overload of `startProblem()`, so the session needs no
 store). The replay's rules are the Replay module's (replay.h):
-`replayProblem()` to start, `replaySaveProblem()` to save. Replay checked
+`replayProblem()` to start, `replaySaveProblem()` to save. A start that
+cannot be read is refused, never replayed from elsewhere: the dialog's
+last-messages and sequence fields and `nats.ini`'s `lastMessages`,
+`sequence` and `timeUs` are read with `readLastMessages()`,
+`readStartSequence()` and `readStartTime()` (replay.h), which keep a value
+that is no number of its field (a word, a count past `kMaxLastMessages`, a
+sequence past `kMaxStreamSequence`) in `ReplayConfig::unreadLastMessages`,
+`unreadSequence` or `unreadTime`, and `replayProblem()` refuses it, as it
+refuses the last 0 messages, sequence 0 and a time
+outside `kMinReplayTimeUs` to `kMaxReplayTimeUs` (1970-01-01 00:00:01 to
+2262-04-11 23:47:16 UTC: nats.c sends the time 0 as none, and a later time
+overflows its nanoseconds). So the dialog does not save it, and a tile whose
+saved start is such says why at Start. An unread `lastMessages`,
+`sequence` or `timeUs` is written back as it was when the store writes
+`nats.ini` again for another connection. Replay checked
 without a stream is told by a profile's `replayChosen`, which the dialog
 sets when Replay is checked, stream or not (a loaded profile has it if it
 has a stream). Each rule is a row of the tables in `profiles_test.cpp`
@@ -524,16 +627,16 @@ its exact text, checked without the dialog.
 
 The **profile store** (`ProfileStore`, in profiles.h) is the only code that
 reads or writes `nats.ini`. It is opened on a file path, and told by a
-function which connections run, so it needs neither the host nor
+function where each connection's session is (its `SessionState`), so it needs neither the host nor
 `Sessions` to be tested. `list()`, `find()`, `upsert()` (replace the
 profile of that name where it is, or add it at the end) and `remove()`;
 `upsert()` and `remove()` return why they could not, in words for the user,
-and empty when they did; `upsert()` refuses a profile with a save problem. `newProfile()` gives a new connection's settings,
+and empty when they did; `upsert()` refuses a profile with a save problem, `remove()` one that connects or runs, and both one that is stopping. `newProfile()` gives a new connection's settings,
 with the size limit saved last. It reads the file on each call, and emits
 `changed()` after each save or delete, which the dialog's list and the tab
 follow. `profiles_test.cpp` (`[profiles]`) tests it on temporary files:
 round trips of every setting, the order, replacing, renaming, removing, a
-running connection refused, the remembered size limit, and files as 0.1.0
+running capture or replay refused, each named so, the remembered size limit, and files as 0.1.0
 and the version before the store wrote them, byte for byte.
 
 The tests (`[auth]`, part of the server tests) are at the main seam,
@@ -700,6 +803,12 @@ options of one with JetStream.
   (`nats_test::waitFor` from [`tests/sessiontest.h`](../tests/sessiontest.h)).
   A session is subscribed once its first line, the `connected to …`
   marker, is in the file; from then on every message published is captured.
+  To publish while the round trip that confirms the subscriptions is under
+  way, a test starts the session through `nats_test::TcpProxy`
+  ([`tests/tcpproxy.h`](../tests/tcpproxy.h)) with `holdRoundTrip()`: the
+  proxy holds back the session's first `PING` after a `SUB` until
+  `releaseRoundTrip()`, so the messages published meanwhile reach the
+  session before the server's answer, on every run.
 - **The line reader** ([`tests/capture.h`](../tests/capture.h)) is the one
   place the tests know the line format. `nats_test::Capture::read( path )`
   reads a capture's file (or its rotated files) with the Log Format
@@ -718,24 +827,36 @@ options of one with JetStream.
   itself, which queues lines and writes them (`writeQueued()`,
   `finish()`) when it chooses, so what is queued, dropped and written when
   is deterministic. They cover each drop in exactly one `dropped=` marker
-  at the gap, unmarked drops written before `stopped`, a replay waiting for
+  at the gap, unmarked drops written before `stopped`, messages held back
+  until the `connected` marker (or discarded with a failed round trip), a
+  replay waiting for
   room instead of dropping (`waitingForRoom()` says when it waits) and
   discarding once stopped, a line never split across files, a failed
   rotation retried one limit later (a directory where the next file goes),
-  a write failure reported once (a `QFile` of the test's that fails,
-  through the sink's `FileFactory`), and the writer thread fed from two
-  threads. Only the slow-consumer accounting, which comes from nats.c,
-  needs the server tests; at the session seam, `natssession_test.cpp` checks
-  only that the session announces the files rotated into and reports a
-  failed rotation, and that a session started again goes on in its last
-  file.
+  a write failure reported once, after which no message is taken (a
+  `QFile` of the test's that fails, `nats_test::FailingFile` in
+  `sessiontest.h`, through the sink's `FileFactory`), and the writer thread
+  fed from two threads. Only the slow-consumer accounting, which comes from
+  nats.c, needs the server tests; at the session seam, `natssession_test.cpp`
+  checks only that the session announces the files rotated into and reports
+  a failed rotation, that a session started again goes on in its last
+  file, and that a write error ends a capture as failed, saying why, and
+  it can be started again (a `FileFactory` given to the `NatsSession`);
+  `replay_test.cpp` checks the same of a replay.
 - **Sessions on an in-memory host** (`sessions_test.cpp`, `[sessions]`):
   `Sessions` is given a `nats_test::MemoryHost`
   ([`tests/memoryhost.h`](../tests/memoryhost.h)) instead of the plugin's
   host adapter, with no plugin initialised, and the test asserts on the
   followed tabs it opened, its notifications and its log lines (with
   their levels). `FakeHost` stays the stand-in for the whole C host API,
-  for the tests that drive the plugin's entry points.
+  for the tests that drive the plugin's entry points. Each scenario of
+  `plugin_test.cpp` declares a `ShutdownAtExit` right after its `FakeHost`
+  (and its server): it shuts the plugin down when the scenario ends, also
+  when a `REQUIRE` fails part-way. Without it, the failing scenario's
+  sessions keep their connections, the next shutdown's
+  `nats_CloseAndWait()` times out, and nats.c stays closing: every
+  `natsOptions_Create()` after it in the process fails with
+  `Initialization Failed`.
 - **The formatter** (`lineformat_test.cpp`): `formatLine()` is a pure
   function from a message to one line.
 - **The replay plan** (`replayplan_test.cpp`): `planReplay()` is a pure

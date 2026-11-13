@@ -27,14 +27,16 @@
  *   1. start() opens the sink's file, starts the sink's writer thread and
  *      the session's connection thread.
  *   2. The connection thread connects and subscribes to each subject; its
- *      "connected" marker is the capture's first line.  A replay instead
- *      writes the marker and subscribes to the stream through nats.c's
- *      ordered consumer (js_Subscribe, jsSubOptions::Ordered), as the replay
- *      plan made from the stream's info says (replay.h); its callback
- *      takes the stored time and stream sequence from the message's
- *      metadata, and the plan's step says whether to write the message
- *      and whether the replay has caught up (or, before any message, the
- *      plan and the consumer's info).
+ *      "connected" marker, once a round trip has confirmed the
+ *      subscriptions, is the capture's first line: the sink holds back
+ *      what they deliver before it (capturesink.h).  A replay instead
+ *      writes the marker and leaves subscribing to its connection path
+ *      (replaysubscription.h): the stream's info, the plan, nats.c's
+ *      ordered consumer, each replayed message and catching up.  It hands
+ *      back to Shared, its Outlet: the subscription to set up, the lines,
+ *      its markers and that it is complete.  Each subscription, a
+ *      capture's or a replay's, gets its completion callback and pending
+ *      limits in one place (Shared::setUp).
  *   3. nats.c's callbacks format a line and hand it to the sink, which
  *      queues it for its writer or, full, drops and marks it (a replay's
  *      waits for room).  Each message callback (and the slow-consumer
@@ -42,8 +44,10 @@
  *      count of its subscription (each, for the disconnected callback) and
  *      has the sink mark what is new.  The sink writes, rotates and
  *      reports; the session forwards its reports to the GUI thread.
- *   4. The connection thread then waits until stop() asks it to end, the
- *      connection is closed for good or the replay is complete.
+ *   4. The connection thread then waits until a stop asks it to end, the
+ *      connection is closed for good, the replay is complete or the sink
+ *      reports that its file can no longer be written (the sink takes no
+ *      message from then on: nothing more is counted).
  *   5. It lifts the pending limits, so nats.c drops nothing more, and marks
  *      the last dropped counts.  It drains each subscription (or, not
  *      connected, waits until nats.c holds nothing for them), the sink
@@ -53,8 +57,13 @@
  *      discards what nats.c still delivers once stopping, uncounted: the
  *      stream keeps it, and writing up to the pending limits of it would
  *      hold the stop up.  Its drain still deletes the consumer.
+ *   6. It keeps the transition it ended with (Worker::ended) and posts its
+ *      end to the GUI thread, where the session joins it and emits that
+ *      transition.  requestStop() never waits for any of this; stop() and
+ *      the destructor join the thread themselves.
  *
- * What the callbacks use (Shared, the sink in it) is apart from the
+ * What the callbacks use (Shared, the sink and a replay's connection path
+ * in it) is apart from the
  * worker: should nats.c not confirm within the timeout that its callbacks
  * are over, Shared is leaked rather than freed under a running callback.
  * The sink is finished by then (its writer joined, its file closed), and
@@ -68,9 +77,12 @@
 #include "natssession.h"
 
 #include "capturesink.h"
+#include "natsmessage.h"
 #include "natsoptions.h"
 #include "profiles.h"
 #include "replay.h"
+#include "replaysubscription.h"
+#include "secrets.h"
 #include "tempdirs.h"
 
 #include <QMetaObject>
@@ -80,7 +92,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cstdlib>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -161,45 +173,6 @@ QString fileNameFor( const QList<Subscription>& subscriptions )
     return subjects.join( '_' ).left( kMaxFileNameSubjects );
 }
 
-/// The message as the formatter takes it.  Subject, reply and payload are
-/// views into @p msg, valid while it is.
-Message toMessage( natsMsg* msg )
-{
-    Message message;
-    message.receivedUs = nowUs();
-    const char* subject = natsMsg_GetSubject( msg );
-    message.subject = QByteArray::fromRawData( subject, qstrlen( subject ) );
-    if ( const char* reply = natsMsg_GetReply( msg ) ) {
-        message.reply = QByteArray::fromRawData( reply, qstrlen( reply ) );
-    }
-    message.payload
-        = QByteArray::fromRawData( natsMsg_GetData( msg ), natsMsg_GetDataLength( msg ) );
-
-    const char** keys = nullptr;
-    int keyCount = 0;
-    if ( natsMsgHeader_Keys( msg, &keys, &keyCount ) != NATS_OK ) {
-        return message; // none
-    }
-    // nats.c keeps the headers in a hash table: sort them, so that the same
-    // headers always read the same.
-    std::vector<const char*> sorted( keys, keys + keyCount );
-    std::free( static_cast<void*>( keys ) );
-    std::sort( sorted.begin(), sorted.end(),
-               []( const char* a, const char* b ) { return qstrcmp( a, b ) < 0; } );
-    for ( const char* key : sorted ) {
-        const char** values = nullptr;
-        int valueCount = 0;
-        if ( natsMsgHeader_Values( msg, key, &values, &valueCount ) != NATS_OK ) {
-            continue;
-        }
-        for ( int i = 0; i < valueCount; ++i ) {
-            message.headers.append( { QByteArray( key ), QByteArray( values[ i ] ) } );
-        }
-        std::free( static_cast<void*>( values ) );
-    }
-    return message;
-}
-
 struct Shared;
 
 /// What drops and messages are counted in, here and in NatsSession.
@@ -218,21 +191,42 @@ struct SubscriptionState {
     /// nats.c took the completion callback: done is awaited.  Only the
     /// connection thread reads and writes it.
     bool awaitsCompletion = false;
-    /// A replay's step, made from its plan before subscribing; then used by
-    /// nats.c's delivery thread only.
-    ReplayStep replayStep;
 };
 
 /// What nats.c's callbacks and the connection thread share: the capture
 /// sink they feed, and the state of the connection and its subscriptions.
-struct Shared {
-    /// Writing the files of @p sinkConfig, reporting to @p reporter.
-    Shared( const CaptureSink::Config& sinkConfig, CaptureSink::Reporter reporter )
-        : sink( sinkConfig, std::move( reporter ) )
+/// A replay's connection path (replaysubscription.h) hands on to it.
+struct Shared final : ReplaySubscription::Outlet {
+    /// Writing the files of @p sinkConfig, opened by @p files, reporting to
+    /// @p reporter; a write failure also ends the capture (writeFailed()).
+    Shared( const CaptureSink::Config& sinkConfig, CaptureSink::Reporter reporter,
+            CaptureSink::FileFactory files )
+        : sink(
+              sinkConfig,
+              [ this, reporter = std::move( reporter ) ]( const CaptureSink::Event& event ) {
+                  if ( event.kind == CaptureSink::Event::Kind::WriteFailed ) {
+                      writeFailed( event.text );
+                  }
+                  reporter( event );
+              },
+              std::move( files ) )
     {
     }
 
     FormatOptions format;
+    PendingLimits pendingLimits; ///< What each subscription is given.
+
+    /// Guards the flags below and each SubscriptionState's marked count and
+    /// done; taken before the sink's own mutex, never after.  Declared
+    /// before the sink, so that they outlive it: the sink's last report (a
+    /// write failure in finish()) reaches writeFailed().
+    std::mutex mutex;
+    std::condition_variable wake; ///< The flags or a subscription's done changed.
+    bool stopRequested = false;
+    bool stopping = false;   ///< The connection thread closes the connection: no disconnect marker.
+    bool closed = false;     ///< nats.c made the closed callback.
+    bool replayDone = false; ///< Caught up, not following: the capture ends.
+    QString writeFailure;    ///< The file can no longer be written, and why: the capture ends.
 
     /// Everything between a message and the file: the callbacks hand it
     /// their lines, from any thread.
@@ -242,18 +236,10 @@ struct Shared {
     /// and never changed after: the callbacks read it without the mutex.
     std::vector<std::unique_ptr<SubscriptionState>> subscriptions;
 
-    /// Guards the flags below and each SubscriptionState's marked count and
-    /// done; taken before the sink's own mutex, never after.
-    std::mutex mutex;
-    std::condition_variable wake; ///< The flags or a subscription's done changed.
-    bool stopRequested = false;
-    bool stopping = false; ///< The connection thread closes the connection: no disconnect marker.
-    bool closed = false;   ///< nats.c made the closed callback.
-
-    // ── Replay (natssession.h, REPLAY); set before subscribing ─────────
-    bool followLive = false; ///< Go on once caught up (ReplayPlan::followLive).
-    bool caughtUp = false;   ///< Under the mutex.
-    bool replayDone = false; ///< Caught up, not following: the capture ends; under the mutex.
+    /// A replay's connection path, the first subscription's; null for a
+    /// live capture.  Made before connecting; its callback uses it, so it
+    /// goes with Shared.
+    std::unique_ptr<ReplaySubscription> replay;
 
     std::atomic<int> limitMessages{ 0 }; ///< The subscriptions' pending limits, read back.
     std::atomic<int> limitBytes{ 0 };
@@ -283,24 +269,30 @@ struct Shared {
         return { sink.received(), sink.dropped(), { limitMessages.load(), limitBytes.load() } };
     }
 
-    /// The replay has caught up with its stream: say so, or end it.
-    void markCaughtUp()
+    /// Give @p subscription, made as @p state, its completion callback and
+    /// the pending limits, and read back what nats.c has: the one place a
+    /// capture's subscriptions and a replay's get them.
+    natsStatus setUp( natsSubscription* subscription, SubscriptionState& state )
     {
-        {
-            std::lock_guard<std::mutex> lock( mutex );
-            if ( caughtUp ) {
-                return;
-            }
-            caughtUp = true;
-            if ( followLive ) {
-                // Under the mutex: before what a callback queues next.
-                sink.marker( QStringLiteral( "caught up, following live" ), Event::Status );
-            }
-            else {
-                replayDone = true;
-            }
+        state.handle = subscription;
+        natsStatus status = natsSubscription_SetOnCompleteCB(
+            subscription, &Shared::onSubscriptionComplete, &state );
+        state.awaitsCompletion = status == NATS_OK;
+        if ( status == NATS_OK ) {
+            status = natsSubscription_SetPendingLimits( subscription, pendingLimits.messages,
+                                                        pendingLimits.bytes );
         }
-        wake.notify_all();
+        int messages = 0;
+        int bytes = 0;
+        if ( status == NATS_OK ) {
+            status = natsSubscription_GetPendingLimits( subscription, &messages, &bytes );
+        }
+        if ( status == NATS_OK ) {
+            // The same for each subscription.
+            limitMessages = messages;
+            limitBytes = bytes;
+        }
+        return status;
     }
 
     /// Mark the slow-consumer drops of @p subscription not marked yet.
@@ -328,6 +320,19 @@ struct Shared {
         subscription.slowConsumerMarked = count;
     }
 
+    /// The sink cannot write its file, as @p why says: the capture ends.
+    /// On the sink's writer thread.
+    void writeFailed( const QString& why )
+    {
+        {
+            std::lock_guard<std::mutex> lock( mutex );
+            if ( writeFailure.isEmpty() ) {
+                writeFailure = why;
+            }
+        }
+        wake.notify_all();
+    }
+
     /// The SubscriptionState @p closure of a message callback for @p handle.
     static SubscriptionState& subscriptionOf( void* closure, natsSubscription* handle )
     {
@@ -338,17 +343,38 @@ struct Shared {
         return subscription;
     }
 
-    /// Mark the drops before @p msg, a message of @p subscription, and hand
-    /// its line, the Message @p toLine makes of it, to the sink.  Destroys
-    /// @p msg.
-    template <typename ToLine>
-    void take( SubscriptionState& subscription, natsMsg* msg, ToLine toLine )
+    // ── The replay's outlet (replaysubscription.h) ───────────────────
+
+    natsStatus subscribed( natsSubscription* subscription ) override
     {
+        return setUp( subscription, *subscriptions.front() );
+    }
+
+    bool discarding() const override
+    {
+        return sink.discarding();
+    }
+
+    void message( natsSubscription* handle, const Message& message ) override
+    {
+        auto& subscription = subscriptionOf( subscriptions.front().get(), handle );
         // Drops since the last message: the gap is before this one.
         markSlowConsumer( subscription );
-        auto line = formatLine( toLine(), format );
-        natsMsg_Destroy( msg );
-        sink.message( std::move( line ) );
+        sink.message( formatLine( message, format ) );
+    }
+
+    void marker( const QString& text ) override
+    {
+        sink.marker( text, Event::Status );
+    }
+
+    void completed() override
+    {
+        {
+            std::lock_guard<std::mutex> lock( mutex );
+            replayDone = true;
+        }
+        wake.notify_all();
     }
 
     // ── nats.c callbacks, on nats.c's threads ────────────────────────
@@ -357,48 +383,12 @@ struct Shared {
     static void onMessage( natsConnection*, natsSubscription* handle, natsMsg* msg, void* closure )
     {
         auto& subscription = subscriptionOf( closure, handle );
-        subscription.shared->take( subscription, msg, [ msg ] { return toMessage( msg ); } );
-    }
-
-    /// A message of a replay; @p closure is the SubscriptionState of the
-    /// subscription.
-    static void onReplayMessage( natsConnection*, natsSubscription* handle, natsMsg* msg,
-                                 void* closure )
-    {
-        auto& subscription = subscriptionOf( closure, handle );
         auto* self = subscription.shared;
-        if ( self->sink.discarding() ) {
-            // Stopped: what nats.c still holds, up to the pending limits,
-            // the stream keeps; writing it would hold up the stop.
-            natsMsg_Destroy( msg );
-            return;
-        }
-
-        jsMsgMetaData* meta = nullptr;
-        if ( natsMsg_GetMetaData( &meta, msg ) != NATS_OK ) {
-            natsMsg_Destroy( msg ); // not a stream's message: nothing to replay
-            return;
-        }
-        const auto step = subscription.replayStep.next( static_cast<quint64>( meta->NumPending ),
-                                                        meta->Timestamp );
-        const auto storedUs = meta->Timestamp / 1000;
-        const auto sequence = meta->Sequence.Stream;
-        jsMsgMetaData_Destroy( meta );
-        if ( step.write ) {
-            self->take( subscription, msg, [ msg, storedUs, sequence ] {
-                auto message = toMessage( msg );
-                message.receivedUs = storedUs;
-                message.streamSequence = sequence;
-                message.reply.clear(); // nats.c's is the consumer's, the stream keeps none
-                return message;
-            } );
-        }
-        else {
-            natsMsg_Destroy( msg ); // before where the replay starts
-        }
-        if ( step.caughtUp ) {
-            self->markCaughtUp();
-        }
+        // Drops since the last message: the gap is before this one.
+        self->markSlowConsumer( subscription );
+        auto line = formatLine( toMessage( msg ), self->format );
+        natsMsg_Destroy( msg );
+        self->sink.message( std::move( line ) );
     }
 
     /// @p closure is the SubscriptionState of the subscription.
@@ -473,7 +463,8 @@ struct Shared {
 
 struct NatsSession::Worker {
     NatsSession* const session; ///< Only posted to; it joins the thread before it goes.
-    /// Its secret is cleared once the connection options hold it.
+    /// Its secret, its own copy, is wiped once the connection options hold
+    /// it (secrets.h).
     SessionConfig config;
     const int generation;
     /// Leaked if nats.c does not let go of it; its sink is opened by
@@ -482,22 +473,33 @@ struct NatsSession::Worker {
     /// Whether shared may be freed: nats.c confirmed its last callback (or
     /// never got it).  Written by the thread, read after it is joined.
     bool released = true;
-    jsCtx* js = nullptr; ///< A replay's JetStream context; the thread's.
+    /// The transition the capture ended with, as its last marker says.
+    /// Written by the thread, read after it is joined.
+    Transition ended;
     std::thread thread;
 
     /// The worker of start number @p startGeneration, writing the files
-    /// <@p fileStem>.log, <@p fileStem>.2.log, …
+    /// <@p fileStem>.log, <@p fileStem>.2.log, …, opened by @p files.
     Worker( NatsSession* owner, const SessionConfig& sessionConfig, int startGeneration,
-            const QString& fileStem )
+            const QString& fileStem, const CaptureSink::FileFactory& files )
         : session( owner )
         , config( sessionConfig )
         , generation( startGeneration )
-        , shared( new Shared( sinkConfig( sessionConfig, fileStem ),
-                              [ owner, startGeneration ]( const CaptureSink::Event& event ) {
-                                  forward( owner, startGeneration, event );
-                              } ) )
+        , shared( new Shared(
+              sinkConfig( sessionConfig, fileStem ),
+              [ owner, startGeneration ]( const CaptureSink::Event& event ) {
+                  forward( owner, startGeneration, event );
+              },
+              files ) )
     {
+        // Not shared with the session's, so that wiping it overwrites it.
+        const auto& secret = sessionConfig.auth.secret;
+        config.auth.secret = QString( secret.constData(), secret.size() );
         shared->format = config.format;
+        shared->pendingLimits = config.pendingLimits;
+        if ( config.replay.enabled() ) {
+            shared->replay = std::make_unique<ReplaySubscription>( config.replay, *shared );
+        }
         const auto count = config.replay.enabled() ? 1 : config.subscriptions.size();
         for ( qsizetype i = 0; i < count; ++i ) {
             auto state = std::make_unique<SubscriptionState>();
@@ -506,15 +508,22 @@ struct NatsSession::Worker {
         }
     }
 
+    /// Asks the thread to stop, without waiting: it sees it once what
+    /// nats.c is in the middle of returns.
+    void requestStop()
+    {
+        {
+            std::lock_guard<std::mutex> lock( shared->mutex );
+            shared->stopRequested = true;
+        }
+        shared->wake.notify_all();
+    }
+
     /// Stops the thread and waits for it.
     void join()
     {
         if ( thread.joinable() ) {
-            {
-                std::lock_guard<std::mutex> lock( shared->mutex );
-                shared->stopRequested = true;
-            }
-            shared->wake.notify_all();
+            requestStop();
             thread.join();
         }
     }
@@ -522,6 +531,7 @@ struct NatsSession::Worker {
     ~Worker()
     {
         join();
+        wipe( config.auth.secret ); // if the thread never got to connect
         if ( released ) {
             delete shared; // finishes the sink, if the thread never ran
         }
@@ -591,6 +601,8 @@ struct NatsSession::Worker {
             return;
         case Event::Status:
             return; // in the file; the transitions say what it changes
+        case Event::WriteFailed:
+            return; // the capture ends on it: its Failed transition says it
         case Event::Error:
         case Event::FileError:
             post( session,
@@ -651,125 +663,9 @@ struct NatsSession::Worker {
                                                    queueGroup.constData(), &Shared::onMessage,
                                                    &state );
         if ( status == NATS_OK ) {
-            status = setUp( *subscription, state );
+            status = shared->setUp( *subscription, state );
         }
         return status;
-    }
-
-    /// Give @p subscription, made as @p state, its completion callback and
-    /// the pending limits.
-    natsStatus setUp( natsSubscription* subscription, SubscriptionState& state )
-    {
-        state.handle = subscription;
-        natsStatus status = natsSubscription_SetOnCompleteCB(
-            subscription, &Shared::onSubscriptionComplete, &state );
-        state.awaitsCompletion = status == NATS_OK;
-        if ( status == NATS_OK ) {
-            status = natsSubscription_SetPendingLimits( subscription, config.pendingLimits.messages,
-                                                        config.pendingLimits.bytes );
-        }
-        return status;
-    }
-
-    /// The state of @p stream to plan its replay from; an error text if it
-    /// could not be read.
-    QString readStream( const QByteArray& stream, StreamState* state )
-    {
-        jsStreamInfo* info = nullptr;
-        const natsStatus status
-            = js_GetStreamInfo( &info, js, stream.constData(), nullptr, nullptr );
-        if ( status != NATS_OK ) {
-            return describeStatus( status );
-        }
-        switch ( info->Config->Retention ) {
-        case js_LimitsPolicy:
-            state->retention = Retention::Limits;
-            break;
-        case js_InterestPolicy:
-            state->retention = Retention::Interest;
-            break;
-        case js_WorkQueuePolicy:
-            state->retention = Retention::WorkQueue;
-            break;
-        }
-        state->firstSequence = info->State.FirstSeq;
-        state->lastSequence = info->State.LastSeq;
-        state->messages = info->State.Msgs;
-        jsStreamInfo_Destroy( info );
-        return {};
-    }
-
-    /// Subscribe to the stream to replay through an ordered consumer, as
-    /// the only SubscriptionState, as its plan (replay.h) says; an error
-    /// text if that failed or the plan refused it.
-    QString subscribeReplay( natsConnection* connection, natsSubscription** subscription )
-    {
-        natsStatus status = natsConnection_JetStream( &js, connection, nullptr );
-        if ( status != NATS_OK ) {
-            return describeStatus( status );
-        }
-        const auto stream = config.replay.stream.toUtf8();
-        StreamState streamState;
-        if ( const auto error = readStream( stream, &streamState ); !error.isEmpty() ) {
-            return error;
-        }
-        const auto plan = planReplay( config.replay, streamState );
-        if ( !plan.refusal.isEmpty() ) {
-            return plan.refusal;
-        }
-        if ( !plan.warning.isEmpty() ) {
-            shared->sink.marker( plan.warning, Event::Status );
-        }
-
-        jsSubOptions options;
-        jsSubOptions_Init( &options );
-        options.Stream = stream.constData();
-        options.Ordered = true; // ephemeral, AckNone, flow control: nats.c's ordered consumer
-        // Stop deletes the consumer; this covers a crash or a connection
-        // lost for good.  nats.c keeps it when it recreates the consumer.
-        options.Config.InactiveThreshold = plan.inactiveThresholdNs;
-        switch ( plan.deliver ) {
-        case DeliverFrom::All:
-            options.Config.DeliverPolicy = js_DeliverAll;
-            break;
-        case DeliverFrom::StartSequence:
-            options.Config.DeliverPolicy = js_DeliverByStartSequence;
-            options.Config.OptStartSeq = plan.startSequence;
-            break;
-        case DeliverFrom::StartTime:
-            options.Config.DeliverPolicy = js_DeliverByStartTime;
-            options.Config.OptStartTime = plan.startTimeNs;
-            break;
-        }
-
-        // Before subscribing: nats.c's delivery thread uses them from then on.
-        auto& state = *shared->subscriptions.front();
-        state.replayStep = ReplayStep( plan.skip );
-        shared->followLive = plan.followLive;
-        jsErrCode error = static_cast<jsErrCode>( 0 );
-        status = js_Subscribe( subscription, js, plan.filter.constData(), &Shared::onReplayMessage,
-                               &state, nullptr, &options, &error );
-        if ( status == NATS_OK ) {
-            status = setUp( *subscription, state );
-        }
-        if ( status != NATS_OK ) {
-            return describeStatus( status );
-        }
-
-        // Nothing to replay (an empty stream, a start beyond its end): no
-        // message will say that the replay has caught up.
-        jsConsumerInfo* info = nullptr;
-        status = natsSubscription_GetConsumerInfo( &info, *subscription, nullptr, nullptr );
-        if ( status != NATS_OK ) {
-            return describeStatus( status );
-        }
-        const bool caughtUp
-            = caughtUpOnSubscribing( plan, info->NumPending, info->Delivered.Consumer );
-        jsConsumerInfo_Destroy( info );
-        if ( caughtUp ) {
-            shared->markCaughtUp();
-        }
-        return {};
     }
 
     /// Write the marker of why the session failed, @p why, and return it.
@@ -796,7 +692,7 @@ struct NatsSession::Worker {
         }
         const auto problem = connectTo( *options, config, connection );
         // nats.c has its own copy, for reconnecting: no other is kept here.
-        config.auth.secret.clear();
+        wipe( config.auth.secret );
         if ( !problem.isEmpty() ) {
             return failed( problem );
         }
@@ -805,7 +701,7 @@ struct NatsSession::Worker {
             return failed( QStringLiteral( "subscribing to %1 failed: %2" )
                                .arg( what, describeStatus( failure ) ) );
         };
-        if ( config.replay.enabled() ) {
+        if ( shared->replay ) {
             // Before subscribing: the messages come at once, after this line.
             const auto server = connectedUrl( *connection );
             const auto what = describeReplay( config.replay );
@@ -813,48 +709,40 @@ struct NatsSession::Worker {
                 QStringLiteral( "connected to %1, replaying %2" ).arg( server, what ),
                 Event::Connected, server );
             subscriptions.assign( 1, nullptr );
-            const auto error = subscribeReplay( *connection, &subscriptions.front() );
+            const auto error = shared->replay->subscribe( *connection, &subscriptions.front() );
             if ( !error.isEmpty() ) {
                 return failed( QStringLiteral( "replaying %1 failed: %2" ).arg( what, error ) );
             }
-            int messages = 0;
-            int bytes = 0;
-            status = natsSubscription_GetPendingLimits( subscriptions.front(), &messages, &bytes );
-            if ( status != NATS_OK ) {
-                return failed( QStringLiteral( "replaying %1 failed: %2" )
-                                   .arg( what, describeStatus( status ) ) );
-            }
-            shared->limitMessages = messages;
-            shared->limitBytes = bytes;
             return {};
         }
+        // What the subscriptions deliver before the round trip below has
+        // confirmed them waits for the marker: it is the first line.
+        shared->sink.holdMessages();
+        const auto unconfirmed
+            = [ this, &subscribeFailed ]( const QString& what, natsStatus failure ) {
+                  shared->sink.discardHeld(); // not captured as connected
+                  return subscribeFailed( what, failure );
+              };
         subscriptions.assign( config.subscriptions.size(), nullptr );
         for ( int i = 0; i < config.subscriptions.size(); ++i ) {
             const auto& wanted = config.subscriptions.at( i );
             status = subscribe( *connection, wanted, *shared->subscriptions.at( i ),
                                 &subscriptions.at( i ) );
             if ( status != NATS_OK ) {
-                return subscribeFailed( describeSubscriptions( { wanted } ), status );
+                return unconfirmed( describeSubscriptions( { wanted } ), status );
             }
         }
-        int messages = 0;
-        int bytes = 0;
-        status = natsSubscription_GetPendingLimits( subscriptions.front(), &messages, &bytes );
-        shared->limitMessages = messages;
-        shared->limitBytes = bytes;
-        if ( status == NATS_OK ) {
-            // A round trip: once the server has answered, it has the
-            // subscriptions, so the "connected" marker means that every
-            // message published from then on is captured.
-            status = natsConnection_Flush( *connection );
-        }
+        // A round trip: once the server has answered, it has the
+        // subscriptions, so the "connected" marker means that every
+        // message published from then on is captured.
+        status = natsConnection_Flush( *connection );
         const auto subjects = describeSubscriptions( config.subscriptions );
         if ( status != NATS_OK ) {
-            return subscribeFailed( subjects, status );
+            return unconfirmed( subjects, status );
         }
 
         const auto server = connectedUrl( *connection );
-        shared->sink.marker(
+        shared->sink.releaseHeld(
             QStringLiteral( "connected to %1, subscribed to %2" ).arg( server, subjects ),
             Event::Connected, server );
         return {};
@@ -862,21 +750,27 @@ struct NatsSession::Worker {
 
     /// Why the capture ended.
     enum class End {
-        Stopped,   ///< stop()
-        Closed,    ///< The connection was closed for good.
-        Completed, ///< The replay caught up, not following live.
+        Stopped,     ///< stop()
+        Closed,      ///< The connection was closed for good.
+        Completed,   ///< The replay caught up, not following live.
+        WriteFailed, ///< The file can no longer be written.
     };
 
-    /// Wait until stopped, the connection is closed for good or the replay
-    /// is complete; the sink writes meanwhile.
+    /// Wait until stopped, the connection is closed for good, the replay
+    /// is complete or the file can no longer be written; the sink writes
+    /// meanwhile.
     End awaitEnd()
     {
         std::unique_lock<std::mutex> lock( shared->mutex );
         shared->wake.wait( lock, [ this ] {
-            return shared->stopRequested || shared->closed || shared->replayDone;
+            return shared->stopRequested || shared->closed || shared->replayDone
+                   || !shared->writeFailure.isEmpty();
         } );
         if ( shared->stopRequested ) {
             return End::Stopped;
+        }
+        if ( !shared->writeFailure.isEmpty() ) {
+            return End::WriteFailed;
         }
         return shared->replayDone ? End::Completed : End::Closed;
     }
@@ -954,7 +848,7 @@ struct NatsSession::Worker {
             std::lock_guard<std::mutex> lock( shared->mutex );
             shared->stopping = true;
         }
-        if ( config.replay.enabled() ) {
+        if ( shared->replay ) {
             // A replay writes nothing more, and its callback waits no more.
             shared->sink.discardMessages();
         }
@@ -972,8 +866,11 @@ struct NatsSession::Worker {
         for ( auto* subscription : subscriptions ) {
             natsSubscription_Destroy( subscription );
         }
-        jsCtx_Destroy( js );
-        js = nullptr;
+        if ( confirmed ) {
+            // Its JetStream context, before the connection.  Otherwise it
+            // stays with Shared: a late callback may still use it.
+            shared->replay.reset();
+        }
         natsConnection_Destroy( connection );
         return confirmed;
     }
@@ -1003,32 +900,37 @@ struct NatsSession::Worker {
         // every report it posted comes before the transition below.
         auto& sink = shared->sink;
         using Kind = Transition::Kind;
-        Transition ended;
         switch ( end ) {
         case End::Stopped:
-            // stop() reports the transition, once it has joined this thread.
-            sink.finish( QStringLiteral( "stopped" ), Event::Status );
-            return;
+            ended = { Kind::Stopped, QStringLiteral( "stopped" ), {} };
+            break;
         case End::Completed:
             ended = { Kind::Completed, QStringLiteral( "replay complete" ), {} };
             break;
         case End::Closed:
             ended = { Kind::Failed, opened ? QStringLiteral( "connection closed" ) : failure, {} };
             break;
+        case End::WriteFailed: {
+            std::lock_guard<std::mutex> lock( shared->mutex );
+            ended = { Kind::Failed, shared->writeFailure, {} };
+            break;
         }
-        // Its marker is written already if it never opened.
-        sink.finish( opened ? ended.detail : QString(), Event::Status );
-        post( [ generation = generation, ended ]( NatsSession* s ) {
-            s->onWorkerEnded( generation, ended );
-        } );
+        }
+        // A failure's marker is written already if it never opened.
+        const bool marked = !opened && end == End::Closed;
+        sink.finish( marked ? QString() : ended.detail, Event::Status );
+        // The session reads ended once it has joined this thread.
+        post( [ generation = generation ]( NatsSession* s ) { s->onWorkerEnded( generation ); } );
     }
 };
 
 // ── NatsSession ─────────────────────────────────────────────────────────
 
-NatsSession::NatsSession( const SessionConfig& config, const QString& tempRoot, QObject* parent )
+NatsSession::NatsSession( const SessionConfig& config, const QString& tempRoot, QObject* parent,
+                          CaptureSink::FileFactory files )
     : QObject( parent )
     , config_( config )
+    , files_( std::move( files ) )
     , tempDir_( tempDirTemplate( tempRoot ) )
 {
 }
@@ -1038,12 +940,13 @@ NatsSession::~NatsSession()
     // The owner may be half-destroyed already: stopping must not signal it.
     blockSignals( true );
     stop();
+    wipe( config_.auth.secret ); // if it never started
 }
 
 bool NatsSession::start()
 {
     if ( worker_ ) {
-        return true;
+        return !stopping_;
     }
 
     const auto fail = [ this ]( const QString& message ) {
@@ -1065,7 +968,7 @@ bool NatsSession::start()
                           ? "replay_" + safeFileName( replay.stream ).left( kMaxFileNameSubjects )
                           : fileNameFor( config_.subscriptions );
     auto worker = std::make_unique<Worker>( this, config_, ++generation_,
-                                            tempDir_.filePath( "nats_" + name ) );
+                                            tempDir_.filePath( "nats_" + name ), files_ );
     auto& sink = worker->shared->sink;
     const bool opened = sink.open();
     filePath_ = sink.fileName();
@@ -1077,10 +980,21 @@ bool NatsSession::start()
     auto* raw = worker.get();
     worker->thread = std::thread( [ raw ] { raw->run(); } );
     worker_ = std::move( worker );
+    wipe( config_.auth.secret ); // the worker has its own, for the connection options
     Q_EMIT transitioned( { Transition::Kind::Connecting,
                            QStringLiteral( "connecting to %1…" ).arg( redactUrls( config_.url ) ),
                            {} } );
     return true;
+}
+
+void NatsSession::requestStop()
+{
+    if ( !worker_ || stopping_ ) {
+        return;
+    }
+    stopping_ = true;
+    worker_->requestStop();
+    Q_EMIT transitioned( { Transition::Kind::Stopping, QStringLiteral( "stopping…" ), {} } );
 }
 
 void NatsSession::stop()
@@ -1088,18 +1002,21 @@ void NatsSession::stop()
     if ( !worker_ ) {
         return;
     }
-    releaseWorker();
-    Q_EMIT transitioned( { Transition::Kind::Stopped, QStringLiteral( "stopped" ), {} } );
+    requestStop();
+    // A slot of transitioned() may have ended it meanwhile (stop() again).
+    if ( worker_ ) {
+        endWorker();
+    }
 }
 
-void NatsSession::releaseWorker()
+void NatsSession::endWorker()
 {
-    if ( !worker_ ) {
-        return;
-    }
     worker_->join(); // asks the connection thread to stop, and waits for it and the writer
     counts_ = worker_->shared->snapshot();
+    const auto end = worker_->ended;
     worker_.reset();
+    stopping_ = false;
+    Q_EMIT transitioned( end );
 }
 
 NatsSession::Counts NatsSession::counts() const
@@ -1115,6 +1032,11 @@ PendingLimits NatsSession::pendingLimits() const
 bool NatsSession::isRunning() const
 {
     return worker_ != nullptr;
+}
+
+bool NatsSession::isStopping() const
+{
+    return stopping_;
 }
 
 quint64 NatsSession::receivedCount() const
@@ -1148,19 +1070,18 @@ void NatsSession::onWorkerRotated( int generation, const QString& path )
 
 void NatsSession::onWorkerTransition( int generation, const Transition& transition )
 {
-    if ( !worker_ || generation != generation_ ) {
-        return; // stopped meanwhile: Stopped was the last
+    if ( !worker_ || stopping_ || generation != generation_ ) {
+        return; // stopping or stopped meanwhile: only the end comes after Stopping
     }
     Q_EMIT transitioned( transition );
 }
 
-void NatsSession::onWorkerEnded( int generation, const Transition& end )
+void NatsSession::onWorkerEnded( int generation )
 {
     if ( !worker_ || generation != generation_ ) {
-        return; // stopped meanwhile, or the report of an earlier start
+        return; // ended by stop() meanwhile, or the report of an earlier start
     }
-    releaseWorker(); // the thread has ended: joins at once
-    Q_EMIT transitioned( end );
+    endWorker(); // the thread has ended: joins at once
 }
 
 } // namespace nats_monitor

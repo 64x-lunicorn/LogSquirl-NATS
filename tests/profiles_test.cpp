@@ -49,9 +49,20 @@ using nats_monitor::ProfileStore;
 using nats_monitor::ReplayStart;
 using nats_monitor::saveProblem;
 using nats_monitor::SessionConfig;
+using nats_monitor::SessionState;
+using nats_monitor::SessionStatus;
 using nats_monitor::startProblem;
 
 namespace {
+
+/// A session in @p state, replaying with @p replay, else capturing.
+SessionStatus sessionIn( SessionState state, bool replay = false )
+{
+    SessionStatus status;
+    status.state = state;
+    status.replay = replay;
+    return status;
+}
 
 /// A profile @p name capturing @p subjects from @p url.
 ConnectionProfile profile( const QString& name, const QString& url = "nats://localhost:4222",
@@ -357,24 +368,70 @@ SCENARIO( "the profile store saves connections and finds them again", "[profiles
 
 SCENARIO( "the profile store does not remove a connection that runs", "[profiles]" )
 {
-    GIVEN( "a store whose connection prod runs, and dev does not" )
+    GIVEN( "a store whose capture prod and replay audit run, and dev does not" )
     {
         QTemporaryDir dir;
         const auto path = dir.filePath( "nats.ini" );
-        ProfileStore store( path, []( const QString& name ) { return name == "prod"; } );
+        ProfileStore store( path, []( const QString& name ) {
+            return name == "prod"    ? sessionIn( SessionState::Running )
+                   : name == "audit" ? sessionIn( SessionState::Connecting, true )
+                                     : sessionIn( SessionState::Stopped );
+        } );
         REQUIRE( store.upsert( profile( "prod" ) ).isEmpty() );
         REQUIRE( store.upsert( profile( "dev" ) ).isEmpty() );
+        auto audit = profile( "audit" );
+        audit.replayChosen = true;
+        audit.replay.stream = "ORDERS";
+        REQUIRE( store.upsert( audit ).isEmpty() );
 
         WHEN( "prod is removed" )
         {
             ChangeCounter changed( store );
             const auto problem = store.remove( "prod" );
 
-            THEN( "the store refuses, saying to stop it first, and keeps it" )
+            THEN( "the store refuses, saying to stop its capture first, and keeps it" )
             {
                 REQUIRE( problem == "The connection prod is capturing: stop it to delete it." );
                 REQUIRE( changed.count() == 0 );
-                REQUIRE( namesOf( ProfileStore( path ).list() ) == QStringList{ "prod", "dev" } );
+                REQUIRE( namesOf( ProfileStore( path ).list() )
+                         == QStringList{ "prod", "dev", "audit" } );
+            }
+        }
+
+        WHEN( "audit is removed" )
+        {
+            const auto problem = store.remove( "audit" );
+
+            THEN( "the store refuses, saying to stop its replay first, and keeps it" )
+            {
+                REQUIRE( problem == "The connection audit is replaying: stop it to delete it." );
+                REQUIRE( namesOf( ProfileStore( path ).list() )
+                         == QStringList{ "prod", "dev", "audit" } );
+            }
+        }
+
+        WHEN( "audit, still replaying, is saved as a capture and then removed" )
+        {
+            REQUIRE( store.upsert( profile( "audit" ) ).isEmpty() );
+            const auto problem = store.remove( "audit" );
+
+            THEN( "the store names what runs, the replay, not what is saved" )
+            {
+                REQUIRE( problem == "The connection audit is replaying: stop it to delete it." );
+            }
+        }
+
+        WHEN( "prod, still capturing, is saved as a replay and then removed" )
+        {
+            auto replay = profile( "prod" );
+            replay.replayChosen = true;
+            replay.replay.stream = "ORDERS";
+            REQUIRE( store.upsert( replay ).isEmpty() );
+            const auto problem = store.remove( "prod" );
+
+            THEN( "the store names what runs, the capture" )
+            {
+                REQUIRE( problem == "The connection prod is capturing: stop it to delete it." );
             }
         }
 
@@ -383,7 +440,60 @@ SCENARIO( "the profile store does not remove a connection that runs", "[profiles
             THEN( "it goes" )
             {
                 REQUIRE( store.remove( "dev" ).isEmpty() );
-                REQUIRE( namesOf( store.list() ) == QStringList{ "prod" } );
+                REQUIRE( namesOf( store.list() ) == QStringList{ "prod", "audit" } );
+            }
+        }
+    }
+}
+
+SCENARIO( "the profile store neither saves nor removes a connection that is stopping",
+          "[profiles]" )
+{
+    GIVEN( "a store whose connection prod is stopping" )
+    {
+        QTemporaryDir dir;
+        const auto path = dir.filePath( "nats.ini" );
+        auto state = SessionState::Stopped;
+        ProfileStore store( path, [ &state ]( const QString& name ) {
+            return sessionIn( name == "prod" ? state : SessionState::Stopped );
+        } );
+        REQUIRE( store.upsert( profile( "prod" ) ).isEmpty() );
+        state = SessionState::Stopping;
+
+        WHEN( "it is saved with other settings" )
+        {
+            ChangeCounter changed( store );
+            const auto problem = store.upsert( profile( "prod", "nats://elsewhere:4222" ) );
+
+            THEN( "the store refuses, saying to wait until it has stopped, and keeps it as it was" )
+            {
+                REQUIRE( problem
+                         == "The connection prod is stopping: save it once it has stopped." );
+                REQUIRE( changed.count() == 0 );
+                REQUIRE( ProfileStore( path ).find( "prod" )->url == "nats://localhost:4222" );
+            }
+        }
+
+        WHEN( "it is removed" )
+        {
+            const auto problem = store.remove( "prod" );
+
+            THEN( "the store refuses, saying to wait until it has stopped, and keeps it" )
+            {
+                REQUIRE( problem
+                         == "The connection prod is stopping: delete it once it has stopped." );
+                REQUIRE( namesOf( ProfileStore( path ).list() ) == QStringList{ "prod" } );
+            }
+        }
+
+        WHEN( "it has stopped" )
+        {
+            state = SessionState::Stopped;
+
+            THEN( "it is saved and removed again" )
+            {
+                REQUIRE( store.upsert( profile( "prod", "nats://elsewhere:4222" ) ).isEmpty() );
+                REQUIRE( store.remove( "prod" ).isEmpty() );
             }
         }
     }
@@ -502,6 +612,147 @@ SCENARIO( "profiles saved by earlier versions still load", "[profiles]" )
             REQUIRE( audit->replayChosen );
             REQUIRE_FALSE( prod->replayChosen );
             REQUIRE( store.newProfile().maxFileMiB == 9 );
+        }
+    }
+}
+
+SCENARIO( "a saved replay start that cannot be read or is out of range is not started",
+          "[profiles][checks]" )
+{
+    QTemporaryDir dir;
+    const auto path = dir.filePath( "nats.ini" );
+    const QString timeRange = "The start time must be from 1970-01-01 00:00:01.000000Z to "
+                              "2262-04-11 23:47:16.000000Z.";
+    struct Row {
+        const char* what;
+        const char* start;
+        const char* sequence;
+        const char* timeUs;
+        QString problem; ///< Empty: none.
+    };
+    const std::vector<Row> rows{
+        { "the largest sequence", "sequence", "18446744073709551615", "0", {} },
+        { "a sequence above the largest", "sequence", "18446744073709551616", "0",
+          "18446744073709551616 is not a stream sequence: they go from 1 to "
+          "18446744073709551615." },
+        { "a sequence that is not a number", "sequence", "seven", "0",
+          "seven is not a stream sequence: they go from 1 to 18446744073709551615." },
+        { "the sequence 0", "sequence", "0", "0", "A stream's sequences start at 1." },
+        { "a time", "time", "1", "1794391200000000", {} },
+        { "the time 0", "time", "1", "0", timeRange },
+        { "a negative time", "time", "1", "-1794391200000000", timeRange },
+        { "a time whose nanoseconds overflow", "time", "1", "9223372036854775807", timeRange },
+        { "a time above what a number holds", "time", "1", "9223372036854775808",
+          "9223372036854775808 is not a start time: one is a number of microseconds since "
+          "1970." },
+        { "a time that is not a number", "time", "1", "noon",
+          "noon is not a start time: one is a number of microseconds since 1970." },
+        { "the last messages, with a sequence and a time that cannot be read",
+          "last",
+          "seven",
+          "noon",
+          {} },
+    };
+    for ( const auto& row : rows ) {
+        GIVEN( std::string( "nats.ini with a replay from " ) + row.what )
+        {
+            writeFile( path, QByteArray( "[profiles]\n"
+                                         "1\\name=audit\n"
+                                         "1\\url=nats://localhost:4222\n"
+                                         "1\\replay\\stream=ORDERS\n"
+                                         "1\\replay\\start=" )
+                                 + row.start + "\n1\\replay\\sequence=" + row.sequence
+                                 + "\n1\\replay\\timeUs=" + row.timeUs
+                                 + "\n2\\name=prod\n"
+                                   "2\\url=nats://localhost:4222\n"
+                                   "size=2\n" );
+            ProfileStore store( path );
+            const auto audit = store.find( "audit" );
+            REQUIRE( audit );
+
+            THEN( "the start check gives the reason, for the profile and its session config" )
+            {
+                REQUIRE( startProblem( *audit ) == row.problem );
+                REQUIRE( startProblem( nats_monitor::sessionConfig( *audit ) ) == row.problem );
+            }
+
+            WHEN( "another connection is deleted, which writes the file again" )
+            {
+                REQUIRE( store.remove( "prod" ).isEmpty() );
+
+                THEN( "the sequence and the time are kept as they were" )
+                {
+                    const auto again = ProfileStore( path ).find( "audit" );
+                    REQUIRE( again );
+                    REQUIRE( startProblem( *again ) == row.problem );
+                    REQUIRE( again->replay.unreadSequence == audit->replay.unreadSequence );
+                    REQUIRE( again->replay.unreadTime == audit->replay.unreadTime );
+                }
+            }
+        }
+    }
+}
+
+SCENARIO( "a saved number of last messages that cannot be read is not started, not taken for 100",
+          "[profiles][checks]" )
+{
+    QTemporaryDir dir;
+    const auto path = dir.filePath( "nats.ini" );
+    const QString unread = " is not a number of messages: it goes from 1 to 18446744073709551615.";
+    struct Row {
+        const char* what;
+        const char* line; ///< The lastMessages line of nats.ini; empty: none.
+        quint64 lastMessages;
+        QString problem; ///< Empty: none.
+    };
+    const std::vector<Row> rows{
+        { "no number saved", "", 100, {} },
+        { "the last 7", "1\\replay\\lastMessages=7\n", 7, {} },
+        { "the most",
+          "1\\replay\\lastMessages=18446744073709551615\n",
+          18446744073709551615ULL,
+          {} },
+        { "one above the most", "1\\replay\\lastMessages=18446744073709551616\n", 100,
+          "18446744073709551616" + unread },
+        { "a number that is not one", "1\\replay\\lastMessages=abc\n", 100, "abc" + unread },
+        { "a negative number", "1\\replay\\lastMessages=-1\n", 100, "-1" + unread },
+        { "the last 0", "1\\replay\\lastMessages=0\n", 0,
+          "Replaying the last 0 messages replays nothing." },
+        { "an empty number", "1\\replay\\lastMessages=\n", 0,
+          "Replaying the last 0 messages replays nothing." },
+    };
+    for ( const auto& row : rows ) {
+        GIVEN( std::string( "nats.ini with a replay of the last messages, " ) + row.what )
+        {
+            writeFile( path, QByteArray( "[profiles]\n"
+                                         "1\\name=audit\n"
+                                         "1\\url=nats://localhost:4222\n"
+                                         "1\\replay\\stream=ORDERS\n"
+                                         "1\\replay\\start=last\n" )
+                                 + row.line
+                                 + "2\\name=prod\n"
+                                   "2\\url=nats://localhost:4222\n"
+                                   "size=2\n" );
+            ProfileStore store( path );
+            const auto audit = store.find( "audit" );
+            REQUIRE( audit );
+
+            THEN( "the start check gives the reason, for the profile and its session config" )
+            {
+                REQUIRE( audit->replay.lastMessages == row.lastMessages );
+                REQUIRE( startProblem( *audit ) == row.problem );
+                REQUIRE( startProblem( nats_monitor::sessionConfig( *audit ) ) == row.problem );
+            }
+
+            WHEN( "another connection is deleted, which writes the file again" )
+            {
+                REQUIRE( store.remove( "prod" ).isEmpty() );
+
+                THEN( "the number is kept as it was" )
+                {
+                    REQUIRE( startProblem( *ProfileStore( path ).find( "audit" ) ) == row.problem );
+                }
+            }
         }
     }
 }

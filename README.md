@@ -143,7 +143,7 @@ After installing, restart LogSquirl or re-scan via *Plugins → Manage Plugins�
      UTF-8 are written, as hex (256 by default).
    - **Pending at most** — how many messages and MiB nats.c holds for each
      subject before it drops as a slow consumer (1,000,000 and 512 MiB).
-   - **New file at** — the size, in MiB, at which the capture goes on in a
+   - **New file at** — the size, in MiB, at which the session goes on in a
      new file, opened in a new tab and noted in LogSquirl's log (256 MiB;
      *No limit* turns it off). A message line is never split. A new
      connection proposes the last one saved.
@@ -156,8 +156,11 @@ After installing, restart LogSquirl or re-scan via *Plugins → Manage Plugins�
    - **Subject** — replay only the messages on this subject (`*` and `>`
      allowed); empty for all of the stream's.
    - **Start at** — *All messages*, the *Last messages* (the last N, of
-     those that match the subject), *From sequence* (a stream sequence) or
-     *From time (UTC)*.
+     those that match the subject, from 1 to 18446744073709551615),
+     *From sequence* (a stream sequence,
+     from 1 to 18446744073709551615) or *From time (UTC)* (from
+     1970-01-01 00:00:01 to 2262-04-11 23:47:16). A start outside these is
+     not saved, saying why.
    - **Then go on with new messages (follow live)** — once caught up, keep
      writing what the stream stores from then on, until Stop. Without it
      the replay ends by itself, with a `replay complete` line, and the
@@ -201,7 +204,13 @@ After installing, restart LogSquirl or re-scan via *Plugins → Manage Plugins�
      file it is after a rotation. The dropped count is also in the file, a
      `dropped=` line where each gap is.
    - **■ Stop** stops it; the tab keeps what was captured, and the tile
-     what it counted. **■ Stop all** at the top stops every tile.
+     what it counted. **■ Stop all** at the top stops every tile. Stop
+     returns at once: the tile says *stopping…* until the session has
+     ended (its last lines written, the file closed); against a server
+     that does not answer, its timeouts add up to 35 seconds (and 2 more
+     for each server of its URL list), plus writing what was still
+     queued, then
+     *stopped*. Until then it cannot be started, edited or deleted.
    - A connection that fails says why on its tile, in words you can act on
      (the server refused the password, the server's certificate is not
      trusted, …), and in a notification.
@@ -466,9 +475,11 @@ sequenceDiagram
     end
     User->>T: Click Stop
     T->>SS: stop(name)
-    SS->>S: stop()
+    SS->>S: requestStop()
+    S-->>T: stopping… (returns at once)
     S->>W: drain subscriptions, close
     W->>F: last lines + stopped marker
+    S-->>T: stopped
     Note over LS: Tab stays open with captured output
 ```
 
@@ -483,7 +494,7 @@ sequenceDiagram
 | **Callbacks never block** | nats.c's threads only format and enqueue; one writer thread per session owns the file and writes in batches. |
 | **Drops are lines** | A `dropped=` marker where the gap is, so the log itself shows what is missing. |
 | **One line per subscription** | Overlapping subjects are written as the server delivers them; deduplicating would hide that. |
-| **Secrets never saved** | Profiles hold no password or token; a `.creds` file keeps credentials on disk. |
+| **Secrets never saved** | Profiles hold no password or token; a `.creds` file keeps credentials on disk. Once nats.c has a secret, the plugin's copies are wiped from memory. |
 | **No built-in filtering** | LogSquirl's regex search and highlighters do it better. |
 
 The threads, the queue, the writer and the rotation are described in
@@ -524,6 +535,7 @@ LogSquirl-NATS/
 │   ├── natsoptions.*           # Settings → nats.c options, connecting; failures in words
 │   ├── authmethods.h           # The authentication methods, one table
 │   ├── nkey.*                  # The public key of an NKey seed
+│   ├── secrets.*               # Wiping a secret once nats.c has it
 │   ├── profiles.*              # Saved connection profiles
 │   ├── subjects.*              # Subjects as entered, overlap check
 │   ├── lineformat.*            # One message → one line

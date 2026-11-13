@@ -99,6 +99,35 @@ SCENARIO( "a tile shows by a dot whether its connection runs", "[tile]" )
             }
         }
 
+        WHEN( "it is stopping" )
+        {
+            tile.setState( TileState::Stopping );
+
+            THEN( "the dot says so, and it can neither be started, stopped again, edited nor "
+                  "deleted" )
+            {
+                REQUIRE( stateOf( tile ) == "stopping" );
+                REQUIRE( button( tile, "startStop" )->text().contains( "Stopping" ) );
+                REQUIRE_FALSE( button( tile, "startStop" )->isEnabled() );
+                REQUIRE_FALSE( button( tile, "edit" )->isEnabled() );
+                REQUIRE_FALSE( button( tile, "delete" )->isVisible() );
+                REQUIRE( tile.property( "running" ).toBool() );
+            }
+
+            AND_WHEN( "it has stopped" )
+            {
+                tile.setState( TileState::Stopped );
+
+                THEN( "it can be started, edited and deleted again" )
+                {
+                    REQUIRE( button( tile, "startStop" )->text().contains( "Start" ) );
+                    REQUIRE( button( tile, "startStop" )->isEnabled() );
+                    REQUIRE( button( tile, "edit" )->isEnabled() );
+                    REQUIRE( button( tile, "delete" )->isVisible() );
+                }
+            }
+        }
+
         WHEN( "it failed" )
         {
             tile.setState( TileState::Failed );

@@ -125,6 +125,19 @@ SCENARIO( "a tile shows its connection's status", "[sidebar]" )
             }
         }
 
+        WHEN( "it is stopping" )
+        {
+            status.state = SessionState::Stopping;
+            status.detail = "stopping…";
+
+            THEN( "the tile is stopping, saying so, with the counts and the file" )
+            {
+                const auto view = tileViewOf( status );
+                REQUIRE( view.state == TileState::Stopping );
+                REQUIRE( view.details == QStringList{ "stopping…", counts, fileLine } );
+            }
+        }
+
         WHEN( "it was stopped, or its replay is complete" )
         {
             status.state = SessionState::Stopped;

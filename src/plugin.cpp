@@ -253,10 +253,11 @@ LOGSQUIRL_PLUGIN_EXPORT int logsquirl_plugin_init( const LogSquirlHostApi* api, 
         auto& st = nats_monitor::g_state;
         st.sessions
             = new nats_monitor::Sessions( nats_monitor::pluginHost(), nats_monitor::tempRoot() );
-        // The one owner of nats.ini; it deletes no connection that runs.
+        // The one owner of nats.ini; it deletes no connection that runs, and
+        // neither saves nor deletes one that is stopping.
         st.profiles = new nats_monitor::ProfileStore(
             nats_monitor::settingsFile(), [ sessions = st.sessions ]( const QString& name ) {
-                return sessions->isRunning( name );
+                return sessions->status( name );
             } );
         st.dialog = new nats_monitor::ConnectionDialog( st.profiles, st.sessions );
 
@@ -330,8 +331,10 @@ LOGSQUIRL_PLUGIN_EXPORT void logsquirl_plugin_shutdown( void )
         st.profiles = nullptr;
     }
     if ( st.sessions ) {
-        // Stops the sessions: their files are flushed and kept for the tabs.
-        guarded( "stopping the NATS sessions", [ &st ] { st.sessions->stopAll(); } );
+        // Stops the sessions, all at once, and waits until each has ended:
+        // their files are flushed and kept for the tabs, and no thread of
+        // theirs runs the library's code once it is unloaded.
+        guarded( "stopping the NATS sessions", [ &st ] { st.sessions->stopAllAndWait(); } );
         guarded( "shutdown", [ &st ] { delete st.sessions; } );
         st.sessions = nullptr;
     }

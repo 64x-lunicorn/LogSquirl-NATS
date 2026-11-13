@@ -26,6 +26,7 @@
 
 #include "authmethods.h"
 #include "nkey.h"
+#include "secrets.h"
 
 #include <QFile>
 #include <QUrl>
@@ -41,14 +42,15 @@ namespace {
 // ── Files ────────────────────────────────────────────────────────────────
 
 /// Empty if @p path can be read, else why not, naming it as @p what.  With
-/// @p contents, what the file holds is read into it.
+/// @p contents, what the file holds is read into it: in one piece, with no
+/// copy left in a buffer of QFile's, since it may be a seed.
 QString readFile( const QString& path, const QString& what, QByteArray* contents = nullptr )
 {
     if ( path.isEmpty() ) {
         return QStringLiteral( "no %1 given" ).arg( what );
     }
     QFile file( path );
-    if ( file.open( QIODevice::ReadOnly ) && contents ) {
+    if ( file.open( QIODevice::ReadOnly | QIODevice::Unbuffered ) && contents ) {
         *contents = file.readAll();
     }
     if ( file.error() != QFileDevice::NoError ) {
@@ -71,13 +73,20 @@ QString configureAuth( natsOptions* options, const AuthConfig& auth )
     switch ( auth.method ) {
     case AuthMethod::None:
         return {};
-    case AuthMethod::UserPassword:
+    case AuthMethod::UserPassword: {
+        // nats.c copies it: this copy is wiped at once.
+        auto secret = auth.secret.toUtf8();
         status = natsOptions_SetUserInfo( options, auth.user.toUtf8().constData(),
-                                          auth.secret.toUtf8().constData() );
+                                          secret.constData() );
+        wipe( secret );
         break;
-    case AuthMethod::Token:
-        status = natsOptions_SetToken( options, auth.secret.toUtf8().constData() );
+    }
+    case AuthMethod::Token: {
+        auto secret = auth.secret.toUtf8();
+        status = natsOptions_SetToken( options, secret.constData() );
+        wipe( secret );
         break;
+    }
     case AuthMethod::Credentials: {
         const auto problem = readFile( auth.file, what );
         if ( !problem.isEmpty() ) {
@@ -93,7 +102,9 @@ QString configureAuth( natsOptions* options, const AuthConfig& auth )
         if ( !problem.isEmpty() ) {
             return problem;
         }
+        // nats.c reads the seed from the file itself, when it signs.
         const auto publicKey = nkeyUserPublicKey( seedFile );
+        wipe( seedFile );
         if ( publicKey.isEmpty() ) {
             return QStringLiteral( "no NKey seed in %1" ).arg( auth.file );
         }

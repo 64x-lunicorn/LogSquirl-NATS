@@ -30,7 +30,10 @@
 #include "natssession.h"
 #include "profiles.h"
 #include "replay.h"
+#include "secrets.h"
 
+#include <QPointer>
+#include <QScopeGuard>
 #include <QTimer>
 
 #include <chrono>
@@ -95,29 +98,35 @@ Sessions::Sessions( HostAdapter& host, const QString& tempRoot, QObject* parent,
 {
     // The timer runs in the host's event loop: nothing may throw into it.
     connect( timer_, &QTimer::timeout, this,
-             [ this ] { guarded( host_, "counting the captures", [ this ] { sample(); } ); } );
+             [ this ] { guarded( host_, "counting the sessions", [ this ] { sample(); } ); } );
     timer_->start( kSampleMs );
 }
 
 Sessions::~Sessions()
 {
-    stopAll();
+    stopAllAndWait();
 }
 
-bool Sessions::start( const ConnectionProfile& profile )
+bool Sessions::start( ConnectionProfile& profile )
 {
+    // Every copy of the secret is wiped, here and in the session: they share
+    // Qt's data, which only the last to let go of it overwrites (secrets.h).
+    const auto profileWiped = qScopeGuard( [ &profile ] { wipe( profile.auth.secret ); } );
     const auto name = profile.name;
     auto& entry = entries_[ name ];
     if ( entry.session ) {
-        return true;
+        return !entry.session->isStopping(); // stopping: it starts once it has ended
     }
     entry.status = {};
+    entry.notifyStopped = false;
+    entry.replay = profile.replay.enabled();
     if ( const auto problem = startProblem( profile ); !problem.isEmpty() ) {
         entry.status.apply( { Transition::Kind::Failed, problem, {} } );
         Q_EMIT changed( name );
         return false;
     }
-    const auto config = sessionConfig( profile );
+    auto config = sessionConfig( profile );
+    const auto configWiped = qScopeGuard( [ &config ] { wipe( config.auth.secret ); } );
     if ( config.tls.skipVerify ) {
         host_.log(
             LOGSQUIRL_LOG_WARNING,
@@ -131,7 +140,8 @@ bool Sessions::start( const ConnectionProfile& profile )
     // may throw into it.
     connect( session, &NatsSession::transitioned, this,
              [ this, name, description ]( const Transition& transition ) {
-                 guarded( host_, "showing a capture", [ this, &name, &description, &transition ] {
+                 guarded( host_, "showing a session", [ this, &name, &description, &transition ] {
+                     const bool notifyStopped = entries_[ name ].notifyStopped;
                      onTransition( name, transition );
                      if ( transition.kind == Transition::Kind::Failed ) {
                          reportError( host_, description, transition.detail );
@@ -139,11 +149,14 @@ bool Sessions::start( const ConnectionProfile& profile )
                      else if ( transition.kind == Transition::Kind::Completed ) {
                          host_.notify( QStringLiteral( "NATS %1 complete." ).arg( description ) );
                      }
+                     else if ( transition.kind == Transition::Kind::Stopped && notifyStopped ) {
+                         host_.notify( QStringLiteral( "NATS %1 stopped." ).arg( description ) );
+                     }
                  } );
              } );
     connect( session, &NatsSession::errorOccurred, this,
              [ this, name, description ]( const QString& message ) {
-                 guarded( host_, "reporting a capture error",
+                 guarded( host_, "reporting a session error",
                           [ this, &name, &description, &message ] {
                               entries_[ name ].status.errorReported( message );
                               Q_EMIT changed( name );
@@ -182,36 +195,55 @@ bool Sessions::start( const ConnectionProfile& profile )
 void Sessions::stop( const QString& name, bool notify )
 {
     const auto it = entries_.find( name );
-    if ( it == entries_.end() || !it->session ) {
+    if ( it == entries_.end() || !it->session || it->session->isStopping() ) {
         return;
     }
-    auto* session = it->session;
-    const auto description = describeSession( session->config() );
-    session->stop(); // its Stopped transition lets go of it
-    if ( notify ) {
-        host_.notify( QStringLiteral( "NATS %1 stopped." ).arg( description ) );
-    }
+    it->notifyStopped = notify;
+    it->session->requestStop(); // Stopping now; its end lets go of it
 }
 
 void Sessions::stopAll( bool notify )
 {
-    // Stopped one after the other: each waits for its writer.
     const auto names = entries_.keys();
     for ( const auto& name : names ) {
         stop( name, notify );
     }
 }
 
+void Sessions::stopAllAndWait()
+{
+    // All asked first, so that they end side by side: the wait is the
+    // slowest stop, not the sum of them.
+    stopAll();
+    QList<QPointer<NatsSession>> sessions;
+    for ( const auto& entry : std::as_const( entries_ ) ) {
+        if ( entry.session ) {
+            sessions << entry.session;
+        }
+    }
+    for ( const auto& session : std::as_const( sessions ) ) {
+        if ( session ) {
+            session->stop(); // waits; its end lets go of it
+        }
+    }
+}
+
 bool Sessions::isRunning( const QString& name ) const
 {
     const auto it = entries_.constFind( name );
-    return it != entries_.constEnd() && it->session;
+    return it != entries_.constEnd() && it->session && !it->session->isStopping();
+}
+
+bool Sessions::isStopping( const QString& name ) const
+{
+    const auto it = entries_.constFind( name );
+    return it != entries_.constEnd() && it->session && it->session->isStopping();
 }
 
 bool Sessions::anyRunning() const
 {
     for ( const auto& entry : entries_ ) {
-        if ( entry.session ) {
+        if ( entry.session && !entry.session->isStopping() ) {
             return true;
         }
     }
@@ -221,7 +253,12 @@ bool Sessions::anyRunning() const
 SessionStatus Sessions::status( const QString& name ) const
 {
     const auto it = entries_.constFind( name );
-    return it == entries_.constEnd() ? SessionStatus{} : it->status.status();
+    if ( it == entries_.constEnd() ) {
+        return {};
+    }
+    auto status = it->status.status();
+    status.replay = it->replay;
+    return status;
 }
 
 void Sessions::sample()
@@ -258,6 +295,7 @@ void Sessions::onTransition( const QString& name, const Transition& transition )
         break;
     case Transition::Kind::Running:
     case Transition::Kind::Reconnecting:
+    case Transition::Kind::Stopping:
         entry.status.apply( transition );
         break;
     case Transition::Kind::Failed:

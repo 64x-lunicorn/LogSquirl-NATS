@@ -65,6 +65,8 @@ const char* stateName( TileState state )
         return "connecting";
     case TileState::Running:
         return "running";
+    case TileState::Stopping:
+        return "stopping";
     case TileState::Failed:
         return "failed";
     case TileState::Stopped:
@@ -93,6 +95,7 @@ ConnectionTile::ConnectionTile( const QString& name, QWidget* parent )
     , separator_( new QFrame( this ) )
     , details_( textLabel( "details", this ) )
     , startStop_( new QPushButton( this ) )
+    , edit_( new QPushButton( QStringLiteral( "Edit…" ), this ) )
     , delete_( new QPushButton( QStringLiteral( "Delete" ), this ) )
 {
     setObjectName( "tile" );
@@ -117,9 +120,7 @@ ConnectionTile::ConnectionTile( const QString& name, QWidget* parent )
     details_->hide();
 
     startStop_->setObjectName( "startStop" );
-    auto* edit = new QPushButton( QStringLiteral( "Edit…" ), this );
-    edit->setObjectName( "edit" );
-    edit->setToolTip( QStringLiteral( "Change the settings of this connection" ) );
+    edit_->setObjectName( "edit" );
     delete_->setObjectName( "delete" );
     delete_->setToolTip( QStringLiteral( "Delete this saved connection" ) );
 
@@ -131,7 +132,7 @@ ConnectionTile::ConnectionTile( const QString& name, QWidget* parent )
 
     auto* foot = new QHBoxLayout;
     foot->addStretch();
-    foot->addWidget( edit );
+    foot->addWidget( edit_ );
     foot->addWidget( delete_ );
 
     auto* layout = new QVBoxLayout( this );
@@ -151,7 +152,7 @@ ConnectionTile::ConnectionTile( const QString& name, QWidget* parent )
             Q_EMIT startClicked();
         }
     } );
-    connect( edit, &QPushButton::clicked, this, &ConnectionTile::editClicked );
+    connect( edit_, &QPushButton::clicked, this, &ConnectionTile::editClicked );
     connect( delete_, &QPushButton::clicked, this, &ConnectionTile::deleteClicked );
 
     setState( TileState::Stopped );
@@ -177,15 +178,29 @@ void ConnectionTile::setDetails( const QStringList& lines )
 void ConnectionTile::setState( TileState state )
 {
     active_ = state == TileState::Connecting || state == TileState::Running;
-    startStop_->setText( active_ ? QStringLiteral( "■ Stop" ) : QStringLiteral( "▶ Start" ) );
-    startStop_->setToolTip( active_ ? QStringLiteral( "Stop the capture; its tab keeps the file" )
-                                    : QStringLiteral( "Connect, and capture into a new tab" ) );
-    delete_->setVisible( !active_ );
+    const bool stopping = state == TileState::Stopping;
+    if ( stopping ) {
+        startStop_->setText( QStringLiteral( "Stopping…" ) );
+        startStop_->setToolTip(
+            QStringLiteral( "The session is ending; it can be started again once it has" ) );
+    }
+    else {
+        startStop_->setText( active_ ? QStringLiteral( "■ Stop" ) : QStringLiteral( "▶ Start" ) );
+        startStop_->setToolTip(
+            active_ ? QStringLiteral( "Stop the session; its tab keeps the file" )
+                    : QStringLiteral( "Connect, and write the session into a new tab" ) );
+    }
+    startStop_->setEnabled( !stopping );
+    edit_->setEnabled( !stopping );
+    edit_->setToolTip( stopping ? QStringLiteral( "The session is ending; edit the connection "
+                                                  "once it has" )
+                                : QStringLiteral( "Change the settings of this connection" ) );
+    delete_->setVisible( !active_ && !stopping );
 
     const auto* name = stateName( state );
     state_->setProperty( "state", QString::fromLatin1( name ) );
     state_->setToolTip( QString::fromLatin1( name ) );
-    setProperty( "running", active_ );
+    setProperty( "running", active_ || stopping );
     repolish( state_ );
     repolish( this );
 }
@@ -251,7 +266,8 @@ void ConnectionTile::applyStyle()
                                    "QLabel#details { color: %4; }"
                                    "QLabel#state { border: none; border-radius: %5px;"
                                    " background: %6; }"
-                                   "QLabel#state[state=\"connecting\"] { background: #d29922; }"
+                                   "QLabel#state[state=\"connecting\"],"
+                                   " QLabel#state[state=\"stopping\"] { background: #d29922; }"
                                    "QLabel#state[state=\"running\"] { background: #2ea043; }"
                                    "QLabel#state[state=\"failed\"] { background: #e5534b; }" )
                        .arg( card.name(), border.name(), accent.name(), muted.name() )

@@ -43,6 +43,10 @@ void ConnectionStatus::apply( const Transition& transition )
         status_.state = SessionState::Connecting;
         status_.server.clear();
         break;
+    case Kind::Stopping:
+        status_.state = SessionState::Stopping;
+        status_.server.clear();
+        break;
     case Kind::Failed:
     case Kind::Completed:
     case Kind::Stopped:

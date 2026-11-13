@@ -46,6 +46,18 @@
  * those not marked yet when the capture ends are written before its last
  * marker.
  *
+ * HOLDING BACK
+ * ────────────
+ * A live capture's subscriptions deliver before the round trip that
+ * confirms them, but its "connected" marker must be its first line.  So
+ * the session has the sink hold back what it takes meanwhile
+ * (holdMessages()), and then either puts the marker before all of it
+ * (releaseHeld()) or, the round trip failed, discards the held messages
+ * and those still to come, uncounted (discardHeld()).  What was queued
+ * before the hold and not yet written stays before the marker, and is
+ * not discarded.  A replay writes its marker before it subscribes, and
+ * holds nothing back.
+ *
  * THE WRITER
  * ──────────
  * start() runs the writer thread: it waits until lines are queued, swaps
@@ -62,8 +74,16 @@
  * Event::Rotated.  A line longer than the limit is written whole, alone in
  * its file.  Should the next file not open, the writer keeps writing the
  * current one, reports Event::FileError, and tries again once that file has
- * grown by the limit once more.  0 means no limit.  A write or flush that
- * fails is reported once, as Event::FileError; nothing more is written.
+ * grown by the limit once more.  0 means no limit.
+ *
+ * WRITE FAILURE
+ * ─────────────
+ * A write or flush that fails (a full disk, a volume gone) is reported
+ * once, as Event::WriteFailed, and ends the writing: nothing more is
+ * written, and from then on every message is discarded, uncounted, as after
+ * discardMessages(), so that received() no longer grows for lines that
+ * would never be written.  A message() waiting for room is let go.  The
+ * events of the marker lines are still reported; the session ends on it.
  *
  * EVENTS
  * ──────
@@ -94,6 +114,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -122,7 +143,12 @@ public:
             Status,
             Error,   ///< A marker of an error the capture runs on after; the text is what it says.
             Rotated, ///< The capture goes on in another file; the text is its path.
-            FileError, ///< A file could not be written or started; the text says why.
+            /// The next file could not be started; the capture goes on in
+            /// the one it writes.  The text says why.
+            FileError,
+            /// The file can no longer be written: nothing more is, and no
+            /// message is taken any more.  The text says why, naming the file.
+            WriteFailed,
         };
         Kind kind = Kind::Status;
         QString text;
@@ -181,7 +207,7 @@ public:
      * (Mode::WaitForRoom).  Counted as received if queued or dropped.
      *
      * @return false if it was discarded instead, uncounted: after
-     *         discardMessages() or finish().
+     *         discardMessages(), a write failure or finish().
      */
     bool message( QByteArray line );
 
@@ -198,7 +224,31 @@ public:
     /// keeps them.  Marker lines are still written.
     void discardMessages();
 
-    /// Whether discardMessages() was called.
+    /// Hold back what is queued from now on, and what is queued already
+    /// and not yet written, written by none until releaseHeld() or
+    /// discardHeld(): a live capture's subscriptions are active before the
+    /// round trip that confirms them, and what they deliver meanwhile must
+    /// not come before the "connected" marker.  Messages are counted and
+    /// dropped as ever (the queue does not drain meanwhile).  Not for
+    /// Mode::WaitForRoom: a full queue would wait.
+    void holdMessages();
+
+    /// Queue the marker line saying @p text before what was queued since
+    /// holdMessages(), after what was queued before it, and write on: the
+    /// held lines follow the marker, in their order.  Reported as marker()
+    /// reports it.
+    void releaseHeld( const QString& text, Event::Kind kind, const QString& eventText = {} );
+
+    /// Discard the message lines queued since holdMessages(), and the
+    /// queue-full drops since, neither written nor counted, and every
+    /// message from now on (discardMessages()), and write on: the round
+    /// trip failed, so none was captured as connected.  What was queued
+    /// before the hold, and the marker lines held back (nats.c's drops, a
+    /// disconnect), are written.
+    void discardHeld();
+
+    /// Whether messages are discarded: discardMessages() was called, or the
+    /// file can no longer be written.
     bool discarding() const
     {
         return discarding_.load();
@@ -228,7 +278,8 @@ public:
      * End the capture: queue the marker of the queue-full drops not marked
      * yet and then, unless @p text is empty, the last marker saying @p text
      * (reported as @p kind); write all of it, close the file and join the
-     * writer.  The sink takes nothing more.  No-op once finished.
+     * writer.  The sink takes nothing more.  No-op once finished.  What is
+     * still held back is discarded first (discardHeld()).
      */
     void finish( const QString& text = {}, Event::Kind kind = Event::Kind::Status );
 
@@ -236,13 +287,21 @@ private:
     class RotatingFile;
 
     struct Item {
-        QByteArray line; ///< With its terminator.
+        QByteArray line;      ///< With its terminator.
+        bool message = false; ///< A message line, not a marker.
         bool reports = false;
         Event event;
     };
 
-    /// Queue @p line (without terminator), reporting nothing; under the mutex.
+    /// Queue the marker line @p line (without terminator), reporting
+    /// nothing; under the mutex.
     void enqueueLocked( QByteArray line );
+
+    /// Queue the message line @p line (without terminator); under the mutex.
+    void enqueueMessageLocked( QByteArray line );
+
+    /// discardHeld(), under the mutex.
+    void discardHeldLocked();
 
     /// Queue the marker line @p line (without terminator), reported as
     /// @p event; under the mutex.
@@ -263,7 +322,7 @@ private:
     /// Go on in the next file if a line of @p lineBytes would not fit.
     void rotateBefore( qint64 lineBytes );
 
-    /// The file cannot be written: say so once.
+    /// The file cannot be written: take no message more, and say so once.
     void fail();
 
     void report( const Event& event );
@@ -281,6 +340,12 @@ private:
     quint64 queueFullUnmarked_ = 0; ///< Dropped from a full queue, not marked yet.
     int waiting_ = 0;               ///< Callers of message() waiting for room.
     bool finishing_ = false;        ///< finish() was called: take nothing more.
+    bool holding_ = false;          ///< holdMessages(): the writer takes nothing.
+    /// Holding: the lines queued before holdMessages() (and not taken by
+    /// the writer), which the held ones follow.
+    std::size_t heldFrom_ = 0;
+    /// Holding: of queueFullUnmarked_, the drops from before holdMessages().
+    quint64 queueFullBeforeHold_ = 0;
     std::atomic<bool> discarding_{ false };
     std::atomic<quint64> received_{ 0 };
     std::atomic<quint64> dropped_{ 0 };

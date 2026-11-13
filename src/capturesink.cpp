@@ -28,6 +28,7 @@
 
 #include <QFileInfo>
 
+#include <algorithm>
 #include <utility>
 
 namespace nats_monitor {
@@ -96,7 +97,7 @@ public:
             rotateAt_ = bytes_ + maxBytes_;
             return { {},
                      QStringLiteral(
-                         "Cannot start the next file %1: %2; the capture goes on in %3." )
+                         "Cannot start the next file %1: %2; the session goes on in %3." )
                          .arg( path, next->errorString(), fileName() ) };
         }
         Rotation rotation{ path, {} };
@@ -218,7 +219,7 @@ bool CaptureSink::message( QByteArray line )
             return true;
         }
         markQueueFullLocked();
-        enqueueLocked( std::move( line ) );
+        enqueueMessageLocked( std::move( line ) );
         ++queuedMessages_;
     }
     wake_.notify_all();
@@ -261,6 +262,72 @@ void CaptureSink::discardMessages()
     room_.notify_all();
 }
 
+void CaptureSink::holdMessages()
+{
+    std::lock_guard<std::mutex> lock( mutex_ );
+    if ( holding_ ) {
+        return;
+    }
+    holding_ = true;
+    heldFrom_ = queue_.size();
+    queueFullBeforeHold_ = queueFullUnmarked_;
+}
+
+void CaptureSink::releaseHeld( const QString& text, Event::Kind kind, const QString& eventText )
+{
+    {
+        std::lock_guard<std::mutex> lock( mutex_ );
+        if ( finishing_ ) {
+            return;
+        }
+        const auto held = queue_.size();
+        enqueueLocked( formatMarker( nowUs(), text.toUtf8() ),
+                       { kind, eventText.isEmpty() ? text : eventText } );
+        if ( holding_ ) {
+            // The writer took nothing meanwhile: what was queued before the
+            // hold is still at the front, and the held lines follow it.
+            const auto queue = queue_.begin();
+            std::rotate( queue + static_cast<std::ptrdiff_t>( heldFrom_ ),
+                         queue + static_cast<std::ptrdiff_t>( held ), queue_.end() );
+            holding_ = false;
+            queueFullBeforeHold_ = 0;
+        }
+    }
+    wake_.notify_all();
+}
+
+void CaptureSink::discardHeld()
+{
+    {
+        std::lock_guard<std::mutex> lock( mutex_ );
+        discardHeldLocked();
+        discarding_ = true; // what nats.c delivers still was not confirmed either
+    }
+    wake_.notify_all();
+    room_.notify_all();
+}
+
+void CaptureSink::discardHeldLocked()
+{
+    if ( !holding_ ) {
+        return;
+    }
+    holding_ = false;
+    // Only what was queued since the hold; the writer took nothing meanwhile.
+    const auto held = queue_.begin() + static_cast<std::ptrdiff_t>( heldFrom_ );
+    const auto kept
+        = std::remove_if( held, queue_.end(), []( const Item& item ) { return item.message; } );
+    const auto messages = static_cast<quint64>( queue_.end() - kept );
+    queue_.erase( kept, queue_.end() );
+    queuedMessages_ -= static_cast<int>( messages );
+    const auto drops = queueFullUnmarked_ - queueFullBeforeHold_;
+    received_.fetch_sub( messages + drops );
+    dropped_.fetch_sub( drops );
+    queueFullUnmarked_ = queueFullBeforeHold_;
+    queueFullBeforeHold_ = 0;
+    room_.notify_all();
+}
+
 int CaptureSink::waitingForRoom() const
 {
     std::lock_guard<std::mutex> lock( mutex_ );
@@ -272,6 +339,9 @@ void CaptureSink::writeQueued()
     std::vector<Item> batch;
     {
         std::lock_guard<std::mutex> lock( mutex_ );
+        if ( holding_ ) {
+            return;
+        }
         batch = takeLocked();
     }
     write( batch );
@@ -284,6 +354,7 @@ void CaptureSink::finish( const QString& text, Event::Kind kind )
         if ( finishing_ ) {
             return;
         }
+        discardHeldLocked(); // never confirmed
         // Drops no message after them marks yet.
         markQueueFullLocked();
         if ( !text.isEmpty() ) {
@@ -305,13 +376,19 @@ void CaptureSink::finish( const QString& text, Event::Kind kind )
 void CaptureSink::enqueueLocked( QByteArray line )
 {
     line.append( '\n' );
-    queue_.push_back( { std::move( line ), false, {} } );
+    queue_.push_back( { std::move( line ), false, false, {} } );
+}
+
+void CaptureSink::enqueueMessageLocked( QByteArray line )
+{
+    line.append( '\n' );
+    queue_.push_back( { std::move( line ), true, false, {} } );
 }
 
 void CaptureSink::enqueueLocked( QByteArray line, const Event& event )
 {
     line.append( '\n' );
-    queue_.push_back( { std::move( line ), true, event } );
+    queue_.push_back( { std::move( line ), false, true, event } );
 }
 
 void CaptureSink::markQueueFullLocked()
@@ -320,6 +397,7 @@ void CaptureSink::markQueueFullLocked()
         enqueueLocked( formatMarker( nowUs(), "dropped=" + QByteArray::number( queueFullUnmarked_ )
                                                   + " (queue full)" ) );
         queueFullUnmarked_ = 0;
+        queueFullBeforeHold_ = 0; // marked, so kept like the other markers held back
     }
 }
 
@@ -339,7 +417,7 @@ void CaptureSink::run()
         bool finishing = false;
         {
             std::unique_lock<std::mutex> lock( mutex_ );
-            wake_.wait( lock, [ this ] { return !queue_.empty() || finishing_; } );
+            wake_.wait( lock, [ this ] { return ( !queue_.empty() && !holding_ ) || finishing_; } );
             batch = takeLocked();
             finishing = finishing_; // then nothing more is queued: this is the last batch
         }
@@ -382,7 +460,8 @@ void CaptureSink::rotateBefore( qint64 lineBytes )
 void CaptureSink::fail()
 {
     writeFailed_ = true;
-    report( { Event::Kind::FileError, file_->writeError() } );
+    discardMessages(); // received() counts nothing that would not be written
+    report( { Event::Kind::WriteFailed, file_->writeError() } );
 }
 
 void CaptureSink::report( const Event& event )
