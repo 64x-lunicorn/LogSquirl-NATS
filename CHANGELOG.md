@@ -74,7 +74,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written before the `connected to …, subscribed to …` marker; it is now
   held back and written right after it, in its order, none lost and none
   counted twice. Should that round trip fail, the failure is written and
-  the held messages are not (#40).
+  the held messages are not (#40). A line queued before the hold and not
+  yet written (an earlier marker) stays before the `connected` marker, in
+  its order, and is not discarded with the held ones (#49).
 - **A replay start that cannot be read is refused.** A stream sequence
   above the largest one (18446744073709551615) or left empty is not saved,
   where it was replayed from sequence 1; a sequence or time in nats.ini that

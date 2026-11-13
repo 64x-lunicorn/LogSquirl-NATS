@@ -382,6 +382,80 @@ SCENARIO( "messages held back until the connected marker are written after it", 
         }
     }
 
+    GIVEN( "a sink with a marker and a message queued, not yet written, when it begins to hold" )
+    {
+        QTemporaryDir dir;
+        Events events;
+        CaptureSink sink( configIn( dir, 100 ), events.reporter() );
+        REQUIRE( sink.open() );
+        sink.marker( "error x", Kind::Error );
+        REQUIRE( sink.message( line( "m0" ) ) );
+        sink.holdMessages();
+        REQUIRE( sink.message( line( "m1" ) ) );
+        REQUIRE( sink.message( line( "m2" ) ) );
+
+        WHEN( "the round trip confirms the subscriptions" )
+        {
+            sink.releaseHeld( "connected", Kind::Connected );
+            sink.finish( "stopped" );
+
+            THEN( "the marker goes before what was held back, after what was queued before" )
+            {
+                REQUIRE( Capture::read( sink.fileName() ).fields()
+                         == QList<LineFields>{ markerFields( "error x" ), fieldsOf( "m0" ),
+                                               markerFields( "connected" ), fieldsOf( "m1" ),
+                                               fieldsOf( "m2" ), markerFields( "stopped" ) } );
+                REQUIRE( events.all()
+                         == QList<CaptureSink::Event>{ { Kind::Error, "error x" },
+                                                       { Kind::Connected, "connected" },
+                                                       { Kind::Status, "stopped" } } );
+                REQUIRE( sink.received() == 3 );
+            }
+        }
+
+        WHEN( "the round trip fails" )
+        {
+            sink.discardHeld();
+            sink.finish( "subscribing to s failed: x" );
+
+            THEN( "only what was held back is discarded" )
+            {
+                REQUIRE( Capture::read( sink.fileName() ).fields()
+                         == QList<LineFields>{ markerFields( "error x" ), fieldsOf( "m0" ),
+                                               markerFields( "subscribing to s failed: x" ) } );
+                REQUIRE( sink.received() == 1 );
+            }
+        }
+    }
+
+    GIVEN( "a sink whose full queue dropped a message, not yet marked, when it begins to hold" )
+    {
+        QTemporaryDir dir;
+        Events events;
+        CaptureSink sink( configIn( dir, 1 ), events.reporter() );
+        REQUIRE( sink.open() );
+        REQUIRE( sink.message( line( "m0" ) ) );
+        REQUIRE( sink.message( line( "lost" ) ) );
+        sink.holdMessages();
+        REQUIRE( sink.message( line( "m1" ) ) );
+
+        WHEN( "the round trip fails" )
+        {
+            sink.discardHeld();
+            sink.finish( "subscribing to s failed: x" );
+
+            THEN( "the drop from before the hold is still marked and counted" )
+            {
+                REQUIRE( Capture::read( sink.fileName() ).fields()
+                         == QList<LineFields>{ fieldsOf( "m0" ),
+                                               markerFields( "dropped=1 (queue full)" ),
+                                               markerFields( "subscribing to s failed: x" ) } );
+                REQUIRE( sink.received() == 2 );
+                REQUIRE( sink.dropped() == 1 );
+            }
+        }
+    }
+
     GIVEN( "a started sink holding messages back" )
     {
         QTemporaryDir dir;

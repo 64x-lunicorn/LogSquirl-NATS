@@ -265,7 +265,12 @@ void CaptureSink::discardMessages()
 void CaptureSink::holdMessages()
 {
     std::lock_guard<std::mutex> lock( mutex_ );
+    if ( holding_ ) {
+        return;
+    }
     holding_ = true;
+    heldFrom_ = queue_.size();
+    queueFullBeforeHold_ = queueFullUnmarked_;
 }
 
 void CaptureSink::releaseHeld( const QString& text, Event::Kind kind, const QString& eventText )
@@ -279,10 +284,13 @@ void CaptureSink::releaseHeld( const QString& text, Event::Kind kind, const QStr
         enqueueLocked( formatMarker( nowUs(), text.toUtf8() ),
                        { kind, eventText.isEmpty() ? text : eventText } );
         if ( holding_ ) {
-            // The writer took nothing meanwhile: the front is before all that was held.
-            std::rotate( queue_.begin(), queue_.begin() + static_cast<std::ptrdiff_t>( held ),
-                         queue_.end() );
+            // The writer took nothing meanwhile: what was queued before the
+            // hold is still at the front, and the held lines follow it.
+            const auto queue = queue_.begin();
+            std::rotate( queue + static_cast<std::ptrdiff_t>( heldFrom_ ),
+                         queue + static_cast<std::ptrdiff_t>( held ), queue_.end() );
             holding_ = false;
+            queueFullBeforeHold_ = 0;
         }
     }
     wake_.notify_all();
@@ -305,14 +313,18 @@ void CaptureSink::discardHeldLocked()
         return;
     }
     holding_ = false;
-    const auto messages = static_cast<quint64>( queuedMessages_ );
-    queue_.erase( std::remove_if( queue_.begin(), queue_.end(),
-                                  []( const Item& item ) { return item.message; } ),
-                  queue_.end() );
-    queuedMessages_ = 0;
-    received_.fetch_sub( messages + queueFullUnmarked_ );
-    dropped_.fetch_sub( queueFullUnmarked_ );
-    queueFullUnmarked_ = 0;
+    // Only what was queued since the hold; the writer took nothing meanwhile.
+    const auto held = queue_.begin() + static_cast<std::ptrdiff_t>( heldFrom_ );
+    const auto kept
+        = std::remove_if( held, queue_.end(), []( const Item& item ) { return item.message; } );
+    const auto messages = static_cast<quint64>( queue_.end() - kept );
+    queue_.erase( kept, queue_.end() );
+    queuedMessages_ -= static_cast<int>( messages );
+    const auto drops = queueFullUnmarked_ - queueFullBeforeHold_;
+    received_.fetch_sub( messages + drops );
+    dropped_.fetch_sub( drops );
+    queueFullUnmarked_ = queueFullBeforeHold_;
+    queueFullBeforeHold_ = 0;
     room_.notify_all();
 }
 
@@ -385,6 +397,7 @@ void CaptureSink::markQueueFullLocked()
         enqueueLocked( formatMarker( nowUs(), "dropped=" + QByteArray::number( queueFullUnmarked_ )
                                                   + " (queue full)" ) );
         queueFullUnmarked_ = 0;
+        queueFullBeforeHold_ = 0; // marked, so kept like the other markers held back
     }
 }
 

@@ -115,7 +115,10 @@ back what it takes from subscribing on (`CaptureSink::holdMessages()`):
 counted and dropped as ever, written by none. Confirmed, the marker goes
 before all of it (`releaseHeld()`); the round trip failed, the held
 messages and those nats.c still delivers are discarded uncounted
-(`discardHeld()`), and the failure is written. A replay needs none of
+(`discardHeld()`), and the failure is written. Only what was queued since
+the hold is held: the sink remembers where its queue stood, so a line
+queued before and not yet written stays before the marker, and is not
+discarded. A replay needs none of
 this: it writes its `connected to …, replaying …` marker before it
 subscribes.
 

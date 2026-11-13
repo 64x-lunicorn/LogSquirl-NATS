@@ -53,9 +53,10 @@
  * the session has the sink hold back what it takes meanwhile
  * (holdMessages()), and then either puts the marker before all of it
  * (releaseHeld()) or, the round trip failed, discards the held messages
- * and those still to come, uncounted (discardHeld()).  A replay writes its
- * marker before it
- * subscribes, and holds nothing back.
+ * and those still to come, uncounted (discardHeld()).  What was queued
+ * before the hold and not yet written stays before the marker, and is
+ * not discarded.  A replay writes its marker before it subscribes, and
+ * holds nothing back.
  *
  * THE WRITER
  * ──────────
@@ -113,6 +114,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -222,24 +224,27 @@ public:
     /// keeps them.  Marker lines are still written.
     void discardMessages();
 
-    /// Hold back what is queued, from now on, written by none until
-    /// releaseHeld() or discardHeld(): a live capture's subscriptions are
-    /// active before the round trip that confirms them, and what they
-    /// deliver meanwhile must not come before the "connected" marker.
-    /// Messages are counted and dropped as ever (the queue does not drain
-    /// meanwhile).  Not for Mode::WaitForRoom: a full queue would wait.
+    /// Hold back what is queued from now on, and what is queued already
+    /// and not yet written, written by none until releaseHeld() or
+    /// discardHeld(): a live capture's subscriptions are active before the
+    /// round trip that confirms them, and what they deliver meanwhile must
+    /// not come before the "connected" marker.  Messages are counted and
+    /// dropped as ever (the queue does not drain meanwhile).  Not for
+    /// Mode::WaitForRoom: a full queue would wait.
     void holdMessages();
 
-    /// Queue the marker line saying @p text before everything held back,
-    /// and write on: the held lines follow it, in their order.  Reported as
-    /// marker() reports it.
+    /// Queue the marker line saying @p text before what was queued since
+    /// holdMessages(), after what was queued before it, and write on: the
+    /// held lines follow the marker, in their order.  Reported as marker()
+    /// reports it.
     void releaseHeld( const QString& text, Event::Kind kind, const QString& eventText = {} );
 
-    /// Discard the message lines held back, and the queue-full drops among
-    /// them, neither written nor counted, and every message from now on
-    /// (discardMessages()), and write on: the round trip failed, so none
-    /// was captured as connected.  The marker lines held back (nats.c's
-    /// drops, a disconnect) are written.
+    /// Discard the message lines queued since holdMessages(), and the
+    /// queue-full drops since, neither written nor counted, and every
+    /// message from now on (discardMessages()), and write on: the round
+    /// trip failed, so none was captured as connected.  What was queued
+    /// before the hold, and the marker lines held back (nats.c's drops, a
+    /// disconnect), are written.
     void discardHeld();
 
     /// Whether messages are discarded: discardMessages() was called, or the
@@ -336,6 +341,11 @@ private:
     int waiting_ = 0;               ///< Callers of message() waiting for room.
     bool finishing_ = false;        ///< finish() was called: take nothing more.
     bool holding_ = false;          ///< holdMessages(): the writer takes nothing.
+    /// Holding: the lines queued before holdMessages() (and not taken by
+    /// the writer), which the held ones follow.
+    std::size_t heldFrom_ = 0;
+    /// Holding: of queueFullUnmarked_, the drops from before holdMessages().
+    quint64 queueFullBeforeHold_ = 0;
     std::atomic<bool> discarding_{ false };
     std::atomic<quint64> received_{ 0 };
     std::atomic<quint64> dropped_{ 0 };
