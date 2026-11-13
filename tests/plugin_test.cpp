@@ -64,6 +64,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 
 using nats_monitor::ProfileStore;
 using nats_monitor::SessionState;
@@ -82,6 +83,25 @@ extern "C" void logsquirl_plugin_shutdown( void );
 extern "C" void logsquirl_plugin_configure( void* parent_widget );
 
 namespace {
+
+/// Shuts the plugin down when it goes out of scope, also when a failed
+/// REQUIRE ends the scenario part-way.  Declared after the FakeHost and the
+/// NatsServer, it goes first: the plugin's sessions stop while both are
+/// still there.  Without it, a failing scenario leaves its sessions and their
+/// connections running; the next scenario's shutdown then closes nats.c with
+/// them still open, nats_CloseAndWait() times out, and nats.c stays closing:
+/// every natsOptions_Create() after it fails with "Initialization Failed".
+/// Shutting down an already shut down plugin does nothing.
+class ShutdownAtExit {
+public:
+    ShutdownAtExit() = default;
+    ShutdownAtExit( const ShutdownAtExit& ) = delete;
+    ShutdownAtExit& operator=( const ShutdownAtExit& ) = delete;
+    ~ShutdownAtExit()
+    {
+        logsquirl_plugin_shutdown();
+    }
+};
 
 /// The plugin's dialog, if it is open: a top-level QDialog with a subject field.
 QDialog* openDialog()
@@ -396,6 +416,7 @@ SCENARIO( "the plugin adds NATS Monitor to the Plugins menu", "[plugin]" )
     GIVEN( "a host" )
     {
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
 
         WHEN( "the plugin is initialised" )
         {
@@ -438,8 +459,6 @@ SCENARIO( "the plugin adds NATS Monitor to the Plugins menu", "[plugin]" )
                     }
                 }
             }
-
-            logsquirl_plugin_shutdown();
         }
     }
 }
@@ -449,6 +468,7 @@ SCENARIO( "a failure during initialisation never reaches the host", "[plugin]" )
     GIVEN( "a host whose register_menu_action throws" )
     {
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         host.failMenuAction = true;
 
         WHEN( "the plugin is initialised" )
@@ -478,6 +498,7 @@ SCENARIO( "configure and shutdown are safe without a running session", "[plugin]
     GIVEN( "an initialised plugin" )
     {
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
 
         THEN( "configure and shutdown do not throw" )
@@ -496,6 +517,7 @@ SCENARIO( "capturing from a tile: Start, Stop, Start", "[plugin][server]" )
     {
         NatsServer server;
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
 
         WHEN( "the user saves a connection in the dialog and starts it from its tile" )
@@ -552,8 +574,6 @@ SCENARIO( "capturing from a tile: Start, Stop, Start", "[plugin][server]" )
                 }
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 }
 
@@ -565,6 +585,7 @@ SCENARIO( "the cut length of binary payloads is set in the dialog", "[plugin][se
     {
         NatsServer server;
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
 
         WHEN( "the user sets it to 3 bytes and starts a capture" )
@@ -587,8 +608,6 @@ SCENARIO( "the cut length of binary payloads is set in the dialog", "[plugin][se
                 } ) );
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 }
 
@@ -600,6 +619,7 @@ SCENARIO( "the pending limits are set in the dialog", "[plugin][server]" )
     {
         NatsServer server;
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
 
@@ -632,8 +652,6 @@ SCENARIO( "the pending limits are set in the dialog", "[plugin][server]" )
                 REQUIRE( drops.unknown == 0 );
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 }
 
@@ -646,6 +664,7 @@ SCENARIO( "the size limit is set in the dialog, and each new file opens in a new
     {
         NatsServer server;
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
 
@@ -685,8 +704,6 @@ SCENARIO( "the size limit is set in the dialog, and each new file opens in a new
                 REQUIRE( host.notifications.size() == notificationsBefore );
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 }
 
@@ -698,6 +715,7 @@ SCENARIO( "the size limit is remembered between sessions", "[plugin][server][rot
     {
         NatsServer server;
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
         spinBox( openDialog(), "maxFileMiB" )->setValue( 7 );
@@ -716,8 +734,44 @@ SCENARIO( "the size limit is remembered between sessions", "[plugin][server][rot
             {
                 REQUIRE( spinBox( openDialog(), "maxFileMiB" )->value() == 7 );
             }
+        }
+    }
+}
 
-            logsquirl_plugin_shutdown();
+SCENARIO( "a scenario that fails part-way leaves nats.c usable for the tests after it",
+          "[plugin][server]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a server, and a scenario that fails while a capture from it runs" )
+    {
+        NatsServer server;
+        try {
+            FakeHost host;
+            const ShutdownAtExit shutdownAtExit;
+            REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+            startFromDialog( host, server.url(), ">" );
+            REQUIRE( host.openedFiles.size() == 1 );
+            REQUIRE( waitSubscribed( host.openedFiles.first() ) );
+            // What a failed REQUIRE does, without failing this test.
+            throw std::runtime_error( "failed part-way" );
+        } catch ( const std::runtime_error& ) {
+        }
+
+        THEN( "the plugin is shut down, and after the next scenario's shutdown nats.c "
+              "opens again" )
+        {
+            REQUIRE( nats_monitor::g_state.sessions == nullptr );
+            FakeHost next;
+            const ShutdownAtExit nextShutdownAtExit;
+            REQUIRE( logsquirl_plugin_init( next.api(), next.handle() ) == 0 );
+            logsquirl_plugin_shutdown(); // the next scenario's own
+            REQUIRE_FALSE( next.logs.join( '\n' ).contains( "did not close in time" ) );
+            natsOptions* options = nullptr;
+            const natsStatus status = natsOptions_Create( &options );
+            natsOptions_Destroy( options );
+            INFO( "natsOptions_Create: " << natsStatus_GetText( status ) );
+            REQUIRE( status == NATS_OK );
         }
     }
 }
@@ -735,6 +789,7 @@ SCENARIO( "a capture that fails is notified", "[plugin][server]" )
         }
         const QString url = QStringLiteral( "nats://127.0.0.1:%1" ).arg( port );
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
 
         WHEN( "the user starts a capture" )
@@ -757,8 +812,6 @@ SCENARIO( "a capture that fails is notified", "[plugin][server]" )
                 REQUIRE( tileButton( host, "test", "startStop" )->text().contains( "Start" ) );
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 }
 
@@ -771,6 +824,7 @@ SCENARIO( "unloading the plugin or quitting LogSquirl while capturing stops clea
     {
         NatsServer server;
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         startFromDialog( host, server.url(), ">" );
         REQUIRE( host.openedFiles.size() == 1 );
@@ -819,6 +873,7 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
     {
         ConfiguredServer server( "authorization { user: alice, password: s3cret }\n" );
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
         auto* dialog = openDialog();
@@ -862,8 +917,6 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
                 REQUIRE( tileButton( host, "test", "startStop" )->text().contains( "Start" ) );
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 
     GIVEN( "an initialised plugin and a server that requires TLS" )
@@ -875,6 +928,7 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
                                                  "}\n" )
                                      .arg( certs ) );
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
         auto* dialog = openDialog();
@@ -946,8 +1000,6 @@ SCENARIO( "a wrong credential or certificate is explained on the tile", "[plugin
                 REQUIRE( waitSubscribed( host.openedFiles.first() ) );
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 }
 
@@ -987,6 +1039,7 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained on the
     {
         ConfiguredServer server( "authorization { token: t0ken }\n" );
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
         auto* dialog = openDialog();
@@ -1000,8 +1053,6 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained on the
                                          QStringLiteral( "wrong" ) );
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 
     GIVEN( "an initialised plugin and a server that knows the fixture NKey user" )
@@ -1009,6 +1060,7 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained on the
         ConfiguredServer server( QStringLiteral( "authorization { users: [ { nkey: %1 } ] }\n" )
                                      .arg( fixtureText( auth + "/nkey.pub" ) ) );
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
         auto* dialog = openDialog();
@@ -1024,14 +1076,13 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained on the
                                          "the server refused the NKey in " + auth + "/other.seed" );
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 
     GIVEN( "an initialised plugin and a server in operator mode with the fixture account" )
     {
         ConfiguredServer server( fixtureText( auth + "/operator.conf" ) );
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
         auto* dialog = openDialog();
@@ -1048,8 +1099,6 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained on the
                                              + "/other.creds" );
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 
     GIVEN( "an initialised plugin and a server that requires a client certificate of the test "
@@ -1064,6 +1113,7 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained on the
                                                  "}\n" )
                                      .arg( certs ) );
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
         auto* dialog = openDialog();
@@ -1092,8 +1142,6 @@ SCENARIO( "a wrong token, NKey, .creds or client certificate is explained on the
                                              + "/other-client-cert.pem" );
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 }
 
@@ -1102,6 +1150,7 @@ SCENARIO( "the dialog warns when the subjects of a session overlap", "[plugin][s
     GIVEN( "the dialog of an initialised plugin" )
     {
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
         auto* dialog = openDialog();
@@ -1201,8 +1250,6 @@ SCENARIO( "the dialog warns when the subjects of a session overlap", "[plugin][s
                 REQUIRE( subjectsWarning( dialog ).isEmpty() );
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 }
 
@@ -1230,6 +1277,7 @@ SCENARIO( "the plugin has a sidebar tab NATS, from init to shutdown", "[plugin][
     GIVEN( "a host" )
     {
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
 
         WHEN( "the plugin is initialised" )
         {
@@ -1276,8 +1324,6 @@ SCENARIO( "the plugin has a sidebar tab NATS, from init to shutdown", "[plugin][
                     REQUIRE( host.unregisteredSidebarTabs == QList<QWidget*>{ widget } );
                 }
             }
-
-            logsquirl_plugin_shutdown();
         }
     }
 }
@@ -1287,6 +1333,7 @@ SCENARIO( "each saved connection is a tile in the sidebar", "[plugin][sidebar]" 
     GIVEN( "an initialised plugin" )
     {
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
 
         WHEN( "New connection… is clicked" )
@@ -1410,8 +1457,6 @@ SCENARIO( "each saved connection is a tile in the sidebar", "[plugin][sidebar]" 
                 }
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 }
 
@@ -1424,6 +1469,7 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
     {
         NatsServer server;
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         saveConnection( host, "orders", server.url(), "orders.>\nbilling.* auditors" );
         saveConnection( host, "metrics", server.url(), "metrics.>" );
@@ -1437,7 +1483,6 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
             const auto second = host.openedFiles.at( 1 );
             REQUIRE( waitSubscribed( first ) );
             REQUIRE( waitSubscribed( second ) );
-
             THEN( "each tab follows its own file, each captures its subjects only, and each "
                   "tile says it runs, with nothing received or dropped yet" )
             {
@@ -1632,8 +1677,6 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
                 REQUIRE( waitFor( [ & ] { return statusOf( "metrics" ).dropped > 0; }, 10000 ) );
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 }
 
@@ -1642,6 +1685,7 @@ SCENARIO( "connections are saved as profiles, without passwords or tokens", "[pl
     GIVEN( "the dialog filled in with a user and TLS, saved as the connection prod" )
     {
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
         auto* dialog = openDialog();
@@ -1742,13 +1786,12 @@ SCENARIO( "connections are saved as profiles, without passwords or tokens", "[pl
                 }
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 
     GIVEN( "the dialog without a connection name" )
     {
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
         auto* dialog = openDialog();
@@ -1778,13 +1821,12 @@ SCENARIO( "connections are saved as profiles, without passwords or tokens", "[pl
                 REQUIRE( statusText( dialog ).contains( "Authentication" ) );
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 
     GIVEN( "the dialog with a replay of ORDERS from a stream sequence" )
     {
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
         auto* dialog = openDialog();
@@ -1832,13 +1874,12 @@ SCENARIO( "connections are saved as profiles, without passwords or tokens", "[pl
                 REQUIRE( statusText( dialog ) == "A stream's sequences start at 1." );
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 
     GIVEN( "the dialog with a replay of the last messages of ORDERS" )
     {
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         host.menuActions.first().trigger();
         auto* dialog = openDialog();
@@ -1914,8 +1955,6 @@ SCENARIO( "connections are saved as profiles, without passwords or tokens", "[pl
                 }
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 }
 
@@ -1934,6 +1973,7 @@ SCENARIO( "a connection replays a JetStream stream from its tile", "[plugin][ser
             js.publish( i % 2 ? "orders.eu" : "orders.us", QByteArray::number( i ) );
         }
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         sidebarButton( host, "newConnection" )->click();
         auto* dialog = openDialog();
@@ -2011,8 +2051,6 @@ SCENARIO( "a connection replays a JetStream stream from its tile", "[plugin][ser
                 }
             }
         }
-
-        logsquirl_plugin_shutdown();
     }
 }
 
@@ -2025,6 +2063,7 @@ SCENARIO( "listing the streams of a server that does not answer", "[plugin][repl
         QTcpServer silent;
         REQUIRE( silent.listen( QHostAddress::LocalHost ) );
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         sidebarButton( host, "newConnection" )->click();
         auto* dialog = openDialog();
@@ -2047,7 +2086,6 @@ SCENARIO( "listing the streams of a server that does not answer", "[plugin][repl
                     10000 ) );
                 REQUIRE( list->isEnabled() );
             }
-            logsquirl_plugin_shutdown();
         }
 
         WHEN( "the plugin shuts down while the listing waits" )
@@ -2081,6 +2119,7 @@ SCENARIO( "unloading the plugin or quitting LogSquirl during a replay leaves no 
         js.publish( "orders.eu", "1" );
         const auto before = js.consumers( "ORDERS" );
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         sidebarButton( host, "newConnection" )->click();
         auto* dialog = openDialog();
@@ -2127,6 +2166,7 @@ SCENARIO( "initialisation removes the temporary files of LogSquirl processes tha
     GIVEN( "a temporary directory of a process that no longer runs" )
     {
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         // Above any process ID (2^22 on Linux, 2^32 on Windows; tempdirs.cpp
         // takes larger ones for ended processes), so no process has it.
         const QString stale = host.tempRoot() + "/logsquirl-nats-9999999999-AbC123";
@@ -2140,8 +2180,6 @@ SCENARIO( "initialisation removes the temporary files of LogSquirl processes tha
             {
                 REQUIRE_FALSE( QFileInfo::exists( stale ) );
             }
-
-            logsquirl_plugin_shutdown();
         }
     }
 }

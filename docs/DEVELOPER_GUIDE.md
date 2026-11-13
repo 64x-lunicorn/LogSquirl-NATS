@@ -811,7 +811,14 @@ options of one with JetStream.
   host adapter, with no plugin initialised, and the test asserts on the
   followed tabs it opened, its notifications and its log lines (with
   their levels). `FakeHost` stays the stand-in for the whole C host API,
-  for the tests that drive the plugin's entry points.
+  for the tests that drive the plugin's entry points. Each scenario of
+  `plugin_test.cpp` declares a `ShutdownAtExit` right after its `FakeHost`
+  (and its server): it shuts the plugin down when the scenario ends, also
+  when a `REQUIRE` fails part-way. Without it, the failing scenario's
+  sessions keep their connections, the next shutdown's
+  `nats_CloseAndWait()` times out, and nats.c stays closing: every
+  `natsOptions_Create()` after it in the process fails with
+  `Initialization Failed`.
 - **The formatter** (`lineformat_test.cpp`): `formatLine()` is a pure
   function from a message to one line.
 - **The replay plan** (`replayplan_test.cpp`): `planReplay()` is a pure
