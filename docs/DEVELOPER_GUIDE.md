@@ -543,15 +543,19 @@ Start, and `NatsSession::start()` again as a backstop on its
 store). The replay's rules are the Replay module's (replay.h):
 `replayProblem()` to start, `replaySaveProblem()` to save. A start that
 cannot be read is refused, never replayed from elsewhere: the dialog's
-sequence field and `nats.ini`'s `sequence` and `timeUs` are read with
+last-messages and sequence fields and `nats.ini`'s `lastMessages`,
+`sequence` and `timeUs` are read with `readLastMessages()`,
 `readStartSequence()` and `readStartTime()` (replay.h), which keep a value
-that is no number of its field (a word, a sequence past
-`kMaxStreamSequence`) in `ReplayConfig::unreadSequence` or `unreadTime`,
-and `replayProblem()` refuses it, as it refuses sequence 0 and a time
+that is no number of its field (a word, a count past `kMaxLastMessages`, a
+sequence past `kMaxStreamSequence`) in `ReplayConfig::unreadLastMessages`,
+`unreadSequence` or `unreadTime`, and `replayProblem()` refuses it, as it
+refuses the last 0 messages, sequence 0 and a time
 outside `kMinReplayTimeUs` to `kMaxReplayTimeUs` (1970-01-01 00:00:01 to
 2262-04-11 23:47:16 UTC: nats.c sends the time 0 as none, and a later time
 overflows its nanoseconds). So the dialog does not save it, and a tile whose
-saved start is such says why at Start. Replay checked
+saved start is such says why at Start. An unread `lastMessages` is written
+back as it was when the store writes `nats.ini` again for another
+connection. Replay checked
 without a stream is told by a profile's `replayChosen`, which the dialog
 sets when Replay is checked, stream or not (a loaded profile has it if it
 has a stream). Each rule is a row of the tables in `profiles_test.cpp`

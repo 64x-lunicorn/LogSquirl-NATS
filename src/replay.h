@@ -76,6 +76,10 @@ inline const ReplayStartInfo& replayStartInfo( ReplayStart start )
 /// The largest stream sequence: a stream counts its messages in 64 bits.
 inline constexpr quint64 kMaxStreamSequence = std::numeric_limits<quint64>::max();
 
+/// The most messages a replay of the last ones can replay: a stream holds
+/// no more than it has sequences.
+inline constexpr quint64 kMaxLastMessages = kMaxStreamSequence;
+
 /// The earliest start time of a replay, in microseconds since the epoch:
 /// 1970-01-01 00:00:01 UTC.  nats.c sends the time 0 as no time at all, and
 /// the plan may round a start down to its whole second (planReplay()).
@@ -99,12 +103,20 @@ void readStartSequence( ReplayConfig& replay, const QString& text );
 /// replayProblem() to refuse; an empty one is the time 0.
 void readStartTime( ReplayConfig& replay, const QString& text );
 
+/// Read @p text, a decimal number, as how many last messages @p replay
+/// replays: the dialog's field, or nats.ini's value.  One that is not a
+/// number from 0 to kMaxLastMessages is kept as it was
+/// (ReplayConfig::unreadLastMessages), for replayProblem() to refuse; an
+/// empty one is 0.
+void readLastMessages( ReplayConfig& replay, const QString& text );
+
 /// @p replay as the marker lines and the dialog name it: "stream ORDERS,
 /// subject orders.eu.>, the last 100 messages, then live".
 QString describeReplay( const ReplayConfig& replay );
 
 /// Why @p replay, enabled, cannot start, for the user; empty if it can: no
-/// stream, the last 0 messages, a start sequence that is 0 or cannot be
+/// stream, a number of last messages that is 0 or cannot be read, a start
+/// sequence that is 0 or cannot be
 /// read, a start time that cannot be read or is not from kMinReplayTimeUs
 /// to kMaxReplayTimeUs, a filter that is not one subject.  Only the start
 /// the replay has is checked.

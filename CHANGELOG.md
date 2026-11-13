@@ -57,6 +57,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is not a number, or a time before 1970-01-01 00:00:01 or after
   2262-04-11 23:47:16 UTC, keeps the connection from starting, and its tile
   says why (#38).
+- **A number of last messages that cannot be read is refused.** A
+  `lastMessages` in nats.ini that is not a number, is 0 or is above
+  18446744073709551615 keeps the connection from starting, and its tile
+  says why, where the last 100 messages were replayed; one not saved still
+  replays the last 100. The dialog's *Last messages* field is a text field
+  like the sequence's: it takes any number up to 18446744073709551615, where
+  it stopped at 2147483647, and shows a saved number that cannot be read as
+  it is, so Save says why (#42).
 
 ### Security
 - **Secrets are wiped from memory once nats.c has them.** A password or

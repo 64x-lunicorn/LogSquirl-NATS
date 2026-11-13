@@ -56,6 +56,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSettings>
 #include <QSpinBox>
 #include <QTcpServer>
 #include <QTimer>
@@ -1834,6 +1835,88 @@ SCENARIO( "connections are saved as profiles, without passwords or tokens", "[pl
 
         logsquirl_plugin_shutdown();
     }
+
+    GIVEN( "the dialog with a replay of the last messages of ORDERS" )
+    {
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+        auto* dialog = openDialog();
+        checkBox( dialog, "replay" )->setChecked( true );
+        comboBox( dialog, "replayStream" )->setEditText( "ORDERS" );
+        auto* start = comboBox( dialog, "replayStart" );
+        start->setCurrentIndex( start->findText( "Last messages" ) );
+
+        WHEN( "the number is one above the most, and it is saved" )
+        {
+            field( dialog, "replayLast" )->setText( "18446744073709551616" );
+            saveAs( dialog, "audit" );
+
+            THEN( "nothing is saved, and the dialog says why" )
+            {
+                REQUIRE( comboBox( dialog, "profile" )->count() == 0 );
+                REQUIRE( statusText( dialog )
+                         == "18446744073709551616 is not a number of messages: it goes from 1 "
+                            "to 18446744073709551615." );
+            }
+        }
+
+        WHEN( "the number is more than a spin box holds, and it is saved" )
+        {
+            field( dialog, "replayLast" )->setText( "5000000000" );
+            saveAs( dialog, "audit" );
+
+            THEN( "it is saved with that number" )
+            {
+                INFO( "dialog: " << statusText( dialog ).toStdString() );
+                const auto saved = ProfileStore( host.configDir() + "/nats.ini" ).find( "audit" );
+                REQUIRE( saved );
+                REQUIRE( saved->replay.lastMessages == 5000000000ULL );
+            }
+        }
+
+        WHEN( "the number is left empty, and it is saved" )
+        {
+            field( dialog, "replayLast" )->clear();
+            saveAs( dialog, "audit" );
+
+            THEN( "nothing is saved: it is not taken for 100" )
+            {
+                REQUIRE( comboBox( dialog, "profile" )->count() == 0 );
+                REQUIRE( statusText( dialog ) == "Replaying the last 0 messages replays nothing." );
+            }
+        }
+
+        WHEN( "it is saved, and nats.ini's number is then changed to one that is none" )
+        {
+            field( dialog, "replayLast" )->setText( "2" );
+            saveAs( dialog, "audit" );
+            QSettings( host.configDir() + "/nats.ini", QSettings::IniFormat )
+                .setValue( "profiles/1/replay/lastMessages", "abc" );
+
+            AND_WHEN( "Edit shows it, and it is saved again" )
+            {
+                dialog->hide();
+                tileButton( host, "audit", "edit" )->click();
+                auto* again = openDialog();
+                REQUIRE( field( again, "replayLast" )->text() == "abc" );
+                button( again, "saveProfile" )->click();
+
+                THEN( "the dialog says why, and nats.ini keeps it as it was" )
+                {
+                    REQUIRE( statusText( again )
+                             == "abc is not a number of messages: it goes from 1 to "
+                                "18446744073709551615." );
+                    REQUIRE( QSettings( host.configDir() + "/nats.ini", QSettings::IniFormat )
+                                 .value( "profiles/1/replay/lastMessages" )
+                                 .toString()
+                             == "abc" );
+                }
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
 }
 
 SCENARIO( "a connection replays a JetStream stream from its tile", "[plugin][server][replay]" )
@@ -1878,7 +1961,7 @@ SCENARIO( "a connection replays a JetStream stream from its tile", "[plugin][ser
             field( dialog, "replayFilter" )->setText( "orders.eu" );
             auto* start = comboBox( dialog, "replayStart" );
             start->setCurrentIndex( start->findText( "Last messages" ) );
-            spinBox( dialog, "replayLast" )->setValue( 2 );
+            field( dialog, "replayLast" )->setText( "2" );
             saveAs( dialog, "orders" );
             INFO( "dialog: " << statusText( dialog ).toStdString() );
 
@@ -1898,7 +1981,7 @@ SCENARIO( "a connection replays a JetStream stream from its tile", "[plugin][ser
                 REQUIRE( comboBox( again, "replayStream" )->currentText() == "ORDERS" );
                 REQUIRE( field( again, "replayFilter" )->text() == "orders.eu" );
                 REQUIRE( comboBox( again, "replayStart" )->currentText() == "Last messages" );
-                REQUIRE( spinBox( again, "replayLast" )->value() == 2 );
+                REQUIRE( field( again, "replayLast" )->text() == "2" );
             }
 
             AND_WHEN( "it is started from its tile" )

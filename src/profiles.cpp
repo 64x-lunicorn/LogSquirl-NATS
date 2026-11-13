@@ -163,13 +163,12 @@ ReplayConfig readReplay( QSettings& settings )
             replay.start = info.start;
         }
     }
-    bool ok = false;
-    if ( const auto last = settings.value( "lastMessages" ).toULongLong( &ok ); ok && last > 0 ) {
-        replay.lastMessages = last;
-    }
     // A start that cannot be read is kept for the start check to refuse,
     // never taken for another (replayProblem(), replay.h); one not saved
     // keeps its default.
+    if ( settings.contains( "lastMessages" ) ) {
+        readLastMessages( replay, settings.value( "lastMessages" ).toString() );
+    }
     if ( settings.contains( "sequence" ) ) {
         readStartSequence( replay, settings.value( "sequence" ).toString() );
     }
@@ -185,7 +184,13 @@ void writeReplay( QSettings& settings, const ReplayConfig& replay )
     settings.setValue( "stream", replay.stream );
     settings.setValue( "filterSubject", replay.filterSubject );
     settings.setValue( "start", QString::fromLatin1( replayStartInfo( replay.start ).savedName ) );
-    settings.setValue( "lastMessages", replay.lastMessages );
+    // One that cannot be read stays so (readLastMessages()).
+    if ( replay.unreadLastMessages.isEmpty() ) {
+        settings.setValue( "lastMessages", replay.lastMessages );
+    }
+    else {
+        settings.setValue( "lastMessages", replay.unreadLastMessages );
+    }
     settings.setValue( "sequence", replay.sequence );
     settings.setValue( "timeUs", replay.timeUs );
     settings.setValue( "followLive", replay.followLive );

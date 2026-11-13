@@ -69,6 +69,22 @@ void readStartTime( ReplayConfig& replay, const QString& text )
     replay.timeUs = timeUs;
 }
 
+void readLastMessages( ReplayConfig& replay, const QString& text )
+{
+    replay.unreadLastMessages.clear();
+    if ( text.trimmed().isEmpty() ) {
+        replay.lastMessages = 0;
+        return;
+    }
+    bool ok = false;
+    const auto count = text.toULongLong( &ok );
+    if ( !ok || text.trimmed().startsWith( '-' ) ) {
+        replay.unreadLastMessages = text;
+        return;
+    }
+    replay.lastMessages = count;
+}
+
 QString describeReplay( const ReplayConfig& replay )
 {
     QString text = QStringLiteral( "stream %1" ).arg( replay.stream );
@@ -103,8 +119,15 @@ QString replayProblem( const ReplayConfig& replay )
     if ( replay.stream.trimmed().isEmpty() ) {
         return QStringLiteral( "No stream to replay." );
     }
-    if ( replay.start == ReplayStart::Last && replay.lastMessages == 0 ) {
-        return QStringLiteral( "Replaying the last 0 messages replays nothing." );
+    if ( replay.start == ReplayStart::Last ) {
+        if ( !replay.unreadLastMessages.isEmpty() ) {
+            return QStringLiteral( "%1 is not a number of messages: it goes from 1 to %2." )
+                .arg( replay.unreadLastMessages )
+                .arg( kMaxLastMessages );
+        }
+        if ( replay.lastMessages == 0 ) {
+            return QStringLiteral( "Replaying the last 0 messages replays nothing." );
+        }
     }
     if ( replay.start == ReplayStart::Sequence ) {
         if ( !replay.unreadSequence.isEmpty() ) {

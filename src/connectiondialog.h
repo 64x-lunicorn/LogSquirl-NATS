@@ -175,7 +175,7 @@ private:
     QPushButton* listStreamsButton_;
     QLineEdit* replayFilterEdit_;
     QComboBox* replayStartCombo_;
-    QSpinBox* replayLastSpin_;
+    QLineEdit* replayLastEdit_;
     QLineEdit* replaySequenceEdit_;
     QDateTimeEdit* replayTimeEdit_;
     QCheckBox* replayFollowCheck_;

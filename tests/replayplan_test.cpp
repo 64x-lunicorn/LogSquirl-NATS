@@ -39,10 +39,12 @@
 using nats_monitor::caughtUpOnSubscribing;
 using nats_monitor::DeliverFrom;
 using nats_monitor::describeReplay;
+using nats_monitor::kMaxLastMessages;
 using nats_monitor::kMaxReplayTimeUs;
 using nats_monitor::kMaxStreamSequence;
 using nats_monitor::kMinReplayTimeUs;
 using nats_monitor::planReplay;
+using nats_monitor::readLastMessages;
 using nats_monitor::readStartSequence;
 using nats_monitor::readStartTime;
 using nats_monitor::ReplayConfig;
@@ -404,6 +406,31 @@ SCENARIO( "a replay's start is read from its text, or kept as it was for the che
             REQUIRE( config.timeUs == row.timeUs );
         }
     }
+
+    struct CountRow {
+        const char* text;
+        quint64 lastMessages; ///< When read.
+        const char* unread;
+    };
+    const std::vector<CountRow> counts{
+        { "1", 1, "" },
+        { "250", 250, "" },
+        { "18446744073709551615", kMaxLastMessages, "" },
+        { "0", 0, "" },
+        { "", 0, "" },
+        { "18446744073709551616", 7, "18446744073709551616" },
+        { "-1", 7, "-1" },
+        { "abc", 7, "abc" },
+    };
+    for ( const auto& row : counts ) {
+        DYNAMIC_SECTION( "the last messages \"" << row.text << "\"" )
+        {
+            auto config = last( 7 );
+            readLastMessages( config, QString::fromUtf8( row.text ) );
+            REQUIRE( config.unreadLastMessages == QString::fromUtf8( row.unread ) );
+            REQUIRE( config.lastMessages == row.lastMessages );
+        }
+    }
 }
 
 SCENARIO( "a replay's start that cannot be read, or is out of range, is refused",
@@ -421,6 +448,10 @@ SCENARIO( "a replay's start that cannot be read, or is out of range, is refused"
     lastWithUnread.unreadTime = "yesterday";
     auto timeWithUnreadSequence = fromTime( kSecondUs );
     timeWithUnreadSequence.unreadSequence = "seven";
+    auto unreadLast = last( 100 );
+    unreadLast.unreadLastMessages = "abc";
+    auto sequenceWithUnreadLast = fromSequence( 1 );
+    sequenceWithUnreadLast.unreadLastMessages = "abc";
 
     struct Row {
         const char* what;
@@ -447,6 +478,14 @@ SCENARIO( "a replay's start that cannot be read, or is out of range, is refused"
           "yesterday is not a start time: one is a number of microseconds since 1970." },
         { "the last 3, with a sequence and a time that cannot be read", lastWithUnread, {} },
         { "a time, with a sequence that cannot be read", timeWithUnreadSequence, {} },
+        { "the last message", last( 1 ), {} },
+        { "the most last messages", last( kMaxLastMessages ), {} },
+        { "the last 0 messages", last( 0 ), "Replaying the last 0 messages replays nothing." },
+        { "a number of last messages that cannot be read", unreadLast,
+          "abc is not a number of messages: it goes from 1 to 18446744073709551615." },
+        { "a sequence, with a number of last messages that cannot be read",
+          sequenceWithUnreadLast,
+          {} },
     };
     for ( const auto& row : rows ) {
         DYNAMIC_SECTION( row.what )

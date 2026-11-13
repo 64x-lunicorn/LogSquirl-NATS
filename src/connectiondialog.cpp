@@ -108,7 +108,7 @@ ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sess
     , listStreamsButton_( new QPushButton( QStringLiteral( "List" ), this ) )
     , replayFilterEdit_( new QLineEdit( this ) )
     , replayStartCombo_( new QComboBox( this ) )
-    , replayLastSpin_( new QSpinBox( this ) )
+    , replayLastEdit_( new QLineEdit( this ) )
     , replaySequenceEdit_( new QLineEdit( this ) )
     , replayTimeEdit_( new QDateTimeEdit( this ) )
     , replayFollowCheck_(
@@ -222,10 +222,12 @@ ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sess
     for ( const auto& info : kReplayStarts ) {
         replayStartCombo_->addItem( QLatin1String( info.label ), static_cast<int>( info.start ) );
     }
-    replayLastSpin_->setObjectName( "replayLast" );
-    replayLastSpin_->setRange( 1, std::numeric_limits<int>::max() );
-    replayLastSpin_->setGroupSeparatorShown( true );
-    replayLastSpin_->setSuffix( QStringLiteral( " messages" ) );
+    // A field, not a spin box: it holds every number a stream may hold,
+    // and one saved that cannot be read (readLastMessages(), replay.h).
+    replayLastEdit_->setObjectName( "replayLast" );
+    replayLastEdit_->setValidator( new QRegularExpressionValidator(
+        QRegularExpression( QStringLiteral( "[1-9][0-9]{0,19}" ) ), replayLastEdit_ ) );
+    replayLastEdit_->setPlaceholderText( QStringLiteral( "Number of messages, from 1" ) );
     replaySequenceEdit_->setObjectName( "replaySequence" );
     replaySequenceEdit_->setValidator( new QRegularExpressionValidator(
         QRegularExpression( QStringLiteral( "[1-9][0-9]{0,19}" ) ), replaySequenceEdit_ ) );
@@ -309,7 +311,7 @@ ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sess
     streamRow->addWidget( listStreamsButton_ );
     auto* startRow = new QHBoxLayout;
     startRow->addWidget( replayStartCombo_ );
-    startRow->addWidget( replayLastSpin_, 1 );
+    startRow->addWidget( replayLastEdit_, 1 );
     startRow->addWidget( replaySequenceEdit_, 1 );
     startRow->addWidget( replayTimeEdit_, 1 );
     auto* replay = new QFormLayout;
@@ -326,7 +328,7 @@ ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sess
     replayRow( QStringLiteral( "Start at" ), startRow );
     replay->addRow( replayFollowCheck_ );
     replayWidgets_ << replayStreamCombo_ << listStreamsButton_ << replayFilterEdit_
-                   << replayStartCombo_ << replayLastSpin_ << replaySequenceEdit_ << replayTimeEdit_
+                   << replayStartCombo_ << replayLastEdit_ << replaySequenceEdit_ << replayTimeEdit_
                    << replayFollowCheck_;
     auto* replayBox = new QGroupBox( QStringLiteral( "JetStream replay" ), this );
     replayBox->setLayout( replay );
@@ -399,8 +401,8 @@ ConnectionProfile ConnectionDialog::currentProfile() const
         replay.stream = replayStreamCombo_->currentText().trimmed();
         replay.filterSubject = replayFilterEdit_->text().trimmed();
         replay.start = static_cast<ReplayStart>( replayStartCombo_->currentData().toInt() );
-        replay.lastMessages = static_cast<quint64>( replayLastSpin_->value() );
         // One it cannot read is refused with the reason (replayProblem()).
+        readLastMessages( replay, replayLastEdit_->text() );
         readStartSequence( replay, replaySequenceEdit_->text() );
         replay.timeUs = replayTimeEdit_->dateTime().toMSecsSinceEpoch() * 1000;
         replay.followLive = replayFollowCheck_->isChecked();
@@ -431,9 +433,10 @@ void ConnectionDialog::showProfile( const ConnectionProfile& profile )
     replayFilterEdit_->setText( replay.filterSubject );
     replayStartCombo_->setCurrentIndex(
         replayStartCombo_->findData( static_cast<int>( replay.start ) ) );
-    replayLastSpin_->setValue( static_cast<int>(
-        std::min<quint64>( replay.lastMessages, std::numeric_limits<int>::max() ) ) );
-    // As saved, also when it cannot be read: Save then says why.
+    // As saved, also when they cannot be read: Save then says why.
+    replayLastEdit_->setText( replay.unreadLastMessages.isEmpty()
+                                  ? QString::number( replay.lastMessages )
+                                  : replay.unreadLastMessages );
     replaySequenceEdit_->setText( replay.unreadSequence.isEmpty()
                                       ? QString::number( replay.sequence )
                                       : replay.unreadSequence );
@@ -564,7 +567,7 @@ void ConnectionDialog::updateButtons()
     listStreamsButton_->setEnabled( replay && !listingStreams_ );
     subjectsEdit_->setEnabled( !replay );
     const auto start = static_cast<ReplayStart>( replayStartCombo_->currentData().toInt() );
-    replayLastSpin_->setVisible( start == ReplayStart::Last );
+    replayLastEdit_->setVisible( start == ReplayStart::Last );
     replaySequenceEdit_->setVisible( start == ReplayStart::Sequence );
     replayTimeEdit_->setVisible( start == ReplayStart::Time );
 }

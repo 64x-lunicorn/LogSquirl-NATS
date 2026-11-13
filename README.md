@@ -156,7 +156,8 @@ After installing, restart LogSquirl or re-scan via *Plugins → Manage Plugins�
    - **Subject** — replay only the messages on this subject (`*` and `>`
      allowed); empty for all of the stream's.
    - **Start at** — *All messages*, the *Last messages* (the last N, of
-     those that match the subject), *From sequence* (a stream sequence,
+     those that match the subject, from 1 to 18446744073709551615),
+     *From sequence* (a stream sequence,
      from 1 to 18446744073709551615) or *From time (UTC)* (from
      1970-01-01 00:00:01 to 2262-04-11 23:47:16). A start outside these is
      not saved, saying why.

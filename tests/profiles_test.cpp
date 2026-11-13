@@ -583,6 +583,70 @@ SCENARIO( "a saved replay start that cannot be read or is out of range is not st
     }
 }
 
+SCENARIO( "a saved number of last messages that cannot be read is not started, not taken for 100",
+          "[profiles][checks]" )
+{
+    QTemporaryDir dir;
+    const auto path = dir.filePath( "nats.ini" );
+    const QString unread = " is not a number of messages: it goes from 1 to 18446744073709551615.";
+    struct Row {
+        const char* what;
+        const char* line; ///< The lastMessages line of nats.ini; empty: none.
+        quint64 lastMessages;
+        QString problem; ///< Empty: none.
+    };
+    const std::vector<Row> rows{
+        { "no number saved", "", 100, {} },
+        { "the last 7", "1\\replay\\lastMessages=7\n", 7, {} },
+        { "the most",
+          "1\\replay\\lastMessages=18446744073709551615\n",
+          18446744073709551615ULL,
+          {} },
+        { "one above the most", "1\\replay\\lastMessages=18446744073709551616\n", 100,
+          "18446744073709551616" + unread },
+        { "a number that is not one", "1\\replay\\lastMessages=abc\n", 100, "abc" + unread },
+        { "a negative number", "1\\replay\\lastMessages=-1\n", 100, "-1" + unread },
+        { "the last 0", "1\\replay\\lastMessages=0\n", 0,
+          "Replaying the last 0 messages replays nothing." },
+        { "an empty number", "1\\replay\\lastMessages=\n", 0,
+          "Replaying the last 0 messages replays nothing." },
+    };
+    for ( const auto& row : rows ) {
+        GIVEN( std::string( "nats.ini with a replay of the last messages, " ) + row.what )
+        {
+            writeFile( path, QByteArray( "[profiles]\n"
+                                         "1\\name=audit\n"
+                                         "1\\url=nats://localhost:4222\n"
+                                         "1\\replay\\stream=ORDERS\n"
+                                         "1\\replay\\start=last\n" )
+                                 + row.line
+                                 + "2\\name=prod\n"
+                                   "2\\url=nats://localhost:4222\n"
+                                   "size=2\n" );
+            ProfileStore store( path );
+            const auto audit = store.find( "audit" );
+            REQUIRE( audit );
+
+            THEN( "the start check gives the reason, for the profile and its session config" )
+            {
+                REQUIRE( audit->replay.lastMessages == row.lastMessages );
+                REQUIRE( startProblem( *audit ) == row.problem );
+                REQUIRE( startProblem( nats_monitor::sessionConfig( *audit ) ) == row.problem );
+            }
+
+            WHEN( "another connection is deleted, which writes the file again" )
+            {
+                REQUIRE( store.remove( "prod" ).isEmpty() );
+
+                THEN( "the number is kept as it was" )
+                {
+                    REQUIRE( startProblem( *ProfileStore( path ).find( "audit" ) ) == row.problem );
+                }
+            }
+        }
+    }
+}
+
 // ── Can it be started, can it be saved ───────────────────────────────────
 
 namespace {
