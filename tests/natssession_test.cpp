@@ -38,6 +38,7 @@
 #include "natssession.h"
 #include "profiles.h"
 #include "sessiontest.h"
+#include "tcpproxy.h"
 
 #include <QDir>
 #include <QElapsedTimer>
@@ -66,6 +67,7 @@ using nats_test::sessionConfig;
 using nats_test::sessionTempRoot;
 using nats_test::settle;
 using nats_test::sizeOf;
+using nats_test::TcpProxy;
 using nats_test::Transitions;
 using nats_test::waitFor;
 using Kind = nats_monitor::Transition::Kind;
@@ -172,6 +174,93 @@ SCENARIO( "a published message shows up as a line in the session's file", "[serv
                     REQUIRE( capture.at( i + 1 ).fields()
                              == liveFields( "orders.eu.created", QString::number( i ) ) );
                 }
+            }
+        }
+    }
+}
+
+namespace {
+
+/// "@p from", … "@p to".
+QStringList numbers( int from, int to )
+{
+    QStringList list;
+    for ( int i = from; i <= to; ++i ) {
+        list << QString::number( i );
+    }
+    return list;
+}
+
+} // namespace
+
+SCENARIO( "the connected marker is the first line, also when messages arrive during the round "
+          "trip that confirms the subscriptions",
+          "[server][session]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a session starting through a proxy that holds back its round trip, while messages "
+           "are published to the subscription the server already has" )
+    {
+        NatsServer server;
+        TcpProxy proxy( server.port() );
+        proxy.holdRoundTrip();
+        Publisher publisher( server.url() );
+        NatsSession session( sessionConfig( proxy.url(), { "ticks" } ), sessionTempRoot() );
+        Transitions transitions( session );
+        REQUIRE( session.start() );
+        REQUIRE( waitFor( [ & ] { return proxy.holdingRoundTrip(); }, 10000 ) );
+        // Each flushed: the server queued it to the session before it reads
+        // the session's PING, so it arrives before the answer.
+        for ( const auto& payload : numbers( 1, 100 ) ) {
+            publisher.publish( "ticks", payload.toUtf8() );
+        }
+        REQUIRE( waitFor( [ & ] { return session.receivedCount() == 100; }, 10000 ) );
+
+        WHEN( "the round trip completes, and publishing goes on" )
+        {
+            proxy.releaseRoundTrip();
+            REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Running ) == 1; }, 10000 ) );
+            for ( const auto& payload : numbers( 101, 200 ) ) {
+                publisher.publish( "ticks", payload.toUtf8() );
+            }
+            REQUIRE( waitFor(
+                [ & ] { return Capture::read( session.filePath() ).messages().size() == 200; },
+                10000 ) );
+            session.stop();
+
+            THEN( "the marker is the first line, every message after it, once, in order" )
+            {
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.first().fields()
+                         == markerFields( connectedText( proxy.url(), "ticks" ) ) );
+                REQUIRE( capture.payloadsOn( "ticks" ) == numbers( 1, 200 ) );
+                REQUIRE( capture.size() == 202 ); // the marker, 200 messages, stopped
+                REQUIRE( capture.last().fields() == markerFields( "stopped" ) );
+            }
+
+            THEN( "the counts are those of the file" )
+            {
+                REQUIRE( session.receivedCount() == 200 );
+                REQUIRE( session.droppedCount() == 0 );
+            }
+        }
+
+        WHEN( "the connection breaks during the round trip, and cannot come back" )
+        {
+            proxy.refuse();
+            proxy.cut();
+            REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Failed ) == 1; }, 20000 ) );
+
+            THEN( "the failure is written, and the held messages are not, nor counted" )
+            {
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.hasMarkerStartingWith( "subscribing to ticks failed: " ) );
+                REQUIRE_FALSE( capture.hasMarkerStartingWith( "connected to " ) );
+                REQUIRE( capture.messages().isEmpty() );
+                REQUIRE( session.receivedCount() == 0 );
+                REQUIRE( session.droppedCount() == 0 );
+                REQUIRE( transitions.count( Kind::Running ) == 0 );
             }
         }
     }

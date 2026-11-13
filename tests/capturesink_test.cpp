@@ -254,6 +254,161 @@ SCENARIO( "drops not marked yet are written before the last marker", "[sink][dro
     }
 }
 
+SCENARIO( "messages held back until the connected marker are written after it", "[sink][hold]" )
+{
+    GIVEN( "a live capture's sink whose queue holds three messages, holding them back" )
+    {
+        QTemporaryDir dir;
+        Events events;
+        CaptureSink sink( configIn( dir, 3 ), events.reporter() );
+        REQUIRE( sink.open() );
+        sink.holdMessages();
+
+        WHEN( "two messages and a drop come during the round trip, and the writer runs" )
+        {
+            REQUIRE( sink.message( line( "m1" ) ) );
+            sink.dropped( 4, "slow consumer" );
+            REQUIRE( sink.message( line( "m2" ) ) );
+            sink.writeQueued();
+
+            THEN( "nothing is written yet, and they are counted" )
+            {
+                REQUIRE( Capture::read( sink.fileName() ).isEmpty() );
+                REQUIRE( events.all().isEmpty() );
+                REQUIRE( sink.received() == 2 );
+                REQUIRE( sink.dropped() == 4 );
+            }
+
+            AND_WHEN( "the round trip confirms the subscriptions, and more messages come" )
+            {
+                sink.releaseHeld( "connected to nats://h, subscribed to s", Kind::Connected,
+                                  "nats://h" );
+                REQUIRE( sink.message( line( "m3" ) ) );
+                sink.writeQueued();
+                REQUIRE( sink.message( line( "m4" ) ) );
+                sink.finish( "stopped" );
+
+                THEN( "the marker is the first line, the held ones follow in their order" )
+                {
+                    REQUIRE( Capture::read( sink.fileName() ).fields()
+                             == QList<LineFields>{
+                                 markerFields( "connected to nats://h, subscribed to s" ),
+                                 fieldsOf( "m1" ), markerFields( "dropped=4 (slow consumer)" ),
+                                 fieldsOf( "m2" ), fieldsOf( "m3" ), fieldsOf( "m4" ),
+                                 markerFields( "stopped" ) } );
+                    REQUIRE( events.all()
+                             == QList<CaptureSink::Event>{ { Kind::Connected, "nats://h" },
+                                                           { Kind::Status, "stopped" } } );
+                }
+
+                THEN( "none is counted twice" )
+                {
+                    REQUIRE( sink.received() == 4 );
+                    REQUIRE( sink.dropped() == 4 );
+                }
+            }
+
+            AND_WHEN( "the round trip fails" )
+            {
+                sink.discardHeld();
+                sink.marker( "subscribing to s failed: x", Kind::Status );
+                const bool late = sink.message( line( "late" ) );
+                sink.finish();
+
+                THEN( "the failure is written, and the held messages are not, nor counted, nor "
+                      "one that nats.c still delivers" )
+                {
+                    REQUIRE_FALSE( late );
+                    REQUIRE( Capture::read( sink.fileName() ).fields()
+                             == QList<LineFields>{ markerFields( "dropped=4 (slow consumer)" ),
+                                                   markerFields( "subscribing to s failed: x" ) } );
+                    REQUIRE( sink.received() == 0 );
+                    REQUIRE( sink.dropped() == 4 );
+                }
+            }
+        }
+
+        WHEN( "more messages come during the round trip than the queue holds" )
+        {
+            for ( int i = 1; i <= 5; ++i ) {
+                REQUIRE( sink.message( line( QStringLiteral( "m%1" ).arg( i ) ) ) );
+            }
+
+            AND_WHEN( "the round trip confirms the subscriptions" )
+            {
+                sink.releaseHeld( "connected", Kind::Connected );
+                sink.writeQueued();
+                REQUIRE( sink.message( line( "m6" ) ) );
+                sink.finish( "stopped" );
+
+                THEN( "the full queue dropped as it does otherwise, marked at the gap" )
+                {
+                    REQUIRE( Capture::read( sink.fileName() ).fields()
+                             == QList<LineFields>{ markerFields( "connected" ), fieldsOf( "m1" ),
+                                                   fieldsOf( "m2" ), fieldsOf( "m3" ),
+                                                   markerFields( "dropped=2 (queue full)" ),
+                                                   fieldsOf( "m6" ), markerFields( "stopped" ) } );
+                    REQUIRE( sink.received() == 6 );
+                    REQUIRE( sink.dropped() == 2 );
+                }
+            }
+
+            AND_WHEN( "the round trip fails" )
+            {
+                sink.discardHeld();
+                sink.finish( "subscribing to s failed: x" );
+
+                THEN( "neither the held messages nor their drops are written or counted" )
+                {
+                    REQUIRE( Capture::read( sink.fileName() ).fields()
+                             == QList<LineFields>{ markerFields( "subscribing to s failed: x" ) } );
+                    REQUIRE( sink.received() == 0 );
+                    REQUIRE( sink.dropped() == 0 );
+                }
+            }
+        }
+
+        WHEN( "the capture ends while it still holds them back" )
+        {
+            REQUIRE( sink.message( line( "m1" ) ) );
+            sink.finish( "stopped" );
+
+            THEN( "they are discarded, as when the round trip fails" )
+            {
+                REQUIRE( Capture::read( sink.fileName() ).fields()
+                         == QList<LineFields>{ markerFields( "stopped" ) } );
+                REQUIRE( sink.received() == 0 );
+            }
+        }
+    }
+
+    GIVEN( "a started sink holding messages back" )
+    {
+        QTemporaryDir dir;
+        Events events;
+        CaptureSink sink( configIn( dir, 100 ), events.reporter() );
+        REQUIRE( sink.open() );
+        sink.start();
+        sink.holdMessages();
+
+        WHEN( "messages come, and then the marker" )
+        {
+            REQUIRE( sink.message( line( "m1" ) ) );
+            REQUIRE( sink.message( line( "m2" ) ) );
+            sink.releaseHeld( "connected", Kind::Connected );
+            REQUIRE( waitFor( [ & ] { return !events.of( Kind::Connected ).isEmpty(); } ) );
+            sink.finish( "stopped" );
+
+            THEN( "the writer wrote the marker first" )
+            {
+                REQUIRE( Capture::read( sink.fileName() ).fields()
+                         == QList<LineFields>{ markerFields( "connected" ), fieldsOf( "m1" ),
+                                               fieldsOf( "m2" ), markerFields( "stopped" ) } );
+            }
+        }
+    }
+}
+
 SCENARIO( "a replay's sink waits for room instead of dropping", "[sink][replay]" )
 {
     GIVEN( "a replay's sink whose queue holds one message, and a delivery thread of three" )

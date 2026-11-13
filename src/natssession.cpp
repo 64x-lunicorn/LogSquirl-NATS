@@ -27,7 +27,9 @@
  *   1. start() opens the sink's file, starts the sink's writer thread and
  *      the session's connection thread.
  *   2. The connection thread connects and subscribes to each subject; its
- *      "connected" marker is the capture's first line.  A replay instead
+ *      "connected" marker, once a round trip has confirmed the
+ *      subscriptions, is the capture's first line: the sink holds back
+ *      what they deliver before it (capturesink.h).  A replay instead
  *      writes the marker and leaves subscribing to its connection path
  *      (replaysubscription.h): the stream's info, the plan, nats.c's
  *      ordered consumer, each replayed message and catching up.  It hands
@@ -697,13 +699,21 @@ struct NatsSession::Worker {
             }
             return {};
         }
+        // What the subscriptions deliver before the round trip below has
+        // confirmed them waits for the marker: it is the first line.
+        shared->sink.holdMessages();
+        const auto unconfirmed
+            = [ this, &subscribeFailed ]( const QString& what, natsStatus failure ) {
+                  shared->sink.discardHeld(); // not captured as connected
+                  return subscribeFailed( what, failure );
+              };
         subscriptions.assign( config.subscriptions.size(), nullptr );
         for ( int i = 0; i < config.subscriptions.size(); ++i ) {
             const auto& wanted = config.subscriptions.at( i );
             status = subscribe( *connection, wanted, *shared->subscriptions.at( i ),
                                 &subscriptions.at( i ) );
             if ( status != NATS_OK ) {
-                return subscribeFailed( describeSubscriptions( { wanted } ), status );
+                return unconfirmed( describeSubscriptions( { wanted } ), status );
             }
         }
         // A round trip: once the server has answered, it has the
@@ -712,11 +722,11 @@ struct NatsSession::Worker {
         status = natsConnection_Flush( *connection );
         const auto subjects = describeSubscriptions( config.subscriptions );
         if ( status != NATS_OK ) {
-            return subscribeFailed( subjects, status );
+            return unconfirmed( subjects, status );
         }
 
         const auto server = connectedUrl( *connection );
-        shared->sink.marker(
+        shared->sink.releaseHeld(
             QStringLiteral( "connected to %1, subscribed to %2" ).arg( server, subjects ),
             Event::Connected, server );
         return {};

@@ -58,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file, and *received* stops growing. It went on as running before,
   counting lines that were never written. The connection can be started
   again once the cause is fixed (#39).
+- **The connected marker is always a capture's first line.** A message
+  delivered during the round trip that confirms the subscriptions was
+  written before the `connected to …, subscribed to …` marker; it is now
+  held back and written right after it, in its order, none lost and none
+  counted twice. Should that round trip fail, the failure is written and
+  the held messages are not (#40).
 - **A replay start that cannot be read is refused.** A stream sequence
   above the largest one (18446744073709551615) or left empty is not saved,
   where it was replayed from sequence 1; a sequence or time in nats.ini that

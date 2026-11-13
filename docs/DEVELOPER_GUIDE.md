@@ -105,6 +105,18 @@ message queued is preceded by its `dropped=<n> (queue full)` marker; a
 replay's (`Mode::WaitForRoom`) makes the callback wait until the writer has
 taken the queue. Marker lines (connection events, drops) are always queued.
 
+**The connected marker first.** A live capture's subscriptions deliver as
+soon as the server has them, before the round trip
+(`natsConnection_Flush`) that confirms them and after which the session
+writes `connected to …, subscribed to …`. So the session has the sink hold
+back what it takes from subscribing on (`CaptureSink::holdMessages()`):
+counted and dropped as ever, written by none. Confirmed, the marker goes
+before all of it (`releaseHeld()`); the round trip failed, the held
+messages and those nats.c still delivers are discarded uncounted
+(`discardHeld()`), and the failure is written. A replay needs none of
+this: it writes its `connected to …, replaying …` marker before it
+subscribes.
+
 Before that, nats.c holds up to each subscription's pending limits
 (`SessionConfig::pendingLimits`, 1,000,000 messages and 512 MiB by default,
 set with `natsSubscription_SetPendingLimits`) and drops beyond them as a
@@ -753,6 +765,12 @@ options of one with JetStream.
   (`nats_test::waitFor` from [`tests/sessiontest.h`](../tests/sessiontest.h)).
   A session is subscribed once its first line, the `connected to …`
   marker, is in the file; from then on every message published is captured.
+  To publish while the round trip that confirms the subscriptions is under
+  way, a test starts the session through `nats_test::TcpProxy`
+  ([`tests/tcpproxy.h`](../tests/tcpproxy.h)) with `holdRoundTrip()`: the
+  proxy holds back the session's first `PING` after a `SUB` until
+  `releaseRoundTrip()`, so the messages published meanwhile reach the
+  session before the server's answer, on every run.
 - **The line reader** ([`tests/capture.h`](../tests/capture.h)) is the one
   place the tests know the line format. `nats_test::Capture::read( path )`
   reads a capture's file (or its rotated files) with the Log Format
@@ -771,7 +789,9 @@ options of one with JetStream.
   itself, which queues lines and writes them (`writeQueued()`,
   `finish()`) when it chooses, so what is queued, dropped and written when
   is deterministic. They cover each drop in exactly one `dropped=` marker
-  at the gap, unmarked drops written before `stopped`, a replay waiting for
+  at the gap, unmarked drops written before `stopped`, messages held back
+  until the `connected` marker (or discarded with a failed round trip), a
+  replay waiting for
   room instead of dropping (`waitingForRoom()` says when it waits) and
   discarding once stopped, a line never split across files, a failed
   rotation retried one limit later (a directory where the next file goes),
