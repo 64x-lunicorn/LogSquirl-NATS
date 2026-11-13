@@ -566,9 +566,9 @@ refuses the last 0 messages, sequence 0 and a time
 outside `kMinReplayTimeUs` to `kMaxReplayTimeUs` (1970-01-01 00:00:01 to
 2262-04-11 23:47:16 UTC: nats.c sends the time 0 as none, and a later time
 overflows its nanoseconds). So the dialog does not save it, and a tile whose
-saved start is such says why at Start. An unread `lastMessages` is written
-back as it was when the store writes `nats.ini` again for another
-connection. Replay checked
+saved start is such says why at Start. An unread `lastMessages`,
+`sequence` or `timeUs` is written back as it was when the store writes
+`nats.ini` again for another connection. Replay checked
 without a stream is told by a profile's `replayChosen`, which the dialog
 sets when Replay is checked, stream or not (a loaded profile has it if it
 has a stream). Each rule is a row of the tables in `profiles_test.cpp`

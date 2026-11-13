@@ -570,14 +570,32 @@ SCENARIO( "a saved replay start that cannot be read or is out of range is not st
                                          "1\\replay\\stream=ORDERS\n"
                                          "1\\replay\\start=" )
                                  + row.start + "\n1\\replay\\sequence=" + row.sequence
-                                 + "\n1\\replay\\timeUs=" + row.timeUs + "\nsize=1\n" );
-            const auto audit = ProfileStore( path ).find( "audit" );
+                                 + "\n1\\replay\\timeUs=" + row.timeUs
+                                 + "\n2\\name=prod\n"
+                                   "2\\url=nats://localhost:4222\n"
+                                   "size=2\n" );
+            ProfileStore store( path );
+            const auto audit = store.find( "audit" );
             REQUIRE( audit );
 
             THEN( "the start check gives the reason, for the profile and its session config" )
             {
                 REQUIRE( startProblem( *audit ) == row.problem );
                 REQUIRE( startProblem( nats_monitor::sessionConfig( *audit ) ) == row.problem );
+            }
+
+            WHEN( "another connection is deleted, which writes the file again" )
+            {
+                REQUIRE( store.remove( "prod" ).isEmpty() );
+
+                THEN( "the sequence and the time are kept as they were" )
+                {
+                    const auto again = ProfileStore( path ).find( "audit" );
+                    REQUIRE( again );
+                    REQUIRE( startProblem( *again ) == row.problem );
+                    REQUIRE( again->replay.unreadSequence == audit->replay.unreadSequence );
+                    REQUIRE( again->replay.unreadTime == audit->replay.unreadTime );
+                }
             }
         }
     }

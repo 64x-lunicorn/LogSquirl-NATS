@@ -127,8 +127,9 @@ struct ReplayConfig {
     /// The sequence, and the time, as they were given when they are no
     /// number of their field (a word, a sequence past the largest): the
     /// start then cannot be read, and replayProblem() (replay.h) refuses it
-    /// rather than start somewhere else.  Empty if read; never saved.
-    /// Set by readStartSequence() and readStartTime().
+    /// rather than start somewhere else.  Empty if read; saved as it was
+    /// given, so writing nats.ini again does not turn it into one.  Set by
+    /// readStartSequence() and readStartTime().
     QString unreadSequence;
     QString unreadTime;
     /// The number of last messages as it was given when it is no number of

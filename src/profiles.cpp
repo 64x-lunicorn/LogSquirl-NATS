@@ -184,15 +184,26 @@ void writeReplay( QSettings& settings, const ReplayConfig& replay )
     settings.setValue( "stream", replay.stream );
     settings.setValue( "filterSubject", replay.filterSubject );
     settings.setValue( "start", QString::fromLatin1( replayStartInfo( replay.start ).savedName ) );
-    // One that cannot be read stays so (readLastMessages()).
+    // One that cannot be read stays so (readLastMessages(),
+    // readStartSequence(), readStartTime()).
     if ( replay.unreadLastMessages.isEmpty() ) {
         settings.setValue( "lastMessages", replay.lastMessages );
     }
     else {
         settings.setValue( "lastMessages", replay.unreadLastMessages );
     }
-    settings.setValue( "sequence", replay.sequence );
-    settings.setValue( "timeUs", replay.timeUs );
+    if ( replay.unreadSequence.isEmpty() ) {
+        settings.setValue( "sequence", replay.sequence );
+    }
+    else {
+        settings.setValue( "sequence", replay.unreadSequence );
+    }
+    if ( replay.unreadTime.isEmpty() ) {
+        settings.setValue( "timeUs", replay.timeUs );
+    }
+    else {
+        settings.setValue( "timeUs", replay.unreadTime );
+    }
     settings.setValue( "followLive", replay.followLive );
     settings.endGroup();
 }

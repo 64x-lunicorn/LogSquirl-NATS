@@ -63,7 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where it was replayed from sequence 1; a sequence or time in nats.ini that
   is not a number, or a time before 1970-01-01 00:00:01 or after
   2262-04-11 23:47:16 UTC, keeps the connection from starting, and its tile
-  says why (#38).
+  says why (#38). Saving or deleting another connection keeps such a
+  sequence or time as it was, where it became sequence 1 or the time 0
+  (#44).
 - **A number of last messages that cannot be read is refused.** A
   `lastMessages` in nats.ini that is not a number, is 0 or is above
   18446744073709551615 keeps the connection from starting, and its tile
