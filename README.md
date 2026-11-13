@@ -485,7 +485,7 @@ sequenceDiagram
 | **Callbacks never block** | nats.c's threads only format and enqueue; one writer thread per session owns the file and writes in batches. |
 | **Drops are lines** | A `dropped=` marker where the gap is, so the log itself shows what is missing. |
 | **One line per subscription** | Overlapping subjects are written as the server delivers them; deduplicating would hide that. |
-| **Secrets never saved** | Profiles hold no password or token; a `.creds` file keeps credentials on disk. |
+| **Secrets never saved** | Profiles hold no password or token; a `.creds` file keeps credentials on disk. Once nats.c has a secret, the plugin's copies are wiped from memory. |
 | **No built-in filtering** | LogSquirl's regex search and highlighters do it better. |
 
 The threads, the queue, the writer and the rotation are described in
@@ -526,6 +526,7 @@ LogSquirl-NATS/
 │   ├── natsoptions.*           # Settings → nats.c options, connecting; failures in words
 │   ├── authmethods.h           # The authentication methods, one table
 │   ├── nkey.*                  # The public key of an NKey seed
+│   ├── secrets.*               # Wiping a secret once nats.c has it
 │   ├── profiles.*              # Saved connection profiles
 │   ├── subjects.*              # Subjects as entered, overlap check
 │   ├── lineformat.*            # One message → one line

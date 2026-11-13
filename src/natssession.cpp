@@ -71,6 +71,7 @@
 #include "natsoptions.h"
 #include "profiles.h"
 #include "replay.h"
+#include "secrets.h"
 #include "tempdirs.h"
 
 #include <QMetaObject>
@@ -473,7 +474,8 @@ struct Shared {
 
 struct NatsSession::Worker {
     NatsSession* const session; ///< Only posted to; it joins the thread before it goes.
-    /// Its secret is cleared once the connection options hold it.
+    /// Its secret, its own copy, is wiped once the connection options hold
+    /// it (secrets.h).
     SessionConfig config;
     const int generation;
     /// Leaked if nats.c does not let go of it; its sink is opened by
@@ -497,6 +499,9 @@ struct NatsSession::Worker {
                                   forward( owner, startGeneration, event );
                               } ) )
     {
+        // Not shared with the session's, so that wiping it overwrites it.
+        const auto& secret = sessionConfig.auth.secret;
+        config.auth.secret = QString( secret.constData(), secret.size() );
         shared->format = config.format;
         const auto count = config.replay.enabled() ? 1 : config.subscriptions.size();
         for ( qsizetype i = 0; i < count; ++i ) {
@@ -522,6 +527,7 @@ struct NatsSession::Worker {
     ~Worker()
     {
         join();
+        wipe( config.auth.secret ); // if the thread never got to connect
         if ( released ) {
             delete shared; // finishes the sink, if the thread never ran
         }
@@ -796,7 +802,7 @@ struct NatsSession::Worker {
         }
         const auto problem = connectTo( *options, config, connection );
         // nats.c has its own copy, for reconnecting: no other is kept here.
-        config.auth.secret.clear();
+        wipe( config.auth.secret );
         if ( !problem.isEmpty() ) {
             return failed( problem );
         }
@@ -1038,6 +1044,7 @@ NatsSession::~NatsSession()
     // The owner may be half-destroyed already: stopping must not signal it.
     blockSignals( true );
     stop();
+    wipe( config_.auth.secret ); // if it never started
 }
 
 bool NatsSession::start()
@@ -1077,6 +1084,7 @@ bool NatsSession::start()
     auto* raw = worker.get();
     worker->thread = std::thread( [ raw ] { raw->run(); } );
     worker_ = std::move( worker );
+    wipe( config_.auth.secret ); // the worker has its own, for the connection options
     Q_EMIT transitioned( { Transition::Kind::Connecting,
                            QStringLiteral( "connecting to %1…" ).arg( redactUrls( config_.url ) ),
                            {} } );

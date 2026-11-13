@@ -187,6 +187,13 @@ public:
      * Whether the connection succeeds is reported later: Running, or
      * Failed.
      *
+     * The password or token (AuthConfig::secret) is held no longer than
+     * needed: once started, config() has none, and once nats.c's options
+     * hold it the session's copy is wiped (secrets.h); nats.c reconnects
+     * with its own.  Started again after stop(), the session has none to
+     * log in with: a new session takes it again (Sessions makes one for
+     * each start).
+     *
      * @return false, after a Failed transition, if the session could not
      *         start (its config has a startProblem(), profiles.h, such as no
      *         subject or a blank one; the file cannot be created).
@@ -280,8 +287,8 @@ private:
     /// The running worker's counts, or those the last one left.
     Counts counts() const;
 
-    /// With its secret, which start() needs again; the worker clears its
-    /// copy once nats.c's options hold it.
+    /// Its secret only until start() hands it to the worker, which wipes it
+    /// once nats.c's options hold it (secrets.h).
     SessionConfig config_;
     QTemporaryDir tempDir_; ///< Declared before worker_: removed after the file is closed.
     QString filePath_;

@@ -56,6 +56,7 @@ set(LOGSQUIRL_NATS_SOURCES
     src/nkey.cpp
     src/profiles.cpp
     src/replay.cpp
+    src/secrets.cpp
     src/sessionconfig.cpp
     src/sessions.cpp
     src/sessionstatus.cpp

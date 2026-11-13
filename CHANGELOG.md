@@ -53,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2262-04-11 23:47:16 UTC, keeps the connection from starting, and its tile
   says why (#38).
 
+### Security
+- **Secrets are wiped from memory once nats.c has them.** A password or
+  token, and an NKey seed file's contents and its decoded seed, are
+  overwritten as soon as nats.c's connection options hold what they need;
+  a running capture keeps no copy of the password or token (#36).
+
 ## [0.1.0]
 
 ### Added

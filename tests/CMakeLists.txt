@@ -46,6 +46,7 @@ add_executable(logsquirl_nats_tests
     replay_test.cpp
     replayplan_test.cpp
     sessions_test.cpp
+    secrets_test.cpp
     sessionstatus_test.cpp
     sidebar_test.cpp
     permissions_test.cpp

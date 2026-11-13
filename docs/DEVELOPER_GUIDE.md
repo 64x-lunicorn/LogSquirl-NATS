@@ -493,9 +493,19 @@ the connection's tile shows it (`failed: …`) and a notification says it.
   capture file's markers, including nats.c's connected URL) it goes
   through `redactUrls()`, which replaces the password, or a user
   information without one (a token), by `***`.
-- The worker clears its copy of the password or token once nats.c's
-  options hold it; `NatsSession` keeps its own, which `start()` needs
-  again.
+- A secret is held no longer than needed, and wiped with `wipe()`
+  ([`src/secrets.h`](../src/secrets.h), `OPENSSL_cleanse()`, which the
+  compiler cannot leave out): `NatsSession::start()` hands the password or
+  token to the worker, a copy of its own, and wipes the session's, so a
+  running session's `config()` has none; the worker wipes its copy once
+  nats.c's options hold it, and `configureAuth()` the UTF-8 copies it
+  passes to nats.c. nats.c keeps its own copy, for reconnecting. Of an
+  NKey seed file, the file's bytes (read unbuffered) and the seed decoded
+  from them are wiped once the public key is derived; nats.c reads the
+  seed from the file itself. A session started again after `stop()` has
+  no secret left; `Sessions` makes a new session for each start. Copies
+  in the callers (the profile the sidebar or dialog filled in) are
+  theirs: `wipe()` overwrites only data no other `QString` shares.
 
 The dialog saves each connection as a named **profile**
 ([`src/profiles.h`](../src/profiles.h)) in `nats.ini`, array `profiles`:

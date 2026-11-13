@@ -35,7 +35,8 @@ namespace nats_monitor {
 /**
  * The public key ("U…") of the first user seed ("SU…") in @p seedFile, the
  * content of an NKey seed file; empty if it holds none, or the seed is not
- * valid.
+ * valid.  No copy of the seed is left behind: the bytes decoded from it are
+ * wiped (secrets.h); @p seedFile is the caller's to wipe.
  */
 QByteArray nkeyUserPublicKey( const QByteArray& seedFile );
 
