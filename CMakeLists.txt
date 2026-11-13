@@ -52,10 +52,12 @@ set(LOGSQUIRL_NATS_SOURCES
     src/hostadapter.cpp
     src/lineformat.cpp
     src/natsoptions.cpp
+    src/natsmessage.cpp
     src/natssession.cpp
     src/nkey.cpp
     src/profiles.cpp
     src/replay.cpp
+    src/replaysubscription.cpp
     src/secrets.cpp
     src/sessionconfig.cpp
     src/sessions.cpp

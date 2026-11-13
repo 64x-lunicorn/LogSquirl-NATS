@@ -26,13 +26,14 @@
  * The session replays (natssession.h, REPLAY); this is what the dialog,
  * the profiles, the tiles, the notifications and the session need of a
  * ReplayConfig.  All of it is pure: no nats.c, no server, no clock.  Before
- * it subscribes the session plans the replay from the stream's state
- * (planReplay()), turns the plan into nats.c's consumer options, and hands
- * each message's pending count and stored time to the plan's ReplayStep.
+ * it subscribes the replay's connection path (replaysubscription.h) plans
+ * the replay from the stream's state (planReplay()), turns the plan into
+ * nats.c's consumer options, and hands each message's pending count and
+ * stored time to the plan's ReplayStep.
  *
  * A new start position is a row in kReplayStarts, a case in describeReplay()
- * and one in planReplay(); with a new DeliverFrom, the session maps it to
- * nats.c's deliver policy too (natssession.cpp, subscribeReplay).  The
+ * and one in planReplay(); with a new DeliverFrom, the connection path maps
+ * it to nats.c's deliver policy too (ReplaySubscription::subscribe()).  The
  * streams to choose from are listed apart (streams.h): that connects.
  */
 

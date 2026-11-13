@@ -24,6 +24,7 @@ plugin.cpp            entry points (logsquirl_plugin_*), each through guarded()
        └─ NatsSession × N   children of Sessions: the nats.c adapter
             ├─ connection thread  connects, subscribes, waits; drains and closes
             ├─ nats.c threads     callbacks: format a line, hand it to the sink
+            ├─ ReplaySubscription a replay's connection path: stream info, ordered consumer (replaysubscription.h)
             └─ CaptureSink        everything between a message and the file (capturesink.h)
                  ├─ queue           bounded, mutex + condition variables; drops, or waits (replay)
                  └─ writer thread   writes in batches, rotates, ends the capture
@@ -268,6 +269,19 @@ with flow control and heartbeats, which nats.c recreates from the last
 stream sequence after a gap or a reconnect. The filter subject is the
 `ReplayConfig::filterSubject`, or `>` for all of the stream's.
 
+The replay's nats.c side is a module of its own, `ReplaySubscription`
+([`src/replaysubscription.h`](../src/replaysubscription.h)): it reads the
+stream's info, plans, subscribes the ordered consumer, takes each
+replayed message and tells when the replay has caught up. The session
+gives it the connection and owns what a capture and a replay share: the
+subscription once made (its completion callback and pending limits, set
+in one place, `Shared::setUp`; its drain and end), the drops and the
+sink. The replay reaches them through its `Outlet` (in natssession.cpp,
+`Shared`): the subscription to set up, a replayed `Message` to write, a
+status marker, whether the session is discarding, and that the replay is
+complete. `toMessage()` ([`src/natsmessage.h`](../src/natsmessage.h)) makes
+the formatter's `Message` of a nats.c message for both.
+
 - **The plan.** Before subscribing, the connection thread reads the stream's state
   (`js_GetStreamInfo`: retention, first and last sequence, message count,
   as a `StreamState`) and plans the replay: `planReplay()` (replay.h) makes
@@ -275,12 +289,13 @@ stream sequence after a gap or a reconnect. The filter subject is the
   refused or warned of, where the consumer starts (`DeliverFrom` and a
   start sequence or time), what the step skips (`ReplaySkip`), whether
   there is nothing to replay (caught up at once), and whether it follows
-  live. The plan is pure; `subscribeReplay` (natssession.cpp) only turns it
+  live. The plan is pure; `ReplaySubscription::subscribe()` only turns it
   into `jsSubOptions` and hands each message's `NumPending` and stored time
   to the plan's `ReplayStep`, which says whether to write the message and
   whether the replay has caught up. A new start position is a row in
   `kReplayStarts`, a case in `describeReplay()` and one in `planReplay()`;
-  only a new `DeliverFrom` needs the session too, to map it to nats.c.
+  only a new `DeliverFrom` needs the connection path too, to map it to
+  nats.c.
 - **Start.** *All*: `js_DeliverAll`. *Sequence*: `js_DeliverByStartSequence`
   with `OptStartSeq`. *Time*: `js_DeliverByStartTime` with `OptStartTime`
   (nanoseconds). nats.c (3.14) writes that time's fraction of a second
@@ -294,7 +309,7 @@ stream sequence after a gap or a reconnect. The filter subject is the
   *Last N* with a filter: which messages match is the server's to know, so
   it delivers all and the step skips while the message's `NumPending`
   (metadata) is N or more, until the first one written.
-- **The line.** `onReplayMessage` reads `natsMsg_GetMetaData`: the stored
+- **The line.** `ReplaySubscription::onMessage` reads `natsMsg_GetMetaData`: the stored
   time (`Timestamp`) and the stream sequence go into `Message`, and the
   reply is cleared (nats.c's is the consumer's; the stream keeps none).
 - **Caught up.** A message with `NumPending` 0 is the last one there was:

@@ -98,6 +98,12 @@ what it skips, and whether it is caught up at once (`ReplayPlan`).
 The rule applied to each message a replay's consumer delivers: write or skip
 it, and whether the replay has caught up with it (`ReplayStep`).
 
+**Replay connection path**:
+What a replay does on the connection, beside its pure plan: read the stream
+state, subscribe the ordered consumer as the plan says, take each replayed
+message and tell when it has caught up (`ReplaySubscription`). The session
+keeps what a capture and a replay share.
+
 **Caught up**:
 A replay has written the last message its stream held: it is then complete,
 or it follows live.

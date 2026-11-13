@@ -137,7 +137,8 @@
  * start and writes the last N that match; without a filter it starts at
  * the stream sequence N before the end.  Where a replay starts, what it
  * skips and when it has caught up are planned from the stream's state
- * before it subscribes (replay.h, planReplay() and ReplayStep).
+ * before it subscribes (replay.h, planReplay() and ReplayStep); the
+ * replay's connection path, its nats.c side, is replaysubscription.h.
  *
  * USAGE
  * ─────
@@ -243,8 +244,8 @@ public:
     /// or about to be.  After stop() it equals the sum of all of them.
     quint64 droppedCount() const;
 
-    /// The pending limits nats.c has for each subscription, read back from
-    /// the first once subscribed; zero before, and after a failed subscribe.
+    /// The pending limits nats.c has for each subscription, read back once
+    /// subscribed; zero before, and after a failed subscribe.
     PendingLimits pendingLimits() const;
 
     /// What the accessors above return, taken together.
