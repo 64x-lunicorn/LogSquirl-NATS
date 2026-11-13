@@ -167,11 +167,13 @@ ReplayConfig readReplay( QSettings& settings )
     if ( const auto last = settings.value( "lastMessages" ).toULongLong( &ok ); ok && last > 0 ) {
         replay.lastMessages = last;
     }
-    if ( const auto sequence = settings.value( "sequence" ).toULongLong( &ok );
-         ok && sequence > 0 ) {
-        replay.sequence = sequence;
+    // A start that cannot be read is kept for the start check to refuse,
+    // never taken for another (replayProblem(), replay.h); one not saved
+    // keeps its default.
+    if ( settings.contains( "sequence" ) ) {
+        readStartSequence( replay, settings.value( "sequence" ).toString() );
     }
-    replay.timeUs = settings.value( "timeUs", 0 ).toLongLong();
+    readStartTime( replay, settings.value( "timeUs" ).toString() );
     replay.followLive = settings.value( "followLive", false ).toBool();
     settings.endGroup();
     return replay;

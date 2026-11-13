@@ -506,6 +506,65 @@ SCENARIO( "profiles saved by earlier versions still load", "[profiles]" )
     }
 }
 
+SCENARIO( "a saved replay start that cannot be read or is out of range is not started",
+          "[profiles][checks]" )
+{
+    QTemporaryDir dir;
+    const auto path = dir.filePath( "nats.ini" );
+    const QString timeRange = "The start time must be from 1970-01-01 00:00:01.000000Z to "
+                              "2262-04-11 23:47:16.000000Z.";
+    struct Row {
+        const char* what;
+        const char* start;
+        const char* sequence;
+        const char* timeUs;
+        QString problem; ///< Empty: none.
+    };
+    const std::vector<Row> rows{
+        { "the largest sequence", "sequence", "18446744073709551615", "0", {} },
+        { "a sequence above the largest", "sequence", "18446744073709551616", "0",
+          "18446744073709551616 is not a stream sequence: they go from 1 to "
+          "18446744073709551615." },
+        { "a sequence that is not a number", "sequence", "seven", "0",
+          "seven is not a stream sequence: they go from 1 to 18446744073709551615." },
+        { "the sequence 0", "sequence", "0", "0", "A stream's sequences start at 1." },
+        { "a time", "time", "1", "1794391200000000", {} },
+        { "the time 0", "time", "1", "0", timeRange },
+        { "a negative time", "time", "1", "-1794391200000000", timeRange },
+        { "a time whose nanoseconds overflow", "time", "1", "9223372036854775807", timeRange },
+        { "a time above what a number holds", "time", "1", "9223372036854775808",
+          "9223372036854775808 is not a start time: one is a number of microseconds since "
+          "1970." },
+        { "a time that is not a number", "time", "1", "noon",
+          "noon is not a start time: one is a number of microseconds since 1970." },
+        { "the last messages, with a sequence and a time that cannot be read",
+          "last",
+          "seven",
+          "noon",
+          {} },
+    };
+    for ( const auto& row : rows ) {
+        GIVEN( std::string( "nats.ini with a replay from " ) + row.what )
+        {
+            writeFile( path, QByteArray( "[profiles]\n"
+                                         "1\\name=audit\n"
+                                         "1\\url=nats://localhost:4222\n"
+                                         "1\\replay\\stream=ORDERS\n"
+                                         "1\\replay\\start=" )
+                                 + row.start + "\n1\\replay\\sequence=" + row.sequence
+                                 + "\n1\\replay\\timeUs=" + row.timeUs + "\nsize=1\n" );
+            const auto audit = ProfileStore( path ).find( "audit" );
+            REQUIRE( audit );
+
+            THEN( "the start check gives the reason, for the profile and its session config" )
+            {
+                REQUIRE( startProblem( *audit ) == row.problem );
+                REQUIRE( startProblem( nats_monitor::sessionConfig( *audit ) ) == row.problem );
+            }
+        }
+    }
+}
+
 // ── Can it be started, can it be saved ───────────────────────────────────
 
 namespace {

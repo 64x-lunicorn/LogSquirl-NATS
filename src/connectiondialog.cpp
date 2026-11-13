@@ -234,6 +234,10 @@ ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sess
     replayTimeEdit_->setTimeZone( QTimeZone::UTC );
     replayTimeEdit_->setDisplayFormat( QStringLiteral( "yyyy-MM-dd HH:mm:ss.zzz 'UTC'" ) );
     replayTimeEdit_->setCalendarPopup( true );
+    // The times a replay can start from (replayProblem(), replay.h).
+    replayTimeEdit_->setDateTimeRange(
+        QDateTime::fromMSecsSinceEpoch( kMinReplayTimeUs / 1000, QTimeZone::UTC ),
+        QDateTime::fromMSecsSinceEpoch( kMaxReplayTimeUs / 1000, QTimeZone::UTC ) );
     replayFollowCheck_->setObjectName( "replayFollow" );
     statusLabel_->setObjectName( "status" );
     statusLabel_->setWordWrap( true );
@@ -396,7 +400,8 @@ ConnectionProfile ConnectionDialog::currentProfile() const
         replay.filterSubject = replayFilterEdit_->text().trimmed();
         replay.start = static_cast<ReplayStart>( replayStartCombo_->currentData().toInt() );
         replay.lastMessages = static_cast<quint64>( replayLastSpin_->value() );
-        replay.sequence = std::max<quint64>( replaySequenceEdit_->text().toULongLong(), 1 );
+        // One it cannot read is refused with the reason (replayProblem()).
+        readStartSequence( replay, replaySequenceEdit_->text() );
         replay.timeUs = replayTimeEdit_->dateTime().toMSecsSinceEpoch() * 1000;
         replay.followLive = replayFollowCheck_->isChecked();
     }
@@ -428,7 +433,10 @@ void ConnectionDialog::showProfile( const ConnectionProfile& profile )
         replayStartCombo_->findData( static_cast<int>( replay.start ) ) );
     replayLastSpin_->setValue( static_cast<int>(
         std::min<quint64>( replay.lastMessages, std::numeric_limits<int>::max() ) ) );
-    replaySequenceEdit_->setText( QString::number( replay.sequence ) );
+    // As saved, also when it cannot be read: Save then says why.
+    replaySequenceEdit_->setText( replay.unreadSequence.isEmpty()
+                                      ? QString::number( replay.sequence )
+                                      : replay.unreadSequence );
     // No time saved: an hour ago, a start that usually holds something.
     replayTimeEdit_->setDateTime(
         replay.timeUs > 0 ? QDateTime::fromMSecsSinceEpoch( replay.timeUs / 1000, QTimeZone::UTC )

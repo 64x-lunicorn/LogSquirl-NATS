@@ -1780,6 +1780,60 @@ SCENARIO( "connections are saved as profiles, without passwords or tokens", "[pl
 
         logsquirl_plugin_shutdown();
     }
+
+    GIVEN( "the dialog with a replay of ORDERS from a stream sequence" )
+    {
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        host.menuActions.first().trigger();
+        auto* dialog = openDialog();
+        checkBox( dialog, "replay" )->setChecked( true );
+        comboBox( dialog, "replayStream" )->setEditText( "ORDERS" );
+        auto* start = comboBox( dialog, "replayStart" );
+        start->setCurrentIndex( start->findText( "From sequence" ) );
+
+        WHEN( "the sequence is one above the largest, and it is saved" )
+        {
+            field( dialog, "replaySequence" )->setText( "18446744073709551616" );
+            saveAs( dialog, "audit" );
+
+            THEN( "nothing is saved, and the dialog says why" )
+            {
+                REQUIRE( comboBox( dialog, "profile" )->count() == 0 );
+                REQUIRE( statusText( dialog )
+                         == "18446744073709551616 is not a stream sequence: they go from 1 to "
+                            "18446744073709551615." );
+            }
+        }
+
+        WHEN( "the sequence is the largest, and it is saved" )
+        {
+            field( dialog, "replaySequence" )->setText( "18446744073709551615" );
+            saveAs( dialog, "audit" );
+
+            THEN( "it is saved with that sequence" )
+            {
+                INFO( "dialog: " << statusText( dialog ).toStdString() );
+                const auto saved = ProfileStore( host.configDir() + "/nats.ini" ).find( "audit" );
+                REQUIRE( saved );
+                REQUIRE( saved->replay.sequence == 18446744073709551615ULL );
+            }
+        }
+
+        WHEN( "the sequence is left empty, and it is saved" )
+        {
+            field( dialog, "replaySequence" )->clear();
+            saveAs( dialog, "audit" );
+
+            THEN( "nothing is saved: it is not taken for sequence 1" )
+            {
+                REQUIRE( comboBox( dialog, "profile" )->count() == 0 );
+                REQUIRE( statusText( dialog ) == "A stream's sequences start at 1." );
+            }
+        }
+
+        logsquirl_plugin_shutdown();
+    }
 }
 
 SCENARIO( "a connection replays a JetStream stream from its tile", "[plugin][server][replay]" )

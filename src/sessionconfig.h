@@ -124,6 +124,13 @@ struct ReplayConfig {
     quint64 lastMessages = 100; ///< For ReplayStart::Last; at least 1.
     quint64 sequence = 1;       ///< For ReplayStart::Sequence; at least 1.
     qint64 timeUs = 0;          ///< For ReplayStart::Time: microseconds since the epoch (UTC).
+    /// The sequence, and the time, as they were given when they are no
+    /// number of their field (a word, a sequence past the largest): the
+    /// start then cannot be read, and replayProblem() (replay.h) refuses it
+    /// rather than start somewhere else.  Empty if read; never saved.
+    /// Set by readStartSequence() and readStartTime().
+    QString unreadSequence;
+    QString unreadTime;
     /// Once caught up, go on with the messages the stream stores from then
     /// on, instead of ending.
     bool followLive = false;
