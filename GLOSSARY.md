@@ -53,8 +53,8 @@ connection event, a count of dropped messages, the end of the capture.
 **Transition**:
 A step of a session's life as the session reports it, once, typed:
 connecting, running at a server, reconnecting, failed with a reason,
-completed, stopped (`Transition`), with a detail text for the user. Nothing
-reads a state out of that text.
+completed, stopping, stopped (`Transition`), with a detail text for the
+user. Nothing reads a state out of that text.
 _Avoid_: Status change, event (the capture sink's reports)
 
 **Connection status**:

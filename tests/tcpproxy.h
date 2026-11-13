@@ -28,6 +28,8 @@
  * stops it from accepting new ones, so a client cannot reconnect.
  * holdRoundTrip() holds back a session's round trip that confirms its
  * subscriptions, so a test publishes while it is under way.
+ * stopAnswering() makes it a server that never answers: the connections
+ * stay open, and nothing a client sends gets through.
  */
 
 #pragma once
@@ -121,6 +123,24 @@ public:
         return holding;
     }
 
+    /// From now on a server that never answers, the connections held open:
+    /// what a client sends is discarded, and a new connection is accepted
+    /// but gets nothing, not even the server's INFO, so nats.c's connect
+    /// waits for its timeout.  Made with any upstream port (0 too), a proxy
+    /// that stops answering at once never connects to it.
+    void stopAnswering()
+    {
+        run( [ this ] { silent_ = true; } );
+    }
+
+    /// How many connections it has accepted.
+    int accepted()
+    {
+        int count = 0;
+        run( [ this, &count ] { count = accepted_; } );
+        return count;
+    }
+
     /// Send what was held back, and forward everything as before.
     void releaseRoundTrip()
     {
@@ -144,6 +164,14 @@ private:
     void acceptPending()
     {
         while ( auto* client = server_->nextPendingConnection() ) {
+            ++accepted_;
+            if ( silent_ ) {
+                client->setParent( &worker_ );
+                QObject::connect( client, &QTcpSocket::readyRead, client,
+                                  [ client ] { client->readAll(); } );
+                sockets_ << client;
+                continue;
+            }
             auto* upstream = new QTcpSocket( &worker_ );
             upstream->connectToHost( QHostAddress::LocalHost,
                                      static_cast<quint16>( upstreamPort_ ) );
@@ -176,6 +204,9 @@ private:
     void fromClient( QTcpSocket* client, QTcpSocket* upstream )
     {
         const auto data = client->readAll();
+        if ( silent_ ) {
+            return;
+        }
         if ( holding_ ) {
             held_ += data;
             return;
@@ -222,6 +253,8 @@ private:
     QTcpServer* server_ = nullptr;
     QList<QTcpSocket*> sockets_;
     int port_ = 0;
+    int accepted_ = 0;    ///< Connections accepted; on the proxy's thread.
+    bool silent_ = false; ///< stopAnswering(); on the proxy's thread.
     // holdRoundTrip(): on the proxy's thread.
     bool holdArmed_ = false;      ///< Hold back from the next PING after a SUB.
     bool holding_ = false;        ///< Holding back what the client sends.

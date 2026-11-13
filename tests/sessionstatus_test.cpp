@@ -177,6 +177,38 @@ SCENARIO( "a connection's state follows its session's transitions", "[status]" )
         }
     }
 
+    GIVEN( "a running session, connected and counted" )
+    {
+        auto status = started();
+        status.apply( { Kind::Running, "connected to nats://a:4222", "nats://a:4222" } );
+        status.sample( 10, 2, 1000 );
+
+        WHEN( "it is stopping" )
+        {
+            status.apply( { Kind::Stopping, "stopping…", {} } );
+
+            THEN( "it says so until it has ended, what it captured kept" )
+            {
+                REQUIRE( status.status().state == SessionState::Stopping );
+                REQUIRE( status.status().detail == "stopping…" );
+                REQUIRE( status.status().server.isEmpty() );
+                REQUIRE( status.status().filePath == "/tmp/nats_x.log" );
+                REQUIRE( status.status().received == 10 );
+            }
+
+            AND_WHEN( "it has ended" )
+            {
+                status.apply( { Kind::Stopped, "stopped", {} } );
+
+                THEN( "it is stopped" )
+                {
+                    REQUIRE( status.status().state == SessionState::Stopped );
+                    REQUIRE( status.status().detail == "stopped" );
+                }
+            }
+        }
+    }
+
     GIVEN( "a session that could not start" )
     {
         ConnectionStatus status;

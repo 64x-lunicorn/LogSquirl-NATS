@@ -567,13 +567,15 @@ SCENARIO( "stopping a session closes the connection and keeps the file", "[serve
                 REQUIRE( Capture::read( path ).last().fields() == markerFields( "stopped" ) );
             }
 
-            THEN( "it reported each step once: connecting, running at the server, stopped" )
+            THEN( "it reported each step once: connecting, running at the server, stopping, "
+                  "stopped" )
             {
                 settle( 100 ); // nothing more comes
                 REQUIRE( transitions.all()
                          == QList<Transition>{
                              { Kind::Connecting, "connecting to " + server.url() + "…", {} },
                              { Kind::Running, "connected to " + server.url(), server.url() },
+                             { Kind::Stopping, "stopping…", {} },
                              { Kind::Stopped, "stopped", {} } } );
             }
 
@@ -620,6 +622,91 @@ SCENARIO( "stopping a session closes the connection and keeps the file", "[serve
                 {
                     REQUIRE_FALSE( QFileInfo::exists( QFileInfo( path ).path() ) );
                 }
+            }
+        }
+    }
+}
+
+SCENARIO( "a stop returns at once, even while connecting to a server that never answers",
+          "[session][stop]" )
+{
+    GIVEN( "a session connecting to a server that never answers" )
+    {
+        TcpProxy proxy( 0 );
+        proxy.stopAnswering();
+        auto session = std::make_unique<NatsSession>( sessionConfig( proxy.url(), { "x" } ),
+                                                      sessionTempRoot() );
+        Transitions transitions( *session );
+        REQUIRE( session->start() );
+        const auto path = session->filePath();
+        // In nats.c's connect, which waits up to its timeout of 2 s.
+        REQUIRE( waitFor( [ & ] { return proxy.accepted() == 1; } ) );
+
+        WHEN( "it is asked to stop" )
+        {
+            QElapsedTimer timer;
+            timer.start();
+            session->requestStop();
+            const auto stopMs = timer.elapsed();
+
+            THEN( "it returns at once, the session stopping" )
+            {
+                REQUIRE( stopMs < 1000 );
+                REQUIRE( session->isStopping() );
+                REQUIRE( session->isRunning() );
+                REQUIRE( transitions.all()
+                         == QList<Transition>{
+                             { Kind::Connecting, "connecting to " + proxy.url() + "…", {} },
+                             { Kind::Stopping, "stopping…", {} } } );
+            }
+
+            THEN( "once the connect has timed out it has stopped, its file ending with the "
+                  "stopped marker" )
+            {
+                REQUIRE(
+                    waitFor( [ & ] { return transitions.count( Kind::Stopped ) == 1; }, 10000 ) );
+                REQUIRE( transitions.kinds()
+                         == QList<Kind>{ Kind::Connecting, Kind::Stopping, Kind::Stopped } );
+                REQUIRE_FALSE( session->isRunning() );
+                REQUIRE_FALSE( session->isStopping() );
+                REQUIRE( Capture::read( path ).last().fields() == markerFields( "stopped" ) );
+            }
+
+            THEN( "it cannot be started, nor asked to stop, again until it has stopped" )
+            {
+                REQUIRE_FALSE( session->start() );
+                session->requestStop();
+                REQUIRE( transitions.kinds() == QList<Kind>{ Kind::Connecting, Kind::Stopping } );
+                REQUIRE(
+                    waitFor( [ & ] { return transitions.count( Kind::Stopped ) == 1; }, 10000 ) );
+                REQUIRE( session->start() );
+                REQUIRE( transitions.count( Kind::Connecting ) == 2 );
+                session->stop();
+            }
+
+            AND_WHEN( "it is destroyed while stopping" )
+            {
+                session.reset();
+
+                THEN( "it waited until the session had ended, and its directory is removed" )
+                {
+                    REQUIRE_FALSE( QFileInfo::exists( QFileInfo( path ).path() ) );
+                }
+            }
+        }
+
+        WHEN( "it is stopped and waited for" )
+        {
+            session->stop();
+
+            THEN( "it has ended once stop() returns: stopping, then stopped, its file closed" )
+            {
+                REQUIRE( transitions.kinds()
+                         == QList<Kind>{ Kind::Connecting, Kind::Stopping, Kind::Stopped } );
+                REQUIRE_FALSE( session->isRunning() );
+                REQUIRE( Capture::read( path ).last().fields() == markerFields( "stopped" ) );
+                settle( 100 ); // the thread's own report of its end comes to nothing
+                REQUIRE( transitions.count( Kind::Stopped ) == 1 );
             }
         }
     }

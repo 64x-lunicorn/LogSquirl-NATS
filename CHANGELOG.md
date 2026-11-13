@@ -51,6 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is replaying (#41).
 
 ### Fixed
+- **Stop returns at once; a tile says stopping until its session has
+  ended.** Stop and *Stop all* held LogSquirl until the connection had
+  ended, up to about half a minute against a server that does not answer,
+  and *Stop all* and unloading the plugin stopped the sessions one after the
+  other. Now the tile says *stopping…* (amber dot, the button disabled)
+  until the last lines are written and the file is closed, then *stopped*,
+  and the notification comes then; meanwhile the connection cannot be
+  started, edited or deleted. Unloading the plugin or quitting LogSquirl
+  still waits until every session has ended, but stops them all at once, so
+  it waits for the slowest, not for their sum (#37).
 - **A write error ends the session as failed, and its tile says why.**
   When the capture's file can no longer be written (disk full, the file
   removed, no permission), the session ends as a stop does, but failed:

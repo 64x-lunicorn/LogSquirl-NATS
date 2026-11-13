@@ -39,6 +39,7 @@
 #include "profiles.h"
 #include "sessions.h"
 #include "sessiontest.h"
+#include "tcpproxy.h"
 
 #include "testconfig.h"
 
@@ -76,6 +77,7 @@ using nats_test::liveFields;
 using nats_test::markerFields;
 using nats_test::NatsServer;
 using nats_test::Publisher;
+using nats_test::TcpProxy;
 using nats_test::waitFor;
 
 extern "C" int logsquirl_plugin_init( const LogSquirlHostApi* api, void* handle );
@@ -365,6 +367,14 @@ void startTile( FakeHost& host, const QString& name, const std::optional<QString
     tileButton( host, name, "startStop" )->click();
 }
 
+/// Click Stop on the tile of @p name, which returns at once, and wait until
+/// its session has stopped; whether it did.
+bool stopTile( FakeHost& host, const QString& name )
+{
+    tileButton( host, name, "startStop" )->click();
+    return waitFor( [ & ] { return isIn( name, SessionState::Stopped ); }, 10000 );
+}
+
 /// Open the dialog from the menu, enter @p url and @p subject, save the
 /// settings as the connection @p name and start it from its tile,
 /// answering a prompt for the password or token with @p secret.
@@ -546,12 +556,12 @@ SCENARIO( "capturing from a tile: Start, Stop, Start", "[plugin][server]" )
                 REQUIRE( host.openedFiles.size() == 1 );
                 const auto first = host.openedFiles.first();
                 REQUIRE( waitSubscribed( first ) );
-                startTile( host, "test" ); // Stop
+                REQUIRE( stopTile( host, "test" ) );
 
                 THEN( "the first file is kept and ends with the stopped marker, and the second "
                       "capture opens a new tab" )
                 {
-                    REQUIRE( waitFor( [ & ] { return endsStopped( first ); } ) );
+                    REQUIRE( endsStopped( first ) );
                     REQUIRE( host.notifications.last()
                              == QStringLiteral( "NATS capture of orders.> stopped." ) );
                     startTile( host, "test" );
@@ -643,7 +653,7 @@ SCENARIO( "the pending limits are set in the dialog", "[plugin][server]" )
                     publisher.publish( "flood", payload, {}, {}, i == 49999 );
                 }
             }
-            startTile( host, "test" ); // Stop
+            REQUIRE( stopTile( host, "test" ) );
 
             THEN( "the capture drops as a slow consumer, and says so in the file" )
             {
@@ -1557,10 +1567,38 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
 
             AND_WHEN( "Stop is clicked on the first" )
             {
-                startTile( host, "orders" ); // Stop
+                tileButton( host, "orders", "startStop" )->click();
+
+                THEN( "the click returns with its tile stopping: it can neither be started, "
+                      "edited nor deleted until its session has ended" )
+                {
+                    REQUIRE( isIn( "orders", SessionState::Stopping ) );
+                    REQUIRE( tileDetails( host, "orders" ).startsWith( "stopping…" ) );
+                    REQUIRE(
+                        tileButton( host, "orders", "startStop" )->text().contains( "Stopping" ) );
+                    REQUIRE_FALSE( tileButton( host, "orders", "startStop" )->isEnabled() );
+                    REQUIRE_FALSE( tileButton( host, "orders", "edit" )->isEnabled() );
+                    REQUIRE( tileButton( host, "orders", "delete" )->isHidden() );
+                    REQUIRE( sidebarButton( host, "stopAll" )->isEnabled() ); // metrics runs
+                    // Not yet: once it has stopped.
+                    REQUIRE_FALSE( host.notifications.last().endsWith( "stopped." ) );
+
+                    host.menuActions.first().trigger();
+                    chooseProfile( openDialog(), "orders" );
+                    button( openDialog(), "saveProfile" )->click();
+                    REQUIRE( statusText( openDialog() )
+                             == "The connection orders is stopping: save it once it has "
+                                "stopped." );
+                    button( openDialog(), "deleteProfile" )->click();
+                    REQUIRE( statusText( openDialog() )
+                             == "The connection orders is stopping: delete it once it has "
+                                "stopped." );
+                    REQUIRE( tileNames( host ) == QStringList{ "orders", "metrics" } );
+                }
 
                 THEN( "it stops, its tile says so, and the other runs on" )
                 {
+                    REQUIRE( waitFor( [ & ] { return isIn( "orders", SessionState::Stopped ); } ) );
                     REQUIRE( endsStopped( first ) );
                     REQUIRE( host.notifications.last()
                              == "NATS capture of orders.>, billing.* (queue auditors) stopped." );
@@ -1589,6 +1627,14 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
 
                 THEN( "both stop, each file ends with its stopped marker, each tile says so" )
                 {
+                    for ( const auto* name : { "orders", "metrics" } ) {
+                        REQUIRE( isIn( name, SessionState::Stopping ) ); // the click returned
+                    }
+                    REQUIRE_FALSE( sidebarButton( host, "stopAll" )->isEnabled() );
+                    REQUIRE( waitFor( [ & ] {
+                        return isIn( "orders", SessionState::Stopped )
+                               && isIn( "metrics", SessionState::Stopped );
+                    } ) );
                     REQUIRE( endsStopped( first ) );
                     REQUIRE( endsStopped( second ) );
                     for ( const auto* name : { "orders", "metrics" } ) {
@@ -1675,6 +1721,60 @@ SCENARIO( "several connections run side by side, each in its own file and tab",
             THEN( "its tile shows how many were dropped" )
             {
                 REQUIRE( waitFor( [ & ] { return statusOf( "metrics" ).dropped > 0; }, 10000 ) );
+            }
+        }
+    }
+}
+
+SCENARIO( "unloading the plugin stops every session at once, and waits for each",
+          "[plugin][server][stop]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "two captures through a proxy, subscribed, whose server then no longer answers" )
+    {
+        NatsServer server;
+        TcpProxy proxy( server.port() );
+        FakeHost host;
+        REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
+        saveConnection( host, "orders", proxy.url(), "orders.>" );
+        saveConnection( host, "metrics", proxy.url(), "metrics.>" );
+        startTile( host, "orders" );
+        startTile( host, "metrics" );
+        REQUIRE( host.openedFiles.size() == 2 );
+        const auto first = host.openedFiles.at( 0 );
+        const auto second = host.openedFiles.at( 1 );
+        REQUIRE( waitSubscribed( first ) );
+        REQUIRE( waitSubscribed( second ) );
+        // Each stop now drains a subscription the server never confirms:
+        // nats.c gives up on its drain's round trip after 10 s, within
+        // kDrainTimeout (15 s); then the close.
+        proxy.stopAnswering();
+
+        WHEN( "Stop is clicked on one, and then the plugin is unloaded" )
+        {
+            QElapsedTimer timer;
+            timer.start();
+            tileButton( host, "orders", "startStop" )->click();
+            const auto clickMs = timer.elapsed();
+            const bool stopping = isIn( "orders", SessionState::Stopping );
+            const auto details = tileDetails( host, "orders" );
+            timer.restart();
+            logsquirl_plugin_shutdown();
+            const auto shutdownMs = timer.elapsed();
+
+            // One THEN: each run of the scenario waits for the drains.
+            THEN( "the click returned at once, its tile stopping; the unload waited until both "
+                  "had ended, side by side: about one session's longest stop, not two" )
+            {
+                REQUIRE( clickMs < 1000 );
+                REQUIRE( stopping );
+                REQUIRE( details.startsWith( "stopping…" ) );
+                INFO( "shutdown took " << shutdownMs << " ms" );
+                REQUIRE( endsStopped( first ) );
+                REQUIRE( endsStopped( second ) );
+                REQUIRE( shutdownMs >= 9000 ); // it did wait for the drains
+                REQUIRE( shutdownMs < 16000 ); // one after the other: at least 20 s
             }
         }
     }

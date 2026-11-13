@@ -141,8 +141,25 @@ SCENARIO( "Sessions keeps the state, counts and rate of each connection", "[serv
             {
                 sessions.stop( "orders" );
 
-                THEN( "a notification says it stopped, and no other tab is opened" )
+                THEN( "it returns with the connection stopping, which cannot be started again" )
                 {
+                    REQUIRE( sessions.status( "orders" ).state == SessionState::Stopping );
+                    REQUIRE( sessions.status( "orders" ).detail == "stopping…" );
+                    REQUIRE( sessions.isStopping( "orders" ) );
+                    REQUIRE_FALSE( sessions.isRunning( "orders" ) );
+                    REQUIRE_FALSE( sessions.anyRunning() );
+                    auto again = profile( "orders", server.url(), "orders.>" );
+                    REQUIRE_FALSE( sessions.start( again ) );
+                    REQUIRE( sessions.status( "orders" ).state == SessionState::Stopping );
+                    REQUIRE( host.notifications.size() == 1 ); // started; stopped comes later
+                }
+
+                THEN( "once it has stopped, a notification says so, and no other tab is opened" )
+                {
+                    REQUIRE( waitFor( [ & ] {
+                        return sessions.status( "orders" ).state == SessionState::Stopped;
+                    } ) );
+                    REQUIRE_FALSE( sessions.isStopping( "orders" ) );
                     REQUIRE( host.notifications.size() == 2 );
                     REQUIRE( host.notifications.last() == "NATS capture of orders.> stopped." );
                     REQUIRE( host.followedTabs.size() == 1 );
@@ -195,6 +212,9 @@ SCENARIO( "Sessions keeps the state, counts and rate of each connection", "[serv
                     THEN( "it is stopped, what it captured kept, and each transition was "
                           "announced once" )
                     {
+                        REQUIRE( waitFor( [ & ] {
+                            return sessions.status( "orders" ).state == SessionState::Stopped;
+                        } ) );
                         REQUIRE( host.notifications.size() == 1 ); // started
 
                         const auto status = sessions.status( "orders" );
@@ -205,9 +225,9 @@ SCENARIO( "Sessions keeps the state, counts and rate of each connection", "[serv
                         REQUIRE( status.rate == 0 );
                         REQUIRE_FALSE( sessions.isRunning( "orders" ) );
                         REQUIRE( announced.states()
-                                 == QList<SessionState>{ SessionState::Connecting,
-                                                         SessionState::Running,
-                                                         SessionState::Stopped } );
+                                 == QList<SessionState>{
+                                     SessionState::Connecting, SessionState::Running,
+                                     SessionState::Stopping, SessionState::Stopped } );
                     }
                 }
             }

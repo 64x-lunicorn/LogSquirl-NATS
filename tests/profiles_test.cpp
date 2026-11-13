@@ -49,6 +49,7 @@ using nats_monitor::ProfileStore;
 using nats_monitor::ReplayStart;
 using nats_monitor::saveProblem;
 using nats_monitor::SessionConfig;
+using nats_monitor::SessionState;
 using nats_monitor::startProblem;
 
 namespace {
@@ -361,8 +362,11 @@ SCENARIO( "the profile store does not remove a connection that runs", "[profiles
     {
         QTemporaryDir dir;
         const auto path = dir.filePath( "nats.ini" );
-        ProfileStore store(
-            path, []( const QString& name ) { return name == "prod" || name == "audit"; } );
+        ProfileStore store( path, []( const QString& name ) {
+            return name == "prod"    ? SessionState::Running
+                   : name == "audit" ? SessionState::Connecting
+                                     : SessionState::Stopped;
+        } );
         REQUIRE( store.upsert( profile( "prod" ) ).isEmpty() );
         REQUIRE( store.upsert( profile( "dev" ) ).isEmpty() );
         auto audit = profile( "audit" );
@@ -402,6 +406,59 @@ SCENARIO( "the profile store does not remove a connection that runs", "[profiles
             {
                 REQUIRE( store.remove( "dev" ).isEmpty() );
                 REQUIRE( namesOf( store.list() ) == QStringList{ "prod", "audit" } );
+            }
+        }
+    }
+}
+
+SCENARIO( "the profile store neither saves nor removes a connection that is stopping",
+          "[profiles]" )
+{
+    GIVEN( "a store whose connection prod is stopping" )
+    {
+        QTemporaryDir dir;
+        const auto path = dir.filePath( "nats.ini" );
+        auto state = SessionState::Stopped;
+        ProfileStore store( path, [ &state ]( const QString& name ) {
+            return name == "prod" ? state : SessionState::Stopped;
+        } );
+        REQUIRE( store.upsert( profile( "prod" ) ).isEmpty() );
+        state = SessionState::Stopping;
+
+        WHEN( "it is saved with other settings" )
+        {
+            ChangeCounter changed( store );
+            const auto problem = store.upsert( profile( "prod", "nats://elsewhere:4222" ) );
+
+            THEN( "the store refuses, saying to wait until it has stopped, and keeps it as it was" )
+            {
+                REQUIRE( problem
+                         == "The connection prod is stopping: save it once it has stopped." );
+                REQUIRE( changed.count() == 0 );
+                REQUIRE( ProfileStore( path ).find( "prod" )->url == "nats://localhost:4222" );
+            }
+        }
+
+        WHEN( "it is removed" )
+        {
+            const auto problem = store.remove( "prod" );
+
+            THEN( "the store refuses, saying to wait until it has stopped, and keeps it" )
+            {
+                REQUIRE( problem
+                         == "The connection prod is stopping: delete it once it has stopped." );
+                REQUIRE( namesOf( ProfileStore( path ).list() ) == QStringList{ "prod" } );
+            }
+        }
+
+        WHEN( "it has stopped" )
+        {
+            state = SessionState::Stopped;
+
+            THEN( "it is saved and removed again" )
+            {
+                REQUIRE( store.upsert( profile( "prod", "nats://elsewhere:4222" ) ).isEmpty() );
+                REQUIRE( store.remove( "prod" ).isEmpty() );
             }
         }
     }

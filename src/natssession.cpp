@@ -44,7 +44,7 @@
  *      count of its subscription (each, for the disconnected callback) and
  *      has the sink mark what is new.  The sink writes, rotates and
  *      reports; the session forwards its reports to the GUI thread.
- *   4. The connection thread then waits until stop() asks it to end, the
+ *   4. The connection thread then waits until a stop asks it to end, the
  *      connection is closed for good, the replay is complete or the sink
  *      reports that its file can no longer be written (the sink takes no
  *      message from then on: nothing more is counted).
@@ -57,6 +57,10 @@
  *      discards what nats.c still delivers once stopping, uncounted: the
  *      stream keeps it, and writing up to the pending limits of it would
  *      hold the stop up.  Its drain still deletes the consumer.
+ *   6. It keeps the transition it ended with (Worker::ended) and posts its
+ *      end to the GUI thread, where the session joins it and emits that
+ *      transition.  requestStop() never waits for any of this; stop() and
+ *      the destructor join the thread themselves.
  *
  * What the callbacks use (Shared, the sink and a replay's connection path
  * in it) is apart from the
@@ -467,6 +471,9 @@ struct NatsSession::Worker {
     /// Whether shared may be freed: nats.c confirmed its last callback (or
     /// never got it).  Written by the thread, read after it is joined.
     bool released = true;
+    /// The transition the capture ended with, as its last marker says.
+    /// Written by the thread, read after it is joined.
+    Transition ended;
     std::thread thread;
 
     /// The worker of start number @p startGeneration, writing the files
@@ -499,15 +506,22 @@ struct NatsSession::Worker {
         }
     }
 
+    /// Asks the thread to stop, without waiting: it sees it once what
+    /// nats.c is in the middle of returns.
+    void requestStop()
+    {
+        {
+            std::lock_guard<std::mutex> lock( shared->mutex );
+            shared->stopRequested = true;
+        }
+        shared->wake.notify_all();
+    }
+
     /// Stops the thread and waits for it.
     void join()
     {
         if ( thread.joinable() ) {
-            {
-                std::lock_guard<std::mutex> lock( shared->mutex );
-                shared->stopRequested = true;
-            }
-            shared->wake.notify_all();
+            requestStop();
             thread.join();
         }
     }
@@ -884,12 +898,10 @@ struct NatsSession::Worker {
         // every report it posted comes before the transition below.
         auto& sink = shared->sink;
         using Kind = Transition::Kind;
-        Transition ended;
         switch ( end ) {
         case End::Stopped:
-            // stop() reports the transition, once it has joined this thread.
-            sink.finish( QStringLiteral( "stopped" ), Event::Status );
-            return;
+            ended = { Kind::Stopped, QStringLiteral( "stopped" ), {} };
+            break;
         case End::Completed:
             ended = { Kind::Completed, QStringLiteral( "replay complete" ), {} };
             break;
@@ -902,11 +914,11 @@ struct NatsSession::Worker {
             break;
         }
         }
-        // Its marker is written already if it never opened.
-        sink.finish( opened ? ended.detail : QString(), Event::Status );
-        post( [ generation = generation, ended ]( NatsSession* s ) {
-            s->onWorkerEnded( generation, ended );
-        } );
+        // A failure's marker is written already if it never opened.
+        const bool marked = !opened && end == End::Closed;
+        sink.finish( marked ? QString() : ended.detail, Event::Status );
+        // The session reads ended once it has joined this thread.
+        post( [ generation = generation ]( NatsSession* s ) { s->onWorkerEnded( generation ); } );
     }
 };
 
@@ -932,7 +944,7 @@ NatsSession::~NatsSession()
 bool NatsSession::start()
 {
     if ( worker_ ) {
-        return true;
+        return !stopping_;
     }
 
     const auto fail = [ this ]( const QString& message ) {
@@ -973,23 +985,36 @@ bool NatsSession::start()
     return true;
 }
 
+void NatsSession::requestStop()
+{
+    if ( !worker_ || stopping_ ) {
+        return;
+    }
+    stopping_ = true;
+    worker_->requestStop();
+    Q_EMIT transitioned( { Transition::Kind::Stopping, QStringLiteral( "stopping…" ), {} } );
+}
+
 void NatsSession::stop()
 {
     if ( !worker_ ) {
         return;
     }
-    releaseWorker();
-    Q_EMIT transitioned( { Transition::Kind::Stopped, QStringLiteral( "stopped" ), {} } );
+    requestStop();
+    // A slot of transitioned() may have ended it meanwhile (stop() again).
+    if ( worker_ ) {
+        endWorker();
+    }
 }
 
-void NatsSession::releaseWorker()
+void NatsSession::endWorker()
 {
-    if ( !worker_ ) {
-        return;
-    }
     worker_->join(); // asks the connection thread to stop, and waits for it and the writer
     counts_ = worker_->shared->snapshot();
+    const auto end = worker_->ended;
     worker_.reset();
+    stopping_ = false;
+    Q_EMIT transitioned( end );
 }
 
 NatsSession::Counts NatsSession::counts() const
@@ -1005,6 +1030,11 @@ PendingLimits NatsSession::pendingLimits() const
 bool NatsSession::isRunning() const
 {
     return worker_ != nullptr;
+}
+
+bool NatsSession::isStopping() const
+{
+    return stopping_;
 }
 
 quint64 NatsSession::receivedCount() const
@@ -1038,19 +1068,18 @@ void NatsSession::onWorkerRotated( int generation, const QString& path )
 
 void NatsSession::onWorkerTransition( int generation, const Transition& transition )
 {
-    if ( !worker_ || generation != generation_ ) {
-        return; // stopped meanwhile: Stopped was the last
+    if ( !worker_ || stopping_ || generation != generation_ ) {
+        return; // stopping or stopped meanwhile: only the end comes after Stopping
     }
     Q_EMIT transitioned( transition );
 }
 
-void NatsSession::onWorkerEnded( int generation, const Transition& end )
+void NatsSession::onWorkerEnded( int generation )
 {
     if ( !worker_ || generation != generation_ ) {
-        return; // stopped meanwhile, or the report of an earlier start
+        return; // ended by stop() meanwhile, or the report of an earlier start
     }
-    releaseWorker(); // the thread has ended: joins at once
-    Q_EMIT transitioned( end );
+    endWorker(); // the thread has ended: joins at once
 }
 
 } // namespace nats_monitor

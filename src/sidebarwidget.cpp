@@ -116,6 +116,10 @@ TileView tileViewOf( const SessionStatus& status )
             << QStringLiteral( "running · %1 msgs/s" ).arg( QLocale().toString( status.rate ) )
             << countsOf( status ) << QStringLiteral( "connected to %1" ).arg( status.server );
         break;
+    case SessionState::Stopping:
+        view.state = TileState::Stopping;
+        view.details << status.detail << countsOf( status ); // "stopping…"
+        break;
     case SessionState::Failed:
         view.state = TileState::Failed;
         view.details << QStringLiteral( "failed: %1" ).arg( status.detail );

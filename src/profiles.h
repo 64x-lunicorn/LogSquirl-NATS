@@ -57,6 +57,7 @@
 #pragma once
 
 #include "sessionconfig.h"
+#include "sessionstatus.h"
 
 #include <QList>
 #include <QObject>
@@ -125,13 +126,16 @@ class ProfileStore : public QObject {
     Q_OBJECT
 
 public:
-    /// Whether the connection @p name runs: it is not deleted then.
-    using IsRunning = std::function<bool( const QString& name )>;
+    /// Where the session of the connection @p name is (Sessions::status()):
+    /// while it connects or runs, it is not deleted; while it is stopping,
+    /// it is neither saved nor deleted.
+    using StateOf = std::function<SessionState( const QString& name )>;
 
     /// The store of @p settingsFile, which need not exist yet; empty, the
     /// store has no profile and saves none (no host to say where).
-    /// @p isRunning tells which connections run; none if it is empty.
-    explicit ProfileStore( const QString& settingsFile, IsRunning isRunning = {},
+    /// @p stateOf tells where each connection's session is; if it is empty,
+    /// none runs.
+    explicit ProfileStore( const QString& settingsFile, StateOf stateOf = {},
                            QObject* parent = nullptr );
 
     /// The file the store reads and writes.
@@ -150,11 +154,12 @@ public:
     /// Save @p profile under its name, replacing the profile of that name
     /// where it is in the list, or after the others, and remember its size
     /// limit for newProfile().  Never its auth.secret.  Empty if it was
-    /// saved, else why not: its saveProblem(), or the file.
+    /// saved, else why not: its saveProblem(), its session stopping, or the
+    /// file.
     QString upsert( const ConnectionProfile& profile );
 
-    /// Delete the profile named @p name, unless it runs.  Empty if it was
-    /// deleted, else why not.
+    /// Delete the profile named @p name, unless its session runs or is
+    /// stopping.  Empty if it was deleted, else why not.
     QString remove( const QString& name );
 
 Q_SIGNALS:
@@ -167,7 +172,10 @@ private:
     bool write( const QList<ConnectionProfile>& profiles, std::optional<int> maxFileMiB );
 
     QString settingsFile_;
-    IsRunning isRunning_;
+    /// Where the session of @p name is: stopped if no stateOf was given.
+    SessionState stateOf( const QString& name ) const;
+
+    StateOf stateOf_;
 };
 
 } // namespace nats_monitor

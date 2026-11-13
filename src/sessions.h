@@ -41,7 +41,9 @@
  * with (hostadapter.h): the plugin's (pluginHost(), plugin.h), or a test's
  * in-memory one; never through the plugin's global state.  Starting,
  * stopping (with notify) and errors are host notifications, as in the
- * Serial plugin; stopAll() (shutdown) notifies nothing.  A rotation opens a
+ * Serial plugin; stopAllAndWait() (shutdown) notifies nothing.  A stop
+ * returns at once and is notified once the session has stopped; until then
+ * the connection is stopping.  A rotation opens a
  * followed tab and writes to the host log; so does a failure, and a
  * certificate not verified (insecure).  A session's file is kept for its
  * tab when the session ends; the plugin removes the temporary files when
@@ -51,7 +53,7 @@
  * OWNERSHIP
  * ─────────
  * Created by logsquirl_plugin_init(), deleted by logsquirl_plugin_shutdown()
- * after stopAll().  The running NatsSessions are its children.  The host
+ * after stopAllAndWait().  The running NatsSessions are its children.  The host
  * adapter is not owned: it outlives Sessions.
  */
 
@@ -90,7 +92,8 @@ public:
     /**
      * Start a session for @p profile, with its password or token in
      * profile.auth.secret, and open its file in a followed tab.  No-op if
-     * the connection's session runs already.
+     * the connection's session runs already; refused (false, the status
+     * left as it is) while it is stopping.
      *
      * Started or not, profile.auth.secret is wiped (secrets.h) on return:
      * the session's worker has its own copy, for the connection options.
@@ -100,17 +103,32 @@ public:
     bool start( ConnectionProfile& profile );
 
     /// Stop the session of the connection @p name and, with @p notify, say
-    /// so in a host notification.  No-op if it does not run.
+    /// so in a host notification once it has stopped.  Returns at once: the
+    /// connection is stopping until its session has ended (natssession.h,
+    /// STOPPING).  No-op if it does not run or is stopping already.
     void stop( const QString& name, bool notify = true );
 
     /// Stop every session, keeping their files for the tabs, and with
-    /// @p notify say so for each in a host notification.
+    /// @p notify say so for each in a host notification once it has
+    /// stopped.  Returns at once, as stop() does.
     void stopAll( bool notify = false );
 
-    /// Whether the session of the connection @p name runs.
+    /// Stop every session, as stopAll() does without notifying, and wait
+    /// until each has ended: they stop side by side, so this waits for the
+    /// slowest, not for their sum.  For the plugin's shutdown, before the
+    /// library is unloaded, and the destructor.
+    void stopAllAndWait();
+
+    /// Whether the session of the connection @p name runs, and is not
+    /// stopping.
     bool isRunning( const QString& name ) const;
 
-    /// Whether some session runs.
+    /// Whether the session of the connection @p name is stopping: it cannot
+    /// be started again, nor the connection saved or deleted, until it has
+    /// ended.
+    bool isStopping( const QString& name ) const;
+
+    /// Whether some session runs and is not stopping: what Stop all stops.
     bool anyRunning() const;
 
     /// What the session of the connection @p name does, or did last, with
@@ -128,8 +146,9 @@ Q_SIGNALS:
 
 private:
     struct Entry {
-        NatsSession* session = nullptr; ///< While it runs.
+        NatsSession* session = nullptr; ///< While it runs, stopping included.
         ConnectionStatus status;
+        bool notifyStopped = false; ///< stop() was asked to notify once it has stopped.
     };
 
     /// Apply @p transition, which the session of @p name reported; an end

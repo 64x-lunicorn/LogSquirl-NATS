@@ -305,10 +305,10 @@ SessionConfig sessionConfig( const ConnectionProfile& profile )
     return config;
 }
 
-ProfileStore::ProfileStore( const QString& settingsFile, IsRunning isRunning, QObject* parent )
+ProfileStore::ProfileStore( const QString& settingsFile, StateOf stateOf, QObject* parent )
     : QObject( parent )
     , settingsFile_( settingsFile )
-    , isRunning_( std::move( isRunning ) )
+    , stateOf_( std::move( stateOf ) )
 {
 }
 
@@ -366,10 +366,19 @@ ConnectionProfile ProfileStore::newProfile() const
     return profile;
 }
 
+SessionState ProfileStore::stateOf( const QString& name ) const
+{
+    return stateOf_ ? stateOf_( name ) : SessionState::Stopped;
+}
+
 QString ProfileStore::upsert( const ConnectionProfile& profile )
 {
     if ( const auto problem = saveProblem( profile ); !problem.isEmpty() ) {
         return problem;
+    }
+    if ( stateOf( profile.name ) == SessionState::Stopping ) {
+        return QStringLiteral( "The connection %1 is stopping: save it once it has stopped." )
+            .arg( profile.name );
     }
     auto profiles = list();
     const auto existing = std::find_if( profiles.begin(), profiles.end(),
@@ -390,7 +399,12 @@ QString ProfileStore::upsert( const ConnectionProfile& profile )
 
 QString ProfileStore::remove( const QString& name )
 {
-    if ( isRunning_ && isRunning_( name ) ) {
+    const auto state = stateOf( name );
+    if ( state == SessionState::Stopping ) {
+        return QStringLiteral( "The connection %1 is stopping: delete it once it has stopped." )
+            .arg( name );
+    }
+    if ( state == SessionState::Connecting || state == SessionState::Running ) {
         // As saved: a replay saved as a capture while it runs is named a capture.
         const auto running = find( name );
         return QStringLiteral( "The connection %1 is %2: stop it to delete it." )

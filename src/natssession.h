@@ -36,7 +36,9 @@
  *
  *     start() ──► Connecting ──► Running(server) ◄──► Reconnecting
  *                     │               │                   │
- *                     └───────────────┴─────► Failed(why), Completed, Stopped
+ *                     ├───────────────┴─────► Failed(why), Completed
+ *                     │
+ *   requestStop() ──► Stopping ──► Stopped (or the end the thread had reached)
  *
  * Connecting when start() has opened the file; Running once connected and
  * subscribed (its "connected" marker written), again after a reconnect;
@@ -44,10 +46,34 @@
  * connection thread's decision: Failed with the reason it could not start,
  * connect or subscribe, "connection closed", or the write error that the
  * file can no longer be written ("Cannot write to <file>: <why>"); Completed
- * for a replay that caught up; Stopped from stop().  A Failed start() emits
- * Failed alone.  An error that does not end the session (nats.c's, a next
- * file that cannot be started) is errorOccurred() instead.  Nobody reads a
- * state out of the texts.
+ * for a replay that caught up; Stopped once a stop has ended it.  A Failed
+ * start() emits Failed alone.  An error that does not end the session
+ * (nats.c's, a next file that cannot be started) is errorOccurred()
+ * instead.  Nobody reads a state out of the texts.
+ *
+ * Stopping, the one transition without a marker in the file, comes from
+ * requestStop() (and stop()) at once, from any state it runs in; after it
+ * nothing but the end: a Running or Reconnecting still on its way is not
+ * emitted.  The end is Stopped, or what the connection thread had decided
+ * before it saw the stop (Failed, Completed), as the file's last marker
+ * says.
+ *
+ * STOPPING
+ * ────────
+ * requestStop() returns at once: what nats.c is in the middle of (a
+ * connect, the round trip after subscribing, a replay's JetStream requests)
+ * it cannot interrupt, and the drain and close come after.  The connection
+ * thread ends the session in the background, and Stopped follows through
+ * the event loop.  stop() does the same and waits for it.  The longest
+ * stop, with a server that does not answer, is what is left of the start
+ * (nats.c's connect timeout of 2 s for each server of the URL list, then a
+ * capture's round trip of 10 s or a replay's three JetStream requests of
+ * 5 s each), the drain (kDrainTimeout, 15 s; not connected, up to
+ * kCallbackTimeout, 5 s, until nats.c holds nothing more), the close
+ * (kCallbackTimeout, 5 s, for nats.c's last callback) and the writing of
+ * what was queued: 2 s for each server and 30 s for a capture, 35 s for a
+ * replay.  A server that never answers the connect takes the 2 s for each
+ * server alone.
  *
  * A write error ends the session as a stop does: the subscriptions go,
  * nothing further is counted (receivedCount() no longer grows from the
@@ -153,7 +179,7 @@
  *   NatsSession session( config, root ); // its directory goes below root
  *   if ( session.start() )               // creates the file, connects in the background
  *       open( session.filePath() );      // LogSquirl follows this file
- *   session.stop();                      // closes the connection, keeps writing nothing more
+ *   session.requestStop();               // Stopping at once; Stopped once it has ended
  *   session.preserveFile();              // the tab keeps the file after the session is gone
  */
 
@@ -183,7 +209,9 @@ public:
     NatsSession( const SessionConfig& config, const QString& tempRoot, QObject* parent = nullptr,
                  CaptureSink::FileFactory files = {} );
 
-    /// Stops the session without emitting any signal; removes the
+    /// Stops the session without emitting any signal, and waits until it
+    /// has ended (stop()): nats.c's callbacks use what the session frees,
+    /// and its threads run code of the plugin's library.  Removes the
     /// temporary directory unless preserveFile() was called.
     ~NatsSession() override;
 
@@ -193,7 +221,8 @@ public:
     /**
      * Create the file and start connecting and subscribing in the
      * background, a Connecting transition.  No-op (true) if already
-     * running.
+     * running; false, and no transition, while it is stopping: it starts
+     * again once it has ended.
      *
      * Whether the connection succeeds is reported later: Running, or
      * Failed.
@@ -212,18 +241,31 @@ public:
     bool start();
 
     /**
-     * Drain the subscription and close the connection, write what was
-     * received before and a "stopped" marker, and close the file: a Stopped
-     * transition.  Waits for the connection thread and the sink's writer: a
-     * round trip to the server and the writing of
-     * what nats.c held, at most about 15 s should the connection break
-     * while draining.  No-op if not running.
+     * Ask the session to stop, a Stopping transition, and return at once.
+     * In the background the connection thread drains the subscriptions and
+     * closes the connection, and the sink writes what was received before
+     * and a "stopped" marker and closes the file; then, through the event
+     * loop, the transition that ends it (Stopped).  How long that may take
+     * is in STOPPING.  No-op if not running or stopping already.
+     */
+    void requestStop();
+
+    /**
+     * Stop as requestStop() does and wait until the session has ended: its
+     * threads joined, its file closed, the transition that ends it emitted
+     * before this returns.  At most the longest stop (STOPPING), waited for
+     * on the calling thread: for a test, and for the plugin's shutdown,
+     * which has asked every session to stop first so that it waits for the
+     * slowest, not for their sum.  No-op if not running.
      */
     void stop();
 
     /// Whether the session runs: between start() and the transition that
-    /// ends it (Failed, Completed, Stopped).
+    /// ends it (Failed, Completed, Stopped), stopping included.
     bool isRunning() const;
+
+    /// Whether it was asked to stop and has not ended yet.
+    bool isStopping() const;
 
     /// The file the session writes; valid after start().  After a rotation
     /// the new file, once fileRotated() has been emitted for it.
@@ -285,15 +327,16 @@ private:
     /// @p transition: emit it, unless the session ended meanwhile.
     void onWorkerTransition( int generation, const Transition& transition );
 
-    /// The connection thread of start number @p generation has ended on its
-    /// own, as @p end says (Failed or Completed): its threads have ended.
-    void onWorkerEnded( int generation, const Transition& end );
+    /// The connection thread of start number @p generation has ended, on its
+    /// own or stopped: its threads have ended.
+    void onWorkerEnded( int generation );
 
     /// The sink of start number @p generation goes on in @p path.
     void onWorkerRotated( int generation, const QString& path );
 
-    /// Stop the worker, wait for its threads and keep its counts.
-    void releaseWorker();
+    /// Stop the worker, wait for its threads, keep its counts, and emit the
+    /// transition it ended with.
+    void endWorker();
 
     /// The running worker's counts, or those the last one left.
     Counts counts() const;
@@ -306,7 +349,8 @@ private:
     QString filePath_;
     int generation_ = 0; ///< Counts start(), to tell a stale finished report from the current.
     std::unique_ptr<Worker> worker_;
-    Counts counts_; ///< The counts of the last worker, once it is gone.
+    bool stopping_ = false; ///< Asked to stop; the worker has not ended yet.
+    Counts counts_;         ///< The counts of the last worker, once it is gone.
 };
 
 } // namespace nats_monitor

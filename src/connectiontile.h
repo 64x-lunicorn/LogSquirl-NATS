@@ -36,8 +36,10 @@
  * frame in the accent colour while the connection is active.  Its colours
  * are taken from the palette, so a light and a dark theme both work, and
  * follow a change of the palette.  The dot is grey (stopped), amber
- * (connecting), green (running) or red (failed); the details say the same
- * in words, for whoever cannot tell the colours apart.
+ * (connecting, stopping), green (running) or red (failed); the details say
+ * the same in words, for whoever cannot tell the colours apart.  While the
+ * connection's session stops, which may take a while (a server that does
+ * not answer), its button reads Stopping… and, like Edit…, is disabled.
  *
  * A plain widget that knows nothing of NATS: the sidebar (sidebarwidget.h)
  * sets its texts and state and acts on its signals.  The same tile is meant
@@ -45,7 +47,7 @@
  * tcpdump captures).
  *
  * Its children are named for tests: "state" (its property "state" is
- * stopped, connecting, running or failed), "title", "summary",
+ * stopped, connecting, running, stopping or failed), "title", "summary",
  * "separator", "details", "startStop", "edit", "delete".
  */
 
@@ -67,6 +69,7 @@ enum class TileState {
     Stopped,    ///< Idle: never started, stopped, or done.
     Connecting, ///< Started, not (yet, or again) connected.
     Running,    ///< Connected and capturing.
+    Stopping,   ///< Stopped, not ended yet: nothing can be done until it has.
     Failed,     ///< Ended by an error.
 };
 
@@ -90,7 +93,8 @@ public:
     void setDetails( const QStringList& lines );
 
     /// What it does.  While it connects or runs, the button stops it and
-    /// it cannot be deleted (Delete is hidden).
+    /// it cannot be deleted (Delete is hidden).  While it is stopping, the
+    /// button says so and is disabled, as is Edit…, and Delete is hidden.
     void setState( TileState state );
 
 protected:
@@ -122,6 +126,7 @@ private:
     QFrame* separator_;
     QLabel* details_;
     QPushButton* startStop_;
+    QPushButton* edit_;
     QPushButton* delete_;
 };
 

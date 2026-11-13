@@ -45,7 +45,9 @@
  * reload() shows the connections saved now whenever it changed.
  *
  * A tile is updated whenever Sessions says its connection's status changed:
- * at once on a transition, once a second while the counts move.
+ * at once on a transition, once a second while the counts move.  Stop and
+ * Stop all return at once: the tile is stopping, and can be neither
+ * started, edited nor deleted, until its session has ended.
  *
  * Children named for tests: "newConnection", "stopAll", "empty" (the hint
  * shown without connections), and the tiles ("tile").
@@ -84,8 +86,9 @@ struct TileView {
 /// The tile view of @p status, one state for each SessionState, the
 /// numbers in the locale's format: while running "running · <n> msgs/s",
 /// the counts, the file and "connected to <server>"; while connecting
-/// "connecting · <detail>"; after a failure "failed: <why>"; after a stop
-/// (or a complete replay) the detail and what it captured.
+/// "connecting · <detail>"; while stopping "stopping…" and the counts;
+/// after a failure "failed: <why>"; after a stop (or a complete replay) the
+/// detail and what it captured.
 TileView tileViewOf( const SessionStatus& status );
 
 class SidebarWidget : public QWidget {
@@ -117,7 +120,7 @@ private:
     /// Show the status of the tile @p tile's connection.
     void updateTile( ConnectionTile* tile );
 
-    /// Stop all is enabled while some capture runs.
+    /// Stop all is enabled while some capture runs and is not stopping.
     void updateStopAll();
 
     ProfileStore* profiles_;
