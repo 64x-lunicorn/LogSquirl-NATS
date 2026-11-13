@@ -41,9 +41,13 @@ namespace nats_monitor {
  * (one after the other, should several not answer) and 2 s for each
  * answer of the server.
  *
+ * Once its connection options are set, config.auth.secret is wiped
+ * (secrets.h), connected or not: nats.c has its own copy.  To keep the
+ * secret, list with a copy of @p config.
+ *
  * @return the names; empty, with @p error set (for the user), if they
  *         could not be listed.  An empty list without error: no stream.
  */
-QStringList listStreams( const SessionConfig& config, QString* error );
+QStringList listStreams( SessionConfig& config, QString* error );
 
 } // namespace nats_monitor

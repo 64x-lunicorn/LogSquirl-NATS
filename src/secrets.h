@@ -23,10 +23,13 @@
  *
  * A password, a token or an NKey seed is held no longer than needed: the
  * copies made to hand it to nats.c (natsoptions.cpp), the seed decoded to
- * derive its public key (nkey.cpp) and the session's own copy
- * (natssession.cpp) are wiped once used.  nats.c keeps its own copy, for
- * reconnecting.  Tested in secrets_test.cpp; that a session keeps no copy,
- * in auth_test.cpp.
+ * derive its public key (nkey.cpp), the session's own copy
+ * (natssession.cpp), the profile and session config it is started with
+ * (sessions.cpp) and the stream listing's (streams.cpp) are wiped once
+ * used.  nats.c keeps its own copy, for reconnecting.  Tested in
+ * secrets_test.cpp; that a session keeps no copy, in auth_test.cpp; that
+ * the profile and the listing's config keep none, in sessions_test.cpp and
+ * replay_test.cpp.
  */
 
 #pragma once

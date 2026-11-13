@@ -479,7 +479,7 @@ SCENARIO( "the streams to replay are listed from the server", "[server][replay]"
         JetStream js( publisher );
         js.addStream( "ORDERS", { "orders.>" } );
         js.addStream( "AUDIT", { "audit.>" } );
-        const auto config = sessionConfig( server.url() );
+        auto config = sessionConfig( server.url() );
 
         THEN( "both are listed, by name" )
         {
@@ -493,7 +493,7 @@ SCENARIO( "the streams to replay are listed from the server", "[server][replay]"
     GIVEN( "a server without JetStream" )
     {
         NatsServer server;
-        const auto config = sessionConfig( server.url() );
+        auto config = sessionConfig( server.url() );
 
         THEN( "no stream is listed, and the error says why" )
         {
@@ -505,13 +505,38 @@ SCENARIO( "the streams to replay are listed from the server", "[server][replay]"
 
     GIVEN( "no server" )
     {
-        const auto config = sessionConfig( "nats://127.0.0.1:1" );
+        auto config = sessionConfig( "nats://127.0.0.1:1" );
 
         THEN( "no stream is listed, and the error says why" )
         {
             QString error;
             REQUIRE( nats_monitor::listStreams( config, &error ).isEmpty() );
             REQUIRE( error.contains( "127.0.0.1:1" ) );
+        }
+    }
+}
+
+SCENARIO( "listing the streams wipes the password it was given", "[replay]" )
+{
+    GIVEN( "a configuration that logs in as alice with the password s3cret, and no server" )
+    {
+        auto config = sessionConfig( "nats://127.0.0.1:1" );
+        config.auth.method = nats_monitor::AuthMethod::UserPassword;
+        config.auth.user = "alice";
+        config.auth.secret = "s3cret";
+
+        WHEN( "the streams are listed with it" )
+        {
+            QString error;
+            nats_monitor::listStreams( config, &error );
+
+            THEN( "the configuration no longer holds the password, only the user" )
+            {
+                INFO( error.toStdString() );
+                REQUIRE_FALSE( error.isEmpty() );
+                REQUIRE( config.auth.secret.isEmpty() );
+                REQUIRE( config.auth.user == "alice" );
+            }
         }
     }
 }

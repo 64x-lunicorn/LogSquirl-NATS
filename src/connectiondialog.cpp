@@ -29,6 +29,7 @@
 #include "plugin.h"
 #include "profiles.h"
 #include "replay.h"
+#include "secrets.h"
 #include "sessions.h"
 #include "streams.h"
 #include "subjects.h"
@@ -52,6 +53,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 namespace nats_monitor {
 
@@ -600,7 +602,11 @@ void ConnectionDialog::listStreams()
     // destructor joins the thread (streams.h, listStreams(), says how
     // long it may take), and Qt drops the answer if the dialog is gone
     // before it is delivered.
-    listing_ = std::thread( [ this, config = sessionConfig( profile ) ] {
+    auto config = sessionConfig( profile );
+    // The listing's copy of the secret is the one left, unshared, so that
+    // the listing's wipe overwrites it (secrets.h).
+    wipe( profile.auth.secret );
+    listing_ = std::thread( [ this, config = std::move( config ) ]() mutable {
         QString error;
         const auto names = nats_monitor::listStreams( config, &error );
         QMetaObject::invokeMethod(

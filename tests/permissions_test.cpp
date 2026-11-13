@@ -154,7 +154,8 @@ SCENARIO( "the permissions the README lists are enough to capture and to replay"
             auto config = replayConfig( server.url(), "ORDERS" );
             logInAs( config, "replay" );
             QString error;
-            const auto streams = nats_monitor::listStreams( config, &error );
+            auto listing = config; // the listing wipes its password
+            const auto streams = nats_monitor::listStreams( listing, &error );
             NatsSession session( config, sessionTempRoot() );
             QStringList errors;
             QObject::connect( &session, &NatsSession::errorOccurred,
@@ -168,6 +169,7 @@ SCENARIO( "the permissions the README lists are enough to capture and to replay"
             {
                 INFO( error.toStdString() );
                 REQUIRE( streams == QStringList{ "ORDERS" } );
+                REQUIRE( listing.auth.secret.isEmpty() );
                 const auto capture = Capture::read( session.filePath() );
                 QList<quint64> all;
                 for ( quint64 s = 1; s <= 20000; ++s ) {

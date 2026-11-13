@@ -116,7 +116,8 @@ SCENARIO( "Sessions keeps the state, counts and rate of each connection", "[serv
 
         WHEN( "the connection orders is started" )
         {
-            REQUIRE( sessions.start( profile( "orders", server.url(), "orders.>" ) ) );
+            auto orders = profile( "orders", server.url(), "orders.>" );
+            REQUIRE( sessions.start( orders ) );
 
             THEN( "it connects, saying where to, and writes its file" )
             {
@@ -220,7 +221,8 @@ SCENARIO( "Sessions keeps the state, counts and rate of each connection", "[serv
                 port = gone.port();
             }
             const auto url = QStringLiteral( "nats://127.0.0.1:%1" ).arg( port );
-            REQUIRE( sessions.start( profile( "orders", url, "x" ) ) );
+            auto orders = profile( "orders", url, "x" );
+            REQUIRE( sessions.start( orders ) );
 
             THEN( "it failed, saying why, announced once, and no longer runs" )
             {
@@ -288,7 +290,8 @@ SCENARIO( "a connection that cannot start has failed, saying why", "[sessions]" 
         THEN( "it does not start, and its status says why, announced once; no tab is opened "
               "and nothing notified" )
         {
-            REQUIRE_FALSE( sessions.start( profile( "x", "nats://127.0.0.1:1", "" ) ) );
+            auto x = profile( "x", "nats://127.0.0.1:1", "" );
+            REQUIRE_FALSE( sessions.start( x ) );
             const auto status = sessions.status( "x" );
             REQUIRE( status.state == SessionState::Failed );
             REQUIRE( status.detail == "Enter the subject to capture." );
@@ -309,7 +312,8 @@ SCENARIO( "a connection that cannot start has failed, saying why", "[sessions]" 
 
         THEN( "the session refuses to start, and the status says why, announced once" )
         {
-            REQUIRE_FALSE( sessions.start( profile( "x", "nats://127.0.0.1:1", "x" ) ) );
+            auto x = profile( "x", "nats://127.0.0.1:1", "x" );
+            REQUIRE_FALSE( sessions.start( x ) );
             const auto status = sessions.status( "x" );
             INFO( status.detail.toStdString() );
             REQUIRE( status.state == SessionState::Failed );
@@ -322,6 +326,56 @@ SCENARIO( "a connection that cannot start has failed, saying why", "[sessions]" 
                 REQUIRE( host.followedTabs.isEmpty() );
                 REQUIRE( host.notifications
                          == QStringList{ "NATS Monitor (capture of x): " + status.detail } );
+            }
+        }
+    }
+}
+
+SCENARIO( "the profile a session is started with no longer holds its password", "[sessions]" )
+{
+    GIVEN( "Sessions, and a connection that logs in as alice with the password s3cret" )
+    {
+        MemoryHost host;
+        Sessions sessions( host, sessionTempRoot() );
+        auto alice = profile( "x", "nats://127.0.0.1:1", "x" );
+        alice.auth.method = nats_monitor::AuthMethod::UserPassword;
+        alice.auth.user = "alice";
+        alice.auth.secret = "s3cret";
+
+        WHEN( "it is started" )
+        {
+            REQUIRE( sessions.start( alice ) );
+
+            THEN( "the profile no longer holds the password, only the user" )
+            {
+                REQUIRE( alice.auth.secret.isEmpty() );
+                REQUIRE( alice.auth.user == "alice" );
+            }
+            sessions.stopAll();
+        }
+
+        WHEN( "it is started while its session runs already" )
+        {
+            auto again = alice;
+            REQUIRE( sessions.start( alice ) );
+            REQUIRE( sessions.start( again ) );
+
+            THEN( "neither profile holds the password" )
+            {
+                REQUIRE( alice.auth.secret.isEmpty() );
+                REQUIRE( again.auth.secret.isEmpty() );
+            }
+            sessions.stopAll();
+        }
+
+        WHEN( "it cannot start" )
+        {
+            alice.subjects.clear();
+            REQUIRE_FALSE( sessions.start( alice ) );
+
+            THEN( "the profile no longer holds the password either" )
+            {
+                REQUIRE( alice.auth.secret.isEmpty() );
             }
         }
     }

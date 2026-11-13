@@ -71,6 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token, and an NKey seed file's contents and its decoded seed, are
   overwritten as soon as nats.c's connection options hold what they need;
   a running capture keeps no copy of the password or token (#36).
+- **The secret's copies on the way to a session are wiped too.** The
+  password or token asked for at Start, and the copies made of it on the
+  way to the session, are overwritten once the session has its own; the
+  one asked for to list the streams, once the listing has connected (#43).
 
 ## [0.1.0]
 

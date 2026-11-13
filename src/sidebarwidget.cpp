@@ -240,7 +240,7 @@ void SidebarWidget::start( const QString& name )
             return;
         }
     }
-    sessions_->start( *profile );
+    sessions_->start( *profile ); // wipes profile->auth.secret
 }
 
 void SidebarWidget::confirmDelete( const QString& name )

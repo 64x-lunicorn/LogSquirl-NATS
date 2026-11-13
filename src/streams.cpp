@@ -29,6 +29,7 @@
 #include "streams.h"
 
 #include "natsoptions.h"
+#include "secrets.h"
 
 namespace nats_monitor {
 
@@ -40,7 +41,7 @@ constexpr int kListTimeoutMs = 2000;
 
 } // namespace
 
-QStringList listStreams( const SessionConfig& config, QString* error )
+QStringList listStreams( SessionConfig& config, QString* error )
 {
     natsOptions* options = nullptr;
     natsConnection* connection = nullptr;
@@ -59,6 +60,8 @@ QStringList listStreams( const SessionConfig& config, QString* error )
     if ( problem.isEmpty() ) {
         problem = connectTo( options, config, &connection );
     }
+    // nats.c has its own copy: no other is kept while the server answers.
+    wipe( config.auth.secret );
     if ( problem.isEmpty() ) {
         jsOptions jsOptions;
         jsOptions_Init( &jsOptions );

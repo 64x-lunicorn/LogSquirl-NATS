@@ -92,9 +92,12 @@ public:
      * profile.auth.secret, and open its file in a followed tab.  No-op if
      * the connection's session runs already.
      *
+     * Started or not, profile.auth.secret is wiped (secrets.h) on return:
+     * the session's worker has its own copy, for the connection options.
+     *
      * @return whether a session runs now; if not, status() says why.
      */
-    bool start( const ConnectionProfile& profile );
+    bool start( ConnectionProfile& profile );
 
     /// Stop the session of the connection @p name and, with @p notify, say
     /// so in a host notification.  No-op if it does not run.

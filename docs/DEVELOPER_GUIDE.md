@@ -519,9 +519,15 @@ the connection's tile shows it (`failed: …`) and a notification says it.
   NKey seed file, the file's bytes (read unbuffered) and the seed decoded
   from them are wiped once the public key is derived; nats.c reads the
   seed from the file itself. A session started again after `stop()` has
-  no secret left; `Sessions` makes a new session for each start. Copies
-  in the callers (the profile the sidebar or dialog filled in) are
-  theirs: `wipe()` overwrites only data no other `QString` shares.
+  no secret left; `Sessions` makes a new session for each start.
+  `wipe()` overwrites only data no other `QString` shares, so every copy
+  on the way is wiped, and the last to let go overwrites it:
+  `Sessions::start()` wipes the profile the sidebar filled in and the
+  session config it made of it, started or not (the session wipes its
+  own, the last if it never started). The dialog's stream listing hands
+  its thread the one copy left, and `listStreams()` wipes it once
+  `connectTo()` returns, so a caller that still needs the secret lists
+  with a copy.
 
 The dialog saves each connection as a named **profile**
 ([`src/profiles.h`](../src/profiles.h)) in `nats.ini`, array `profiles`:

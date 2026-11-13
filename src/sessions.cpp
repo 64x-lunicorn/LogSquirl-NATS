@@ -30,7 +30,9 @@
 #include "natssession.h"
 #include "profiles.h"
 #include "replay.h"
+#include "secrets.h"
 
+#include <QScopeGuard>
 #include <QTimer>
 
 #include <chrono>
@@ -104,8 +106,11 @@ Sessions::~Sessions()
     stopAll();
 }
 
-bool Sessions::start( const ConnectionProfile& profile )
+bool Sessions::start( ConnectionProfile& profile )
 {
+    // Every copy of the secret is wiped, here and in the session: they share
+    // Qt's data, which only the last to let go of it overwrites (secrets.h).
+    const auto profileWiped = qScopeGuard( [ &profile ] { wipe( profile.auth.secret ); } );
     const auto name = profile.name;
     auto& entry = entries_[ name ];
     if ( entry.session ) {
@@ -117,7 +122,8 @@ bool Sessions::start( const ConnectionProfile& profile )
         Q_EMIT changed( name );
         return false;
     }
-    const auto config = sessionConfig( profile );
+    auto config = sessionConfig( profile );
+    const auto configWiped = qScopeGuard( [ &config ] { wipe( config.auth.secret ); } );
     if ( config.tls.skipVerify ) {
         host_.log(
             LOGSQUIRL_LOG_WARNING,
