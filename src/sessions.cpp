@@ -119,6 +119,7 @@ bool Sessions::start( ConnectionProfile& profile )
     }
     entry.status = {};
     entry.notifyStopped = false;
+    entry.replay = profile.replay.enabled();
     if ( const auto problem = startProblem( profile ); !problem.isEmpty() ) {
         entry.status.apply( { Transition::Kind::Failed, problem, {} } );
         Q_EMIT changed( name );
@@ -252,7 +253,12 @@ bool Sessions::anyRunning() const
 SessionStatus Sessions::status( const QString& name ) const
 {
     const auto it = entries_.constFind( name );
-    return it == entries_.constEnd() ? SessionStatus{} : it->status.status();
+    if ( it == entries_.constEnd() ) {
+        return {};
+    }
+    auto status = it->status.status();
+    status.replay = it->replay;
+    return status;
 }
 
 void Sessions::sample()

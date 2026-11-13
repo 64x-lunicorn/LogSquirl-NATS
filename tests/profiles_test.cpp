@@ -50,9 +50,19 @@ using nats_monitor::ReplayStart;
 using nats_monitor::saveProblem;
 using nats_monitor::SessionConfig;
 using nats_monitor::SessionState;
+using nats_monitor::SessionStatus;
 using nats_monitor::startProblem;
 
 namespace {
+
+/// A session in @p state, replaying with @p replay, else capturing.
+SessionStatus sessionIn( SessionState state, bool replay = false )
+{
+    SessionStatus status;
+    status.state = state;
+    status.replay = replay;
+    return status;
+}
 
 /// A profile @p name capturing @p subjects from @p url.
 ConnectionProfile profile( const QString& name, const QString& url = "nats://localhost:4222",
@@ -363,9 +373,9 @@ SCENARIO( "the profile store does not remove a connection that runs", "[profiles
         QTemporaryDir dir;
         const auto path = dir.filePath( "nats.ini" );
         ProfileStore store( path, []( const QString& name ) {
-            return name == "prod"    ? SessionState::Running
-                   : name == "audit" ? SessionState::Connecting
-                                     : SessionState::Stopped;
+            return name == "prod"    ? sessionIn( SessionState::Running )
+                   : name == "audit" ? sessionIn( SessionState::Connecting, true )
+                                     : sessionIn( SessionState::Stopped );
         } );
         REQUIRE( store.upsert( profile( "prod" ) ).isEmpty() );
         REQUIRE( store.upsert( profile( "dev" ) ).isEmpty() );
@@ -400,6 +410,31 @@ SCENARIO( "the profile store does not remove a connection that runs", "[profiles
             }
         }
 
+        WHEN( "audit, still replaying, is saved as a capture and then removed" )
+        {
+            REQUIRE( store.upsert( profile( "audit" ) ).isEmpty() );
+            const auto problem = store.remove( "audit" );
+
+            THEN( "the store names what runs, the replay, not what is saved" )
+            {
+                REQUIRE( problem == "The connection audit is replaying: stop it to delete it." );
+            }
+        }
+
+        WHEN( "prod, still capturing, is saved as a replay and then removed" )
+        {
+            auto replay = profile( "prod" );
+            replay.replayChosen = true;
+            replay.replay.stream = "ORDERS";
+            REQUIRE( store.upsert( replay ).isEmpty() );
+            const auto problem = store.remove( "prod" );
+
+            THEN( "the store names what runs, the capture" )
+            {
+                REQUIRE( problem == "The connection prod is capturing: stop it to delete it." );
+            }
+        }
+
         WHEN( "dev is removed" )
         {
             THEN( "it goes" )
@@ -420,7 +455,7 @@ SCENARIO( "the profile store neither saves nor removes a connection that is stop
         const auto path = dir.filePath( "nats.ini" );
         auto state = SessionState::Stopped;
         ProfileStore store( path, [ &state ]( const QString& name ) {
-            return name == "prod" ? state : SessionState::Stopped;
+            return sessionIn( name == "prod" ? state : SessionState::Stopped );
         } );
         REQUIRE( store.upsert( profile( "prod" ) ).isEmpty() );
         state = SessionState::Stopping;

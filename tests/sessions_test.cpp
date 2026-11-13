@@ -351,6 +351,61 @@ SCENARIO( "a connection that cannot start has failed, saying why", "[sessions]" 
     }
 }
 
+SCENARIO( "Sessions tells whether a connection replays as its session was started", "[sessions]" )
+{
+    GIVEN( "Sessions, and the connection x replaying the stream ORDERS" )
+    {
+        MemoryHost host;
+        Sessions sessions( host, sessionTempRoot() );
+        auto x = profile( "x", "nats://127.0.0.1:1", "" );
+        x.replayChosen = true;
+        x.replay.stream = "ORDERS";
+
+        THEN( "before it is started, its status does not say it replays" )
+        {
+            REQUIRE_FALSE( sessions.status( "x" ).replay );
+        }
+
+        WHEN( "it is started" )
+        {
+            REQUIRE( sessions.start( x ) );
+
+            THEN( "its status says it replays" )
+            {
+                REQUIRE( sessions.status( "x" ).replay );
+            }
+
+            AND_WHEN( "its profile is changed to a capture while it runs" )
+            {
+                x.replayChosen = false;
+                x.replay = {};
+                x.subjects = "orders.>";
+
+                THEN( "its status still says it replays" )
+                {
+                    REQUIRE( sessions.status( "x" ).replay );
+                }
+            }
+            sessions.stopAll();
+        }
+
+        WHEN( "it is stopped and started again as a capture" )
+        {
+            REQUIRE( sessions.start( x ) );
+            sessions.stopAll();
+            REQUIRE( waitFor( [ & ] { return !sessions.isStopping( "x" ); } ) );
+            auto capture = profile( "x", "nats://127.0.0.1:1", "orders.>" );
+            REQUIRE( sessions.start( capture ) );
+
+            THEN( "its status says it captures" )
+            {
+                REQUIRE_FALSE( sessions.status( "x" ).replay );
+            }
+            sessions.stopAll();
+        }
+    }
+}
+
 SCENARIO( "the profile a session is started with no longer holds its password", "[sessions]" )
 {
     GIVEN( "Sessions, and a connection that logs in as alice with the password s3cret" )

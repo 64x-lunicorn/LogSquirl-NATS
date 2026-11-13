@@ -305,10 +305,10 @@ SessionConfig sessionConfig( const ConnectionProfile& profile )
     return config;
 }
 
-ProfileStore::ProfileStore( const QString& settingsFile, StateOf stateOf, QObject* parent )
+ProfileStore::ProfileStore( const QString& settingsFile, StatusOf statusOf, QObject* parent )
     : QObject( parent )
     , settingsFile_( settingsFile )
-    , stateOf_( std::move( stateOf ) )
+    , statusOf_( std::move( statusOf ) )
 {
 }
 
@@ -366,9 +366,9 @@ ConnectionProfile ProfileStore::newProfile() const
     return profile;
 }
 
-SessionState ProfileStore::stateOf( const QString& name ) const
+SessionStatus ProfileStore::statusOf( const QString& name ) const
 {
-    return stateOf_ ? stateOf_( name ) : SessionState::Stopped;
+    return statusOf_ ? statusOf_( name ) : SessionStatus{};
 }
 
 QString ProfileStore::upsert( const ConnectionProfile& profile )
@@ -376,7 +376,7 @@ QString ProfileStore::upsert( const ConnectionProfile& profile )
     if ( const auto problem = saveProblem( profile ); !problem.isEmpty() ) {
         return problem;
     }
-    if ( stateOf( profile.name ) == SessionState::Stopping ) {
+    if ( statusOf( profile.name ).state == SessionState::Stopping ) {
         return QStringLiteral( "The connection %1 is stopping: save it once it has stopped." )
             .arg( profile.name );
     }
@@ -399,17 +399,15 @@ QString ProfileStore::upsert( const ConnectionProfile& profile )
 
 QString ProfileStore::remove( const QString& name )
 {
-    const auto state = stateOf( name );
-    if ( state == SessionState::Stopping ) {
+    const auto status = statusOf( name );
+    if ( status.state == SessionState::Stopping ) {
         return QStringLiteral( "The connection %1 is stopping: delete it once it has stopped." )
             .arg( name );
     }
-    if ( state == SessionState::Connecting || state == SessionState::Running ) {
-        // As saved: a replay saved as a capture while it runs is named a capture.
-        const auto running = find( name );
+    if ( status.state == SessionState::Connecting || status.state == SessionState::Running ) {
         return QStringLiteral( "The connection %1 is %2: stop it to delete it." )
-            .arg( name, running && running->replay.enabled() ? QStringLiteral( "replaying" )
-                                                             : QStringLiteral( "capturing" ) );
+            .arg( name,
+                  status.replay ? QStringLiteral( "replaying" ) : QStringLiteral( "capturing" ) );
     }
     auto profiles = list();
     if ( profiles.removeIf( [ & ]( const auto& p ) { return p.name == name; } ) == 0 ) {

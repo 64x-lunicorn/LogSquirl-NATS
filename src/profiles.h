@@ -126,16 +126,18 @@ class ProfileStore : public QObject {
     Q_OBJECT
 
 public:
-    /// Where the session of the connection @p name is (Sessions::status()):
-    /// while it connects or runs, it is not deleted; while it is stopping,
-    /// it is neither saved nor deleted.
-    using StateOf = std::function<SessionState( const QString& name )>;
+    /// What the session of the connection @p name does (Sessions::status()):
+    /// while it connects or runs, it is not deleted, and the refusal names
+    /// what it does, a replay or a capture; while it is stopping, it is
+    /// neither saved nor deleted.  The store reads only its state and
+    /// whether it replays.
+    using StatusOf = std::function<SessionStatus( const QString& name )>;
 
     /// The store of @p settingsFile, which need not exist yet; empty, the
     /// store has no profile and saves none (no host to say where).
-    /// @p stateOf tells where each connection's session is; if it is empty,
-    /// none runs.
-    explicit ProfileStore( const QString& settingsFile, StateOf stateOf = {},
+    /// @p statusOf tells what each connection's session does; if it is
+    /// empty, none runs.
+    explicit ProfileStore( const QString& settingsFile, StatusOf statusOf = {},
                            QObject* parent = nullptr );
 
     /// The file the store reads and writes.
@@ -159,7 +161,8 @@ public:
     QString upsert( const ConnectionProfile& profile );
 
     /// Delete the profile named @p name, unless its session runs or is
-    /// stopping.  Empty if it was deleted, else why not.
+    /// stopping.  Empty if it was deleted, else why not: for one that runs,
+    /// whether it replays or captures as its session was started.
     QString remove( const QString& name );
 
 Q_SIGNALS:
@@ -172,10 +175,10 @@ private:
     bool write( const QList<ConnectionProfile>& profiles, std::optional<int> maxFileMiB );
 
     QString settingsFile_;
-    /// Where the session of @p name is: stopped if no stateOf was given.
-    SessionState stateOf( const QString& name ) const;
+    /// What the session of @p name does: stopped if no statusOf was given.
+    SessionStatus statusOf( const QString& name ) const;
 
-    StateOf stateOf_;
+    StatusOf statusOf_;
 };
 
 } // namespace nats_monitor

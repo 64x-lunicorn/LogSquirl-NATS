@@ -41,9 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where they were `nats__.log`, `nats_orders._.log` and
   `nats_billing._.log` (#23).
 - **A failed delete says why.** When a connection cannot be deleted from
-  its tile, a warning says why (it is capturing or replaying, it is no
-  longer saved, or nats.ini could not be written) instead of a
-  notification that it could not be deleted (#31, #41).
+  its tile, a warning says why (it is capturing or replaying, as its
+  session was started even if it was saved as the other kind since; it is
+  no longer saved; or nats.ini could not be written) instead of a
+  notification that it could not be deleted (#31, #41, #50).
 - **The texts say session, capture and replay as the glossary does.** A
   tooltip, a dialog message or a log line says *session* where it means a
   capture or a replay, and *capture* or *replay* only for that kind: Stop

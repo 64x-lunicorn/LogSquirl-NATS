@@ -484,7 +484,8 @@ tile.
   (`QMessageBox`), then deletes through the store, not the dialog; it is
   hidden while the connection connects or runs, and the store refuses to
   delete a running connection too. When the store cannot delete, a warning
-  says why (it is capturing or replaying, as it is saved; it is no longer
+  says why (it is capturing or replaying, as its session was started, not
+  as it is saved since; it is no longer
   saved; the file could not be written).
 - **Edit** while the connection runs: the tile shows the saved settings at
   once, the session runs on with those it started with (the dialog says

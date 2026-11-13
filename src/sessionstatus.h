@@ -80,6 +80,9 @@ enum class SessionState {
 /// What a connection's session does, or did last.
 struct SessionStatus {
     SessionState state = SessionState::Stopped;
+    /// It replays a stream (replay.h), else it captures subjects: as it was
+    /// started, whatever its profile was saved as since.  Sessions sets it.
+    bool replay = false;
     QString detail;   ///< The last transition, or error, in words; why it failed.
     QString server;   ///< The server it is connected to (redacted); empty while not connected.
     QString filePath; ///< The file it writes, or wrote last; empty if never started.

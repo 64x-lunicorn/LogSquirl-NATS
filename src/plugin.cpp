@@ -257,7 +257,7 @@ LOGSQUIRL_PLUGIN_EXPORT int logsquirl_plugin_init( const LogSquirlHostApi* api, 
         // neither saves nor deletes one that is stopping.
         st.profiles = new nats_monitor::ProfileStore(
             nats_monitor::settingsFile(), [ sessions = st.sessions ]( const QString& name ) {
-                return sessions->status( name ).state;
+                return sessions->status( name );
             } );
         st.dialog = new nats_monitor::ConnectionDialog( st.profiles, st.sessions );
 

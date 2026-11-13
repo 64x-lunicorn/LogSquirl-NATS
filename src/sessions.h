@@ -132,7 +132,8 @@ public:
     bool anyRunning() const;
 
     /// What the session of the connection @p name does, or did last, with
-    /// the counts and the rate of the last sample.
+    /// the counts and the rate of the last sample: whether it replays as it
+    /// was started, not as its profile is saved now.
     SessionStatus status( const QString& name ) const;
 
     /// Sample the counts of each running session now, on the clock; called
@@ -149,6 +150,7 @@ private:
         NatsSession* session = nullptr; ///< While it runs, stopping included.
         ConnectionStatus status;
         bool notifyStopped = false; ///< stop() was asked to notify once it has stopped.
+        bool replay = false;        ///< It was started as a replay (SessionStatus::replay).
     };
 
     /// Apply @p transition, which the session of @p name reported; an end
