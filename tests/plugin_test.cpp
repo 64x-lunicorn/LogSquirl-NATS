@@ -1736,6 +1736,7 @@ SCENARIO( "unloading the plugin stops every session at once, and waits for each"
         NatsServer server;
         TcpProxy proxy( server.port() );
         FakeHost host;
+        const ShutdownAtExit shutdownAtExit;
         REQUIRE( logsquirl_plugin_init( host.api(), host.handle() ) == 0 );
         saveConnection( host, "orders", proxy.url(), "orders.>" );
         saveConnection( host, "metrics", proxy.url(), "metrics.>" );
