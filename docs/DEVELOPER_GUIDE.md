@@ -169,9 +169,10 @@ error.
 The longest stop, with a server that does not answer: what is left of the
 start (nats.c's connect timeout, 2 s for each server of the URL list; then
 a capture's round trip, 10 s, or a replay's three JetStream requests, 5 s
-each), the drain (15 s at most) and the close (5 s), and the writing of
-what was queued: 2 s for each server and 30 s for a capture, 35 s for a
-replay (`natssession.h`, STOPPING). `stop()` does the same as
+each), the drain (15 s at most) and the close (5 s): 2 s for each server
+and 30 s for a capture, 35 s for a replay (`natssession.h`, STOPPING).
+Then the writer writes what was still queued, which no timeout bounds: it
+takes what the queue and the disk take. `stop()` does the same as
 `requestStop()` and waits for it; the destructor too, since nats.c's
 callbacks use what the session frees and its threads run the library's
 code. A session is therefore never destroyed while its threads run:

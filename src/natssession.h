@@ -70,10 +70,10 @@
  * capture's round trip of 10 s or a replay's three JetStream requests of
  * 5 s each), the drain (kDrainTimeout, 15 s; not connected, up to
  * kCallbackTimeout, 5 s, until nats.c holds nothing more), the close
- * (kCallbackTimeout, 5 s, for nats.c's last callback) and the writing of
- * what was queued: 2 s for each server and 30 s for a capture, 35 s for a
- * replay.  A server that never answers the connect takes the 2 s for each
- * server alone.
+ * (kCallbackTimeout, 5 s, for nats.c's last callback): 2 s for each server
+ * and 30 s for a capture, 35 s for a replay.  Then the writer writes what
+ * was still queued, which no timeout bounds.  A server that never answers the connect takes the 2 s
+ * for each server alone.
  *
  * A write error ends the session as a stop does: the subscriptions go,
  * nothing further is counted (receivedCount() no longer grows from the

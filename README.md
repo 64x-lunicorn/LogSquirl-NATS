@@ -205,10 +205,11 @@ After installing, restart LogSquirl or re-scan via *Plugins → Manage Plugins�
      `dropped=` line where each gap is.
    - **■ Stop** stops it; the tab keeps what was captured, and the tile
      what it counted. **■ Stop all** at the top stops every tile. Stop
-     returns at once: the tile says *stopping…* until the capture has
-     ended (its last lines written, the file closed), which against a
-     server that does not answer can take up to 35 seconds (and 2 more
-     for each server of its URL list), then
+     returns at once: the tile says *stopping…* until the session has
+     ended (its last lines written, the file closed); against a server
+     that does not answer, its timeouts add up to 35 seconds (and 2 more
+     for each server of its URL list), plus writing what was still
+     queued, then
      *stopped*. Until then it cannot be started, edited or deleted.
    - A connection that fails says why on its tile, in words you can act on
      (the server refused the password, the server's certificate is not
