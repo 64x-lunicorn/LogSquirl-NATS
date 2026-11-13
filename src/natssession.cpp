@@ -216,6 +216,18 @@ struct Shared final : ReplaySubscription::Outlet {
     FormatOptions format;
     PendingLimits pendingLimits; ///< What each subscription is given.
 
+    /// Guards the flags below and each SubscriptionState's marked count and
+    /// done; taken before the sink's own mutex, never after.  Declared
+    /// before the sink, so that they outlive it: the sink's last report (a
+    /// write failure in finish()) reaches writeFailed().
+    std::mutex mutex;
+    std::condition_variable wake; ///< The flags or a subscription's done changed.
+    bool stopRequested = false;
+    bool stopping = false;   ///< The connection thread closes the connection: no disconnect marker.
+    bool closed = false;     ///< nats.c made the closed callback.
+    bool replayDone = false; ///< Caught up, not following: the capture ends.
+    QString writeFailure;    ///< The file can no longer be written, and why: the capture ends.
+
     /// Everything between a message and the file: the callbacks hand it
     /// their lines, from any thread.
     CaptureSink sink;
@@ -228,16 +240,6 @@ struct Shared final : ReplaySubscription::Outlet {
     /// live capture.  Made before connecting; its callback uses it, so it
     /// goes with Shared.
     std::unique_ptr<ReplaySubscription> replay;
-
-    /// Guards the flags below and each SubscriptionState's marked count and
-    /// done; taken before the sink's own mutex, never after.
-    std::mutex mutex;
-    std::condition_variable wake; ///< The flags or a subscription's done changed.
-    bool stopRequested = false;
-    bool stopping = false;   ///< The connection thread closes the connection: no disconnect marker.
-    bool closed = false;     ///< nats.c made the closed callback.
-    bool replayDone = false; ///< Caught up, not following: the capture ends.
-    QString writeFailure;    ///< The file can no longer be written, and why: the capture ends.
 
     std::atomic<int> limitMessages{ 0 }; ///< The subscriptions' pending limits, read back.
     std::atomic<int> limitBytes{ 0 };
