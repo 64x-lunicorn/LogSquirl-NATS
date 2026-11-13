@@ -325,6 +325,10 @@ public:
         // Unbounded, a burst overruns the server's ingest queue, which then
         // refuses messages.
         options.PublishAsync.MaxPending = 1000;
+        // With that many acks outstanding, a publish waits for one: nats.c's
+        // default of 200 ms is too short for a loaded machine, and the wait
+        // ends as soon as an ack arrives, so an idle one is as fast as before.
+        options.PublishAsync.StallWait = 60000;
         Publisher::check( natsConnection_JetStream( &js_, publisher.connection(), &options ),
                           "natsConnection_JetStream" );
     }
