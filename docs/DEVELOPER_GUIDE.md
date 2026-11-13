@@ -121,9 +121,15 @@ The sink's writer waits on its condition variable until lines are queued
 or the sink is finished. It then swaps the whole queue out, so it never
 holds the mutex while writing, writes the batch and flushes once:
 LogSquirl, following the file, sees whole lines. Before each line it checks
-the size limit (below). A write or flush that fails (disk full, volume
-gone) is reported once (`Event::FileError`), on the tile and as a
-notification, and later lines are not written.
+the size limit (below). A write or flush that fails (disk full, the file
+removed, no permission) is reported once (`Event::WriteFailed`) and ends
+the writing: later lines are not written, and from then on the sink
+discards every message, uncounted, as a stopped replay's does, so
+*received* does not grow for lines that are never written. The session
+ends on it as a stop does (the subscriptions go), but as *failed*, its
+detail the write error with the file's name (`Cannot write to <file>:
+<why>`): the tile's dot turns red, a notification says why, and the
+connection can be started again once the cause is fixed.
 
 **Stopping.** `stop()` asks the connection thread to end and waits for it.
 That thread lifts the pending limits, so nats.c drops nothing more, and
@@ -135,7 +141,8 @@ finishes the sink (`CaptureSink::finish()`): the queue-full drops not
 marked yet, what is left, the `stopped` marker, the file closed and the
 writer joined. Nothing that reached the session before `stop()` is lost
 uncounted. A connection closed for good ends the same way with
-`connection closed`, a complete replay with `replay complete`.
+`connection closed`, a complete replay with `replay complete`, a write
+error with the write error.
 
 **Temporary files.** Each session writes into its own directory
 `logsquirl-nats-<pid>-XXXXXX` ([`src/tempdirs.h`](../src/tempdirs.h)),
@@ -768,13 +775,16 @@ options of one with JetStream.
   room instead of dropping (`waitingForRoom()` says when it waits) and
   discarding once stopped, a line never split across files, a failed
   rotation retried one limit later (a directory where the next file goes),
-  a write failure reported once (a `QFile` of the test's that fails,
-  through the sink's `FileFactory`), and the writer thread fed from two
-  threads. Only the slow-consumer accounting, which comes from nats.c,
-  needs the server tests; at the session seam, `natssession_test.cpp` checks
-  only that the session announces the files rotated into and reports a
-  failed rotation, and that a session started again goes on in its last
-  file.
+  a write failure reported once, after which no message is taken (a
+  `QFile` of the test's that fails, `nats_test::FailingFile` in
+  `sessiontest.h`, through the sink's `FileFactory`), and the writer thread
+  fed from two threads. Only the slow-consumer accounting, which comes from
+  nats.c, needs the server tests; at the session seam, `natssession_test.cpp`
+  checks only that the session announces the files rotated into and reports
+  a failed rotation, that a session started again goes on in its last
+  file, and that a write error ends a capture as failed, saying why, and
+  it can be started again (a `FileFactory` given to the `NatsSession`);
+  `replay_test.cpp` checks the same of a replay.
 - **Sessions on an in-memory host** (`sessions_test.cpp`, `[sessions]`):
   `Sessions` is given a `nats_test::MemoryHost`
   ([`tests/memoryhost.h`](../tests/memoryhost.h)) instead of the plugin's

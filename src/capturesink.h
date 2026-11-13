@@ -62,8 +62,16 @@
  * Event::Rotated.  A line longer than the limit is written whole, alone in
  * its file.  Should the next file not open, the writer keeps writing the
  * current one, reports Event::FileError, and tries again once that file has
- * grown by the limit once more.  0 means no limit.  A write or flush that
- * fails is reported once, as Event::FileError; nothing more is written.
+ * grown by the limit once more.  0 means no limit.
+ *
+ * WRITE FAILURE
+ * ─────────────
+ * A write or flush that fails (a full disk, a volume gone) is reported
+ * once, as Event::WriteFailed, and ends the writing: nothing more is
+ * written, and from then on every message is discarded, uncounted, as after
+ * discardMessages(), so that received() no longer grows for lines that
+ * would never be written.  A message() waiting for room is let go.  The
+ * events of the marker lines are still reported; the session ends on it.
  *
  * EVENTS
  * ──────
@@ -122,7 +130,12 @@ public:
             Status,
             Error,   ///< A marker of an error the capture runs on after; the text is what it says.
             Rotated, ///< The capture goes on in another file; the text is its path.
-            FileError, ///< A file could not be written or started; the text says why.
+            /// The next file could not be started; the capture goes on in
+            /// the one it writes.  The text says why.
+            FileError,
+            /// The file can no longer be written: nothing more is, and no
+            /// message is taken any more.  The text says why, naming the file.
+            WriteFailed,
         };
         Kind kind = Kind::Status;
         QString text;
@@ -181,7 +194,7 @@ public:
      * (Mode::WaitForRoom).  Counted as received if queued or dropped.
      *
      * @return false if it was discarded instead, uncounted: after
-     *         discardMessages() or finish().
+     *         discardMessages(), a write failure or finish().
      */
     bool message( QByteArray line );
 
@@ -198,7 +211,8 @@ public:
     /// keeps them.  Marker lines are still written.
     void discardMessages();
 
-    /// Whether discardMessages() was called.
+    /// Whether messages are discarded: discardMessages() was called, or the
+    /// file can no longer be written.
     bool discarding() const
     {
         return discarding_.load();
@@ -263,7 +277,7 @@ private:
     /// Go on in the next file if a line of @p lineBytes would not fit.
     void rotateBefore( qint64 lineBytes );
 
-    /// The file cannot be written: say so once.
+    /// The file cannot be written: take no message more, and say so once.
     void fail();
 
     void report( const Event& event );

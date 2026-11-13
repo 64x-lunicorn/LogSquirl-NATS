@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is replaying (#41).
 
 ### Fixed
+- **A write error ends the session as failed, and its tile says why.**
+  When the capture's file can no longer be written (disk full, the file
+  removed, no permission), the session ends as a stop does, but failed:
+  the tile's dot turns red and its detail names the write error and the
+  file, and *received* stops growing. It went on as running before,
+  counting lines that were never written. The connection can be started
+  again once the cause is fixed (#39).
 - **A replay start that cannot be read is refused.** A stream sequence
   above the largest one (18446744073709551615) or left empty is not saved,
   where it was replayed from sequence 1; a sequence or time in nats.ini that

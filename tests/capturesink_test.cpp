@@ -24,7 +24,8 @@
  * Most drive a sink that is not started: the test is its writer, with
  * writeQueued() and finish(), so what is queued, dropped and written when
  * is the test's to say.  The lines are read with the line reader
- * (capture.h); a write fails through a file of the test's (FailingFile).
+ * (capture.h); a write fails through a file of the test's (FailingFile,
+ * sessiontest.h).
  */
 
 #include <catch2/catch.hpp>
@@ -47,6 +48,7 @@ using nats_monitor::CaptureSink;
 using nats_test::Capture;
 using nats_test::captureFiles;
 using nats_test::endsWithNewline;
+using nats_test::failingFiles;
 using nats_test::LineFields;
 using nats_test::liveFields;
 using nats_test::markerFields;
@@ -124,29 +126,6 @@ QString numbered( int i, int size )
 {
     return QStringLiteral( "m%1" ).arg( i, 4, 10, QLatin1Char( '0' ) ).leftJustified( size, 'x' );
 }
-
-/// A file whose writes fail once @p failing is set: a full disk, a volume gone.
-class FailingFile : public QFile {
-public:
-    FailingFile( const QString& path, const std::shared_ptr<std::atomic<bool>>& failing )
-        : QFile( path )
-        , failing_( failing )
-    {
-    }
-
-protected:
-    qint64 writeData( const char* data, qint64 length ) override
-    {
-        if ( failing_->load() ) {
-            setErrorString( QStringLiteral( "No space left on device" ) );
-            return -1;
-        }
-        return QFile::writeData( data, length );
-    }
-
-private:
-    std::shared_ptr<std::atomic<bool>> failing_;
-};
 
 } // namespace
 
@@ -503,17 +482,14 @@ SCENARIO( "a sink's rotation that fails is retried one limit later", "[sink][rot
     }
 }
 
-SCENARIO( "a sink reports a write failure once", "[sink]" )
+SCENARIO( "a sink reports a write failure once and takes no message after it", "[sink]" )
 {
     GIVEN( "a sink whose file can be written until the disk is full" )
     {
         QTemporaryDir dir;
         Events events;
         auto failing = std::make_shared<std::atomic<bool>>( false );
-        const auto files = [ failing ]( const QString& path ) {
-            return std::make_unique<FailingFile>( path, failing );
-        };
-        CaptureSink sink( configIn( dir, 100 ), events.reporter(), files );
+        CaptureSink sink( configIn( dir, 100 ), events.reporter(), failingFiles( failing ) );
         REQUIRE( sink.open() );
         sink.marker( "connected to nats://x, subscribed to s", Kind::Connected, "nats://x" );
         REQUIRE( sink.message( line( "m1" ) ) );
@@ -526,21 +502,61 @@ SCENARIO( "a sink reports a write failure once", "[sink]" )
             REQUIRE( sink.message( line( "m3" ) ) );
             sink.writeQueued();
             sink.marker( "disconnected", Kind::Status );
-            REQUIRE( sink.message( line( "m4" ) ) );
+            const bool taken = sink.message( line( "m4" ) );
             sink.writeQueued();
             sink.finish( "stopped" );
 
-            THEN( "the failure is reported once, the events still are, and nothing more is "
-                  "written" )
+            THEN( "the failure is reported once, as the end of the capture, the events still "
+                  "are, and nothing more is written" )
             {
-                const auto errors = events.of( Kind::FileError );
+                const auto errors = events.of( Kind::WriteFailed );
                 REQUIRE( errors.size() == 1 );
                 REQUIRE( errors.first().startsWith( "Cannot write to " + sink.fileName() ) );
                 REQUIRE( errors.first().contains( "No space left on device" ) );
+                REQUIRE( events.of( Kind::FileError ).isEmpty() );
                 REQUIRE( events.of( Kind::Status ) == QStringList{ "disconnected", "stopped" } );
                 REQUIRE( events.of( Kind::Connected ) == QStringList{ "nats://x" } );
                 REQUIRE( Capture::read( sink.fileName() ).payloadsOn( "s" )
                          == QStringList{ "m1" } );
+            }
+
+            THEN( "a message after the failure is discarded, uncounted" )
+            {
+                REQUIRE_FALSE( taken );
+                REQUIRE( sink.received() == 3 );
+                REQUIRE( sink.discarding() );
+            }
+        }
+    }
+
+    GIVEN( "a replay's started sink, full, whose writes fail" )
+    {
+        QTemporaryDir dir;
+        Events events;
+        auto failing = std::make_shared<std::atomic<bool>>( true );
+        CaptureSink sink( configIn( dir, 1, CaptureSink::Mode::WaitForRoom ), events.reporter(),
+                          failingFiles( failing ) );
+        REQUIRE( sink.open() );
+
+        WHEN( "a delivery waits for room when the writer fails" )
+        {
+            std::atomic<int> taken{ 0 };
+            std::thread delivery( [ & ] {
+                for ( int i = 1; i <= 1000; ++i ) {
+                    if ( sink.message( line( QStringLiteral( "m%1" ).arg( i ) ) ) ) {
+                        ++taken;
+                    }
+                }
+            } );
+            sink.start();
+            delivery.join(); // it would hang, had the failure not let it go
+
+            THEN( "it is let go, and what comes after is discarded" )
+            {
+                REQUIRE( events.of( Kind::WriteFailed ).size() == 1 );
+                REQUIRE( taken.load() < 1000 );
+                REQUIRE( sink.received() == static_cast<quint64>( taken.load() ) );
+                sink.finish();
             }
         }
     }

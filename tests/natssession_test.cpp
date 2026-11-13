@@ -1238,6 +1238,77 @@ SCENARIO( "a rotation that fails is reported by the session, which goes on in th
     }
 }
 
+SCENARIO( "a write error ends the session as failed, saying why", "[server][session]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a running session whose file can be written until the disk is full" )
+    {
+        NatsServer server;
+        Publisher publisher( server.url() );
+        auto failing = std::make_shared<std::atomic<bool>>( false );
+        NatsSession session( sessionConfig( server.url(), { "wf" } ), sessionTempRoot(), nullptr,
+                             nats_test::failingFiles( failing ) );
+        Transitions transitions( session );
+        QStringList errors;
+        QObject::connect( &session, &NatsSession::errorOccurred,
+                          [ & ]( const QString& message ) { errors << message; } );
+        startAndWaitConnected( session, server.url(), "wf" );
+        publisher.publish( "wf", "m1" );
+        REQUIRE( waitFor( [ & ] {
+            return Capture::read( session.filePath() ).payloadsOn( "wf" ) == QStringList{ "m1" };
+        } ) );
+
+        WHEN( "the disk is full when the next message is written" )
+        {
+            failing->store( true );
+            publisher.publish( "wf", "m2" );
+            REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Failed ) == 1; }, 10000 ) );
+
+            THEN( "the session ends as failed, naming the error and the file" )
+            {
+                REQUIRE_FALSE( session.isRunning() );
+                const auto failed = transitions.all().last();
+                REQUIRE( failed.kind == Kind::Failed );
+                REQUIRE( failed.detail.startsWith( "Cannot write to " + session.filePath() ) );
+                REQUIRE( failed.detail.contains( "No space left on device" ) );
+                REQUIRE( errors.isEmpty() ); // the transition says it, once
+            }
+
+            THEN( "received no longer grows" )
+            {
+                const auto received = session.receivedCount();
+                REQUIRE( received == 2 );
+                publisher.publish( "wf", "m3" );
+                settle( 200 );
+                REQUIRE( session.receivedCount() == received );
+            }
+
+            AND_WHEN( "the cause is fixed and the session is started again" )
+            {
+                failing->store( false );
+                REQUIRE( session.start() );
+
+                THEN( "it runs again, and captures" )
+                {
+                    // The first start's "connected" marker is in the file
+                    // already: the second Running is this start's.
+                    REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Running ) == 2; },
+                                      10000 ) );
+                    publisher.publish( "wf", "m4" );
+                    REQUIRE( waitFor( [ & ] {
+                        return Capture::read( session.filePath() )
+                            .payloadsOn( "wf" )
+                            .contains( "m4" );
+                    } ) );
+                    REQUIRE( session.isRunning() );
+                    REQUIRE( transitions.last( Kind::Running ).server == server.url() );
+                }
+            }
+        }
+    }
+}
+
 SCENARIO( "a size limit of 0 means no limit", "[server][session][rotation]" )
 {
     SKIP_WITHOUT_NATS_SERVER();

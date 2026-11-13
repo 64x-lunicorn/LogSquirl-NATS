@@ -42,10 +42,16 @@
  * subscribed (its "connected" marker written), again after a reconnect;
  * Reconnecting when the connection breaks.  The end comes from the
  * connection thread's decision: Failed with the reason it could not start,
- * connect or subscribe, or "connection closed"; Completed for a replay that
- * caught up; Stopped from stop().  A Failed start() emits Failed alone.  An
- * error that does not end the session (nats.c's, a file's) is
- * errorOccurred() instead.  Nobody reads a state out of the texts.
+ * connect or subscribe, "connection closed", or the write error that the
+ * file can no longer be written ("Cannot write to <file>: <why>"); Completed
+ * for a replay that caught up; Stopped from stop().  A Failed start() emits
+ * Failed alone.  An error that does not end the session (nats.c's, a next
+ * file that cannot be started) is errorOccurred() instead.  Nobody reads a
+ * state out of the texts.
+ *
+ * A write error ends the session as a stop does: the subscriptions go,
+ * nothing further is counted (receivedCount() no longer grows from the
+ * error on), and it can be started again once the cause is fixed.
  *
  * SUBSCRIPTIONS
  * ─────────────
@@ -153,6 +159,7 @@
 
 #pragma once
 
+#include "capturesink.h"
 #include "sessionconfig.h"
 #include "sessionstatus.h"
 
@@ -171,7 +178,10 @@ public:
     /// A session of @p config that writes into a new temporary directory
     /// "logsquirl-nats-<pid>-XXXXXX" below @p tempRoot (tempdirs.h).  Its
     /// creator says where: the plugin's root (Sessions), a test's own.
-    NatsSession( const SessionConfig& config, const QString& tempRoot, QObject* parent = nullptr );
+    /// @p files opens the capture's files (QFile by default); a test gives
+    /// one whose writes fail.
+    NatsSession( const SessionConfig& config, const QString& tempRoot, QObject* parent = nullptr,
+                 CaptureSink::FileFactory files = {} );
 
     /// Stops the session without emitting any signal; removes the
     /// temporary directory unless preserveFile() was called.
@@ -259,9 +269,9 @@ Q_SIGNALS:
     /// The session went a step on (TRANSITIONS): once for each step.
     void transitioned( const Transition& transition );
 
-    /// nats.c reported an error, or a file could not be written or
-    /// started, and the session runs on.  What ends it is a Failed
-    /// transition instead.
+    /// nats.c reported an error, or the next file could not be started, and
+    /// the session runs on.  What ends it, a write error among them, is a
+    /// Failed transition instead.
     void errorOccurred( const QString& message );
 
     /// The file reached the size limit: the capture goes on in @p path,
@@ -291,6 +301,7 @@ private:
     /// Its secret only until start() hands it to the worker, which wipes it
     /// once nats.c's options hold it (secrets.h).
     SessionConfig config_;
+    const CaptureSink::FileFactory files_; ///< Empty: QFile.
     QTemporaryDir tempDir_; ///< Declared before worker_: removed after the file is closed.
     QString filePath_;
     int generation_ = 0; ///< Counts start(), to tell a stale finished report from the current.

@@ -382,7 +382,8 @@ void CaptureSink::rotateBefore( qint64 lineBytes )
 void CaptureSink::fail()
 {
     writeFailed_ = true;
-    report( { Event::Kind::FileError, file_->writeError() } );
+    discardMessages(); // received() counts nothing that would not be written
+    report( { Event::Kind::WriteFailed, file_->writeError() } );
 }
 
 void CaptureSink::report( const Event& event )

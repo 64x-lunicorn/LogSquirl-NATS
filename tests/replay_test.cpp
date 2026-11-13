@@ -272,6 +272,68 @@ SCENARIO( "a replay may go on live once it has caught up", "[server][replay]" )
     }
 }
 
+SCENARIO( "a write error ends a replay as failed, saying why", "[server][replay]" )
+{
+    SKIP_WITHOUT_NATS_SERVER();
+
+    GIVEN( "a replay that follows live, caught up, whose file can be written until the disk is "
+           "full" )
+    {
+        NatsServer server( withJetStream() );
+        Publisher publisher( server.url() );
+        JetStream js( publisher );
+        js.addStream( "ORDERS", { "orders.>" } );
+        for ( int i = 1; i <= 3; ++i ) {
+            js.publish( "orders.eu", QByteArray::number( i ) );
+        }
+        auto config = replayConfig( server.url(), "ORDERS" );
+        config.replay.followLive = true;
+        auto failing = std::make_shared<std::atomic<bool>>( false );
+        NatsSession session( config, sessionTempRoot(), nullptr,
+                             nats_test::failingFiles( failing ) );
+        Transitions transitions( session );
+        startAndCatchUp( session );
+
+        WHEN( "the disk is full when the stream's next message is written" )
+        {
+            failing->store( true );
+            js.publish( "orders.eu", "4" );
+            REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Failed ) == 1; }, 10000 ) );
+
+            THEN( "the replay ends as failed, naming the error and the file, and received no "
+                  "longer grows" )
+            {
+                REQUIRE_FALSE( session.isRunning() );
+                const auto failed = transitions.all().last();
+                REQUIRE( failed.kind == Kind::Failed );
+                REQUIRE( failed.detail.startsWith( "Cannot write to " + session.filePath() ) );
+                REQUIRE( failed.detail.contains( "No space left on device" ) );
+                const auto received = session.receivedCount();
+                REQUIRE( received == 4 );
+                js.publish( "orders.eu", "5" );
+                nats_test::settle( 200 );
+                REQUIRE( session.receivedCount() == received );
+            }
+
+            AND_WHEN( "the cause is fixed and the replay is started again" )
+            {
+                failing->store( false );
+
+                THEN( "it replays the stream again" )
+                {
+                    REQUIRE( session.start() );
+                    REQUIRE( waitFor(
+                        [ & ] {
+                            return Capture::read( session.filePath() ).sequences().count( 4 ) == 1;
+                        },
+                        10000 ) );
+                    REQUIRE( session.isRunning() );
+                }
+            }
+        }
+    }
+}
+
 SCENARIO( "a replay of a stream that does not exist fails, saying why", "[server][replay]" )
 {
     SKIP_WITHOUT_NATS_SERVER();

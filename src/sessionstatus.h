@@ -48,7 +48,8 @@ struct Transition {
         Running,      ///< Connected, or connected again, and subscribed: to server.
         Reconnecting, ///< The connection broke; nats.c connects again.
         Failed,       ///< Ended on its own: it could not start, connect or subscribe,
-                      ///< or the connection was closed for good; detail says why.
+                      ///< the connection was closed for good, or its file could no
+                      ///< longer be written; detail says why.
         Completed,    ///< A replay that does not follow live has caught up and ended.
         Stopped,      ///< stop() ended it.
     };
@@ -69,7 +70,7 @@ enum class SessionState {
     Stopped,    ///< Never started, stopped by the user, or a replay complete.
     Connecting, ///< Started and not connected yet, or reconnecting.
     Running,    ///< Connected and subscribed.
-    Failed,     ///< Ended on its own: it could not start or connect, or was closed for good.
+    Failed,     ///< Ended on its own: it could not start, connect or write, or was closed for good.
 };
 
 /// What a connection's session does, or did last.

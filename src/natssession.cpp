@@ -43,7 +43,9 @@
  *      has the sink mark what is new.  The sink writes, rotates and
  *      reports; the session forwards its reports to the GUI thread.
  *   4. The connection thread then waits until stop() asks it to end, the
- *      connection is closed for good or the replay is complete.
+ *      connection is closed for good, the replay is complete or the sink
+ *      reports that its file can no longer be written (the sink takes no
+ *      message from then on: nothing more is counted).
  *   5. It lifts the pending limits, so nats.c drops nothing more, and marks
  *      the last dropped counts.  It drains each subscription (or, not
  *      connected, waits until nats.c holds nothing for them), the sink
@@ -189,9 +191,19 @@ struct SubscriptionState {
 /// sink they feed, and the state of the connection and its subscriptions.
 /// A replay's connection path (replaysubscription.h) hands on to it.
 struct Shared final : ReplaySubscription::Outlet {
-    /// Writing the files of @p sinkConfig, reporting to @p reporter.
-    Shared( const CaptureSink::Config& sinkConfig, CaptureSink::Reporter reporter )
-        : sink( sinkConfig, std::move( reporter ) )
+    /// Writing the files of @p sinkConfig, opened by @p files, reporting to
+    /// @p reporter; a write failure also ends the capture (writeFailed()).
+    Shared( const CaptureSink::Config& sinkConfig, CaptureSink::Reporter reporter,
+            CaptureSink::FileFactory files )
+        : sink(
+              sinkConfig,
+              [ this, reporter = std::move( reporter ) ]( const CaptureSink::Event& event ) {
+                  if ( event.kind == CaptureSink::Event::Kind::WriteFailed ) {
+                      writeFailed( event.text );
+                  }
+                  reporter( event );
+              },
+              std::move( files ) )
     {
     }
 
@@ -219,6 +231,7 @@ struct Shared final : ReplaySubscription::Outlet {
     bool stopping = false;   ///< The connection thread closes the connection: no disconnect marker.
     bool closed = false;     ///< nats.c made the closed callback.
     bool replayDone = false; ///< Caught up, not following: the capture ends.
+    QString writeFailure;    ///< The file can no longer be written, and why: the capture ends.
 
     std::atomic<int> limitMessages{ 0 }; ///< The subscriptions' pending limits, read back.
     std::atomic<int> limitBytes{ 0 };
@@ -297,6 +310,19 @@ struct Shared final : ReplaySubscription::Outlet {
         // Under the mutex: two callbacks that read the count mark each drop once.
         sink.dropped( count - subscription.slowConsumerMarked, "slow consumer" );
         subscription.slowConsumerMarked = count;
+    }
+
+    /// The sink cannot write its file, as @p why says: the capture ends.
+    /// On the sink's writer thread.
+    void writeFailed( const QString& why )
+    {
+        {
+            std::lock_guard<std::mutex> lock( mutex );
+            if ( writeFailure.isEmpty() ) {
+                writeFailure = why;
+            }
+        }
+        wake.notify_all();
     }
 
     /// The SubscriptionState @p closure of a message callback for @p handle.
@@ -442,16 +468,18 @@ struct NatsSession::Worker {
     std::thread thread;
 
     /// The worker of start number @p startGeneration, writing the files
-    /// <@p fileStem>.log, <@p fileStem>.2.log, …
+    /// <@p fileStem>.log, <@p fileStem>.2.log, …, opened by @p files.
     Worker( NatsSession* owner, const SessionConfig& sessionConfig, int startGeneration,
-            const QString& fileStem )
+            const QString& fileStem, const CaptureSink::FileFactory& files )
         : session( owner )
         , config( sessionConfig )
         , generation( startGeneration )
-        , shared( new Shared( sinkConfig( sessionConfig, fileStem ),
-                              [ owner, startGeneration ]( const CaptureSink::Event& event ) {
-                                  forward( owner, startGeneration, event );
-                              } ) )
+        , shared( new Shared(
+              sinkConfig( sessionConfig, fileStem ),
+              [ owner, startGeneration ]( const CaptureSink::Event& event ) {
+                  forward( owner, startGeneration, event );
+              },
+              files ) )
     {
         // Not shared with the session's, so that wiping it overwrites it.
         const auto& secret = sessionConfig.auth.secret;
@@ -555,6 +583,8 @@ struct NatsSession::Worker {
             return;
         case Event::Status:
             return; // in the file; the transitions say what it changes
+        case Event::WriteFailed:
+            return; // the capture ends on it: its Failed transition says it
         case Event::Error:
         case Event::FileError:
             post( session,
@@ -694,21 +724,27 @@ struct NatsSession::Worker {
 
     /// Why the capture ended.
     enum class End {
-        Stopped,   ///< stop()
-        Closed,    ///< The connection was closed for good.
-        Completed, ///< The replay caught up, not following live.
+        Stopped,     ///< stop()
+        Closed,      ///< The connection was closed for good.
+        Completed,   ///< The replay caught up, not following live.
+        WriteFailed, ///< The file can no longer be written.
     };
 
-    /// Wait until stopped, the connection is closed for good or the replay
-    /// is complete; the sink writes meanwhile.
+    /// Wait until stopped, the connection is closed for good, the replay
+    /// is complete or the file can no longer be written; the sink writes
+    /// meanwhile.
     End awaitEnd()
     {
         std::unique_lock<std::mutex> lock( shared->mutex );
         shared->wake.wait( lock, [ this ] {
-            return shared->stopRequested || shared->closed || shared->replayDone;
+            return shared->stopRequested || shared->closed || shared->replayDone
+                   || !shared->writeFailure.isEmpty();
         } );
         if ( shared->stopRequested ) {
             return End::Stopped;
+        }
+        if ( !shared->writeFailure.isEmpty() ) {
+            return End::WriteFailed;
         }
         return shared->replayDone ? End::Completed : End::Closed;
     }
@@ -850,6 +886,11 @@ struct NatsSession::Worker {
         case End::Closed:
             ended = { Kind::Failed, opened ? QStringLiteral( "connection closed" ) : failure, {} };
             break;
+        case End::WriteFailed: {
+            std::lock_guard<std::mutex> lock( shared->mutex );
+            ended = { Kind::Failed, shared->writeFailure, {} };
+            break;
+        }
         }
         // Its marker is written already if it never opened.
         sink.finish( opened ? ended.detail : QString(), Event::Status );
@@ -861,9 +902,11 @@ struct NatsSession::Worker {
 
 // ── NatsSession ─────────────────────────────────────────────────────────
 
-NatsSession::NatsSession( const SessionConfig& config, const QString& tempRoot, QObject* parent )
+NatsSession::NatsSession( const SessionConfig& config, const QString& tempRoot, QObject* parent,
+                          CaptureSink::FileFactory files )
     : QObject( parent )
     , config_( config )
+    , files_( std::move( files ) )
     , tempDir_( tempDirTemplate( tempRoot ) )
 {
 }
@@ -901,7 +944,7 @@ bool NatsSession::start()
                           ? "replay_" + safeFileName( replay.stream ).left( kMaxFileNameSubjects )
                           : fileNameFor( config_.subscriptions );
     auto worker = std::make_unique<Worker>( this, config_, ++generation_,
-                                            tempDir_.filePath( "nats_" + name ) );
+                                            tempDir_.filePath( "nats_" + name ), files_ );
     auto& sink = worker->shared->sink;
     const bool opened = sink.open();
     filePath_ = sink.fileName();
