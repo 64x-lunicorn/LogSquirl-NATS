@@ -95,7 +95,7 @@ Sessions::Sessions( HostAdapter& host, const QString& tempRoot, QObject* parent,
 {
     // The timer runs in the host's event loop: nothing may throw into it.
     connect( timer_, &QTimer::timeout, this,
-             [ this ] { guarded( host_, "counting the captures", [ this ] { sample(); } ); } );
+             [ this ] { guarded( host_, "counting the sessions", [ this ] { sample(); } ); } );
     timer_->start( kSampleMs );
 }
 
@@ -131,7 +131,7 @@ bool Sessions::start( const ConnectionProfile& profile )
     // may throw into it.
     connect( session, &NatsSession::transitioned, this,
              [ this, name, description ]( const Transition& transition ) {
-                 guarded( host_, "showing a capture", [ this, &name, &description, &transition ] {
+                 guarded( host_, "showing a session", [ this, &name, &description, &transition ] {
                      onTransition( name, transition );
                      if ( transition.kind == Transition::Kind::Failed ) {
                          reportError( host_, description, transition.detail );
@@ -143,7 +143,7 @@ bool Sessions::start( const ConnectionProfile& profile )
              } );
     connect( session, &NatsSession::errorOccurred, this,
              [ this, name, description ]( const QString& message ) {
-                 guarded( host_, "reporting a capture error",
+                 guarded( host_, "reporting a session error",
                           [ this, &name, &description, &message ] {
                               entries_[ name ].status.errorReported( message );
                               Q_EMIT changed( name );

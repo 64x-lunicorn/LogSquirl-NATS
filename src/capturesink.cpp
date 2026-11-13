@@ -96,7 +96,7 @@ public:
             rotateAt_ = bytes_ + maxBytes_;
             return { {},
                      QStringLiteral(
-                         "Cannot start the next file %1: %2; the capture goes on in %3." )
+                         "Cannot start the next file %1: %2; the session goes on in %3." )
                          .arg( path, next->errorString(), fileName() ) };
         }
         Rotation rotation{ path, {} };

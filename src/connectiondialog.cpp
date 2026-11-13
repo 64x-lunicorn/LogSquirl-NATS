@@ -191,7 +191,7 @@ ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sess
         static_cast<int>( kDefaultPendingLimits.bytes / kBytesPerMiB ) );
     for ( auto* spin : { pendingMessagesSpin_, pendingMegabytesSpin_ } ) {
         spin->setToolTip( QStringLiteral(
-            "How much the NATS client holds for the capture while it writes: beyond it, "
+            "How much the NATS client holds for the session while it writes: beyond it, "
             "messages are dropped as a slow consumer, and the file says how many" ) );
     }
     maxFileSpin_->setObjectName( "maxFileMiB" );
@@ -200,7 +200,7 @@ ConnectionDialog::ConnectionDialog( ProfileStore* profiles, const Sessions* sess
     maxFileSpin_->setSuffix( QStringLiteral( " MiB" ) );
     maxFileSpin_->setSpecialValueText( QStringLiteral( "No limit" ) );
     maxFileSpin_->setToolTip(
-        QStringLiteral( "When a file reaches this size, the capture goes on in a new file, "
+        QStringLiteral( "When a file reaches this size, the session goes on in a new file, "
                         "opened in a new tab; a new connection proposes the last one saved" ) );
     replayCheck_->setObjectName( "replay" );
     replayCheck_->setToolTip(
@@ -505,7 +505,7 @@ void ConnectionDialog::saveProfile()
     }
     const char* secret = authMethodInfo( profile.auth.method ).secret;
     if ( sessions_ && sessions_->isRunning( profile.name ) ) {
-        statusLabel_->setText( QStringLiteral( "Connection %1 saved. Its capture runs on with "
+        statusLabel_->setText( QStringLiteral( "Connection %1 saved. Its session runs on with "
                                                "the settings it started with: stop and start it "
                                                "to use the new ones." )
                                    .arg( profile.name ) );

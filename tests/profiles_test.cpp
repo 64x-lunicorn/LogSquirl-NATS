@@ -357,24 +357,42 @@ SCENARIO( "the profile store saves connections and finds them again", "[profiles
 
 SCENARIO( "the profile store does not remove a connection that runs", "[profiles]" )
 {
-    GIVEN( "a store whose connection prod runs, and dev does not" )
+    GIVEN( "a store whose capture prod and replay audit run, and dev does not" )
     {
         QTemporaryDir dir;
         const auto path = dir.filePath( "nats.ini" );
-        ProfileStore store( path, []( const QString& name ) { return name == "prod"; } );
+        ProfileStore store(
+            path, []( const QString& name ) { return name == "prod" || name == "audit"; } );
         REQUIRE( store.upsert( profile( "prod" ) ).isEmpty() );
         REQUIRE( store.upsert( profile( "dev" ) ).isEmpty() );
+        auto audit = profile( "audit" );
+        audit.replayChosen = true;
+        audit.replay.stream = "ORDERS";
+        REQUIRE( store.upsert( audit ).isEmpty() );
 
         WHEN( "prod is removed" )
         {
             ChangeCounter changed( store );
             const auto problem = store.remove( "prod" );
 
-            THEN( "the store refuses, saying to stop it first, and keeps it" )
+            THEN( "the store refuses, saying to stop its capture first, and keeps it" )
             {
                 REQUIRE( problem == "The connection prod is capturing: stop it to delete it." );
                 REQUIRE( changed.count() == 0 );
-                REQUIRE( namesOf( ProfileStore( path ).list() ) == QStringList{ "prod", "dev" } );
+                REQUIRE( namesOf( ProfileStore( path ).list() )
+                         == QStringList{ "prod", "dev", "audit" } );
+            }
+        }
+
+        WHEN( "audit is removed" )
+        {
+            const auto problem = store.remove( "audit" );
+
+            THEN( "the store refuses, saying to stop its replay first, and keeps it" )
+            {
+                REQUIRE( problem == "The connection audit is replaying: stop it to delete it." );
+                REQUIRE( namesOf( ProfileStore( path ).list() )
+                         == QStringList{ "prod", "dev", "audit" } );
             }
         }
 
@@ -383,7 +401,7 @@ SCENARIO( "the profile store does not remove a connection that runs", "[profiles
             THEN( "it goes" )
             {
                 REQUIRE( store.remove( "dev" ).isEmpty() );
-                REQUIRE( namesOf( store.list() ) == QStringList{ "prod" } );
+                REQUIRE( namesOf( store.list() ) == QStringList{ "prod", "audit" } );
             }
         }
     }

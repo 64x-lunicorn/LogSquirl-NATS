@@ -143,7 +143,7 @@ After installing, restart LogSquirl or re-scan via *Plugins → Manage Plugins�
      UTF-8 are written, as hex (256 by default).
    - **Pending at most** — how many messages and MiB nats.c holds for each
      subject before it drops as a slow consumer (1,000,000 and 512 MiB).
-   - **New file at** — the size, in MiB, at which the capture goes on in a
+   - **New file at** — the size, in MiB, at which the session goes on in a
      new file, opened in a new tab and noted in LogSquirl's log (256 MiB;
      *No limit* turns it off). A message line is never split. A new
      connection proposes the last one saved.

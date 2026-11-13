@@ -416,9 +416,10 @@ tile.
   (`QMessageBox`), then deletes through the store, not the dialog; it is
   hidden while the connection connects or runs, and the store refuses to
   delete a running connection too. When the store cannot delete, a warning
-  says why (it runs, it is no longer saved, the file could not be written).
+  says why (it is capturing or replaying, as it is saved; it is no longer
+  saved; the file could not be written).
 - **Edit** while the connection runs: the tile shows the saved settings at
-  once, the capture runs on with those it started with (the dialog says
+  once, the session runs on with those it started with (the dialog says
   so) until it is stopped and started again. A connection saved under
   another name is another connection, with a tile of its own.
 
@@ -553,7 +554,7 @@ with the size limit saved last. It reads the file on each call, and emits
 `changed()` after each save or delete, which the dialog's list and the tab
 follow. `profiles_test.cpp` (`[profiles]`) tests it on temporary files:
 round trips of every setting, the order, replacing, renaming, removing, a
-running connection refused, the remembered size limit, and files as 0.1.0
+running capture or replay refused, each named so, the remembered size limit, and files as 0.1.0
 and the version before the store wrote them, byte for byte.
 
 The tests (`[auth]`, part of the server tests) are at the main seam,

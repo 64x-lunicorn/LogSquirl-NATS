@@ -178,8 +178,9 @@ void ConnectionTile::setState( TileState state )
 {
     active_ = state == TileState::Connecting || state == TileState::Running;
     startStop_->setText( active_ ? QStringLiteral( "■ Stop" ) : QStringLiteral( "▶ Start" ) );
-    startStop_->setToolTip( active_ ? QStringLiteral( "Stop the capture; its tab keeps the file" )
-                                    : QStringLiteral( "Connect, and capture into a new tab" ) );
+    startStop_->setToolTip(
+        active_ ? QStringLiteral( "Stop the session; its tab keeps the file" )
+                : QStringLiteral( "Connect, and write the session into a new tab" ) );
     delete_->setVisible( !active_ );
 
     const auto* name = stateName( state );

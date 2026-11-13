@@ -139,9 +139,10 @@ SidebarWidget::SidebarWidget( ProfileStore* profiles, Sessions* sessions, QWidge
     auto* newConnection = new QPushButton( QStringLiteral( "New connection…" ), this );
     newConnection->setObjectName( "newConnection" );
     newConnection->setToolTip(
-        QStringLiteral( "Set up a NATS connection and its subjects, and save it as a tile" ) );
+        QStringLiteral( "Set up a NATS connection, the subjects it captures or the stream it "
+                        "replays, and save it as a tile" ) );
     stopAll_->setObjectName( "stopAll" );
-    stopAll_->setToolTip( QStringLiteral( "Stop every capture; their tabs keep the files" ) );
+    stopAll_->setToolTip( QStringLiteral( "Stop every session; their tabs keep the files" ) );
     empty_->setObjectName( "empty" );
     empty_->setWordWrap( true );
 
@@ -173,10 +174,10 @@ SidebarWidget::SidebarWidget( ProfileStore* profiles, Sessions* sessions, QWidge
     connect( newConnection, &QPushButton::clicked, this, &SidebarWidget::newConnectionRequested );
     // Every slot runs in the host's event loop: nothing may throw into it.
     connect( stopAll_, &QPushButton::clicked, this, [ this ] {
-        guarded( "stopping every capture", [ this ] { sessions_->stopAll( true ); } );
+        guarded( "stopping every session", [ this ] { sessions_->stopAll( true ); } );
     } );
     connect( sessions_, &Sessions::changed, this, [ this ]( const QString& name ) {
-        guarded( "showing a capture", [ this, &name ] {
+        guarded( "showing a session", [ this, &name ] {
             if ( auto* tile = tileByName_.value( name ) ) {
                 updateTile( tile );
             }
@@ -204,10 +205,10 @@ void SidebarWidget::reload()
         tile->setSummary( summaryOf( profile ) );
         const auto name = profile.name;
         connect( tile, &ConnectionTile::startClicked, this, [ this, name ] {
-            guarded( "starting a capture", [ this, &name ] { start( name ); } );
+            guarded( "starting a session", [ this, &name ] { start( name ); } );
         } );
         connect( tile, &ConnectionTile::stopClicked, this, [ this, name ] {
-            guarded( "stopping a capture", [ this, &name ] { sessions_->stop( name ); } );
+            guarded( "stopping a session", [ this, &name ] { sessions_->stop( name ); } );
         } );
         connect( tile, &ConnectionTile::editClicked, this,
                  [ this, name ] { Q_EMIT editRequested( name ); } );

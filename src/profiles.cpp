@@ -375,8 +375,11 @@ QString ProfileStore::upsert( const ConnectionProfile& profile )
 QString ProfileStore::remove( const QString& name )
 {
     if ( isRunning_ && isRunning_( name ) ) {
-        return QStringLiteral( "The connection %1 is capturing: stop it to delete it." )
-            .arg( name );
+        // As saved: a replay saved as a capture while it runs is named a capture.
+        const auto running = find( name );
+        return QStringLiteral( "The connection %1 is %2: stop it to delete it." )
+            .arg( name, running && running->replay.enabled() ? QStringLiteral( "replaying" )
+                                                             : QStringLiteral( "capturing" ) );
     }
     auto profiles = list();
     if ( profiles.removeIf( [ & ]( const auto& p ) { return p.name == name; } ) == 0 ) {
