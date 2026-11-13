@@ -414,6 +414,7 @@ graph TD
         P[plugin.cpp<br/>get_info / init /<br/>shutdown / configure]
         T[SidebarWidget<br/>one ConnectionTile<br/>per saved connection]
         D[ConnectionDialog<br/>edits and saves<br/>connections]
+        PS[ProfileStore<br/>nats.ini]
         SS[Sessions<br/>one per connection]
         S1[NatsSession #1<br/>orders.>]
         S2[NatsSession #2<br/>jobs.* workers]
@@ -423,7 +424,9 @@ graph TD
     P -- "register_sidebar_tab NATS" --> T
     T --> SBT
     T -- "New connection… / Edit" --> D
-    D -- "saves nats.ini" --> T
+    D -- saves --> PS
+    T -- Delete --> PS
+    PS -- changed --> T
     T -- "Start / Stop" --> SS
     SS -- state, counts --> T
     SS -- starts --> S1

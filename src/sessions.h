@@ -23,61 +23,68 @@
  *
  * Sessions starts a NatsSession for a profile (profiles.h), opens its file
  * in a followed tab, opens each next file of the capture when it rotates,
- * and keeps what the sidebar shows of it: its state, the server it is
- * connected to, its file and its counts.  A connection runs one session at
- * a time; several connections run side by side, each with its own
+ * and is the one owner of each connection's status (sessionstatus.h): the
+ * state its session's transitions lead to, the server it is connected to,
+ * its file, its counts and its msgs/s.  A connection runs one session at a
+ * time; several connections run side by side, each with its own
  * connection, file and tab.
+ *
+ * The counts are sampled once a second (sample()), and changed() says so
+ * when they moved; a transition is announced at once, once.  The rate is
+ * computed on the clock Sessions was given: a test gives its own.
  *
  * What a session did stays known after it was stopped or failed, until the
  * connection is started again: the sidebar shows why it failed and what it
  * captured.
  *
- * Starting, stopping (with notify) and errors are host notifications, as
- * in the Serial plugin; stopAll() (shutdown) notifies nothing.  A session's
- * file is kept for its tab when the session ends; the plugin removes the
- * temporary files when LogSquirl quits.
+ * Sessions reaches the host only through the host adapter it was created
+ * with (hostadapter.h): the plugin's (pluginHost(), plugin.h), or a test's
+ * in-memory one; never through the plugin's global state.  Starting,
+ * stopping (with notify) and errors are host notifications, as in the
+ * Serial plugin; stopAll() (shutdown) notifies nothing.  A rotation opens a
+ * followed tab and writes to the host log; so does a failure, and a
+ * certificate not verified (insecure).  A session's file is kept for its
+ * tab when the session ends; the plugin removes the temporary files when
+ * LogSquirl quits.  Each session writes below the temporary root Sessions
+ * was created with: the plugin's (tempRoot(), plugin.h).
  *
  * OWNERSHIP
  * ─────────
  * Created by logsquirl_plugin_init(), deleted by logsquirl_plugin_shutdown()
- * after stopAll().  The running NatsSessions are its children.
+ * after stopAll().  The running NatsSessions are its children.  The host
+ * adapter is not owned: it outlives Sessions.
  */
 
 #pragma once
+
+#include "sessionstatus.h"
 
 #include <QHash>
 #include <QObject>
 #include <QString>
 
+#include <functional>
+
+class QTimer;
+
 namespace nats_monitor {
 
+class HostAdapter;
 class NatsSession;
 struct ConnectionProfile;
-
-/// Where a connection's session is.
-enum class SessionState {
-    Stopped,    ///< Never started, stopped by the user, or a replay complete.
-    Connecting, ///< Started and not connected yet, or reconnecting.
-    Running,    ///< Connected and subscribed.
-    Failed,     ///< Ended on its own: it could not start or connect, or was closed for good.
-};
-
-/// What a connection's session does, or did last.
-struct SessionStatus {
-    SessionState state = SessionState::Stopped;
-    QString detail;   ///< The last connection event, or why it failed.
-    QString server;   ///< The server it is connected to (redacted); empty while not connected.
-    QString filePath; ///< The file it writes, or wrote last; empty if never started.
-    int files = 0;    ///< How many files the capture has written: 1 + its rotations.
-    quint64 received = 0;
-    quint64 dropped = 0;
-};
 
 class Sessions : public QObject {
     Q_OBJECT
 
 public:
-    explicit Sessions( QObject* parent = nullptr );
+    /// A monotonic clock in milliseconds, which the rate is computed on.
+    using Clock = std::function<qint64()>;
+
+    /// Sessions that reach the host through @p host, whose temporary
+    /// directories go below @p tempRoot (tempdirs.h), computing the rate on
+    /// @p clock (the steady clock if none).
+    Sessions( HostAdapter& host, const QString& tempRoot, QObject* parent = nullptr,
+              Clock clock = {} );
     ~Sessions() override;
 
     /**
@@ -103,24 +110,40 @@ public:
     /// Whether some session runs.
     bool anyRunning() const;
 
-    /// What the session of the connection @p name does, or did last.
+    /// What the session of the connection @p name does, or did last, with
+    /// the counts and the rate of the last sample.
     SessionStatus status( const QString& name ) const;
 
+    /// Sample the counts of each running session now, on the clock; called
+    /// once a second.  changed() for each whose counts or rate moved.
+    void sample();
+
 Q_SIGNALS:
-    /// The session of the connection @p name started, changed state, or ended.
+    /// The status of the connection @p name changed: a transition of its
+    /// session, the next file, an error, or its counts.
     void changed( const QString& name );
 
 private:
     struct Entry {
         NatsSession* session = nullptr; ///< While it runs.
-        SessionStatus status;
+        ConnectionStatus status;
     };
 
-    /// Let go of the session of @p name, which was stopped or ended on its
-    /// own: keep its file and counts, delete it later, and set @p state and,
-    /// unless empty, @p detail.
-    void release( const QString& name, SessionState state, const QString& detail = {} );
+    /// Apply @p transition, which the session of @p name reported; an end
+    /// lets go of the session.
+    void onTransition( const QString& name, const Transition& transition );
 
+    /// Sample the counts of the session of @p entry, if it runs.
+    void sampleCounts( Entry& entry );
+
+    /// Let go of the session of @p entry, which ended: keep its counts and
+    /// its file (if it wrote one), and delete it later.
+    void release( Entry& entry );
+
+    HostAdapter& host_;      ///< Not owned.
+    const QString tempRoot_; ///< Given to each session it starts.
+    const Clock clock_;
+    QTimer* timer_;
     QHash<QString, Entry> entries_;
 };
 

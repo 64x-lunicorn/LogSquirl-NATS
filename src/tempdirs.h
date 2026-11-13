@@ -22,10 +22,11 @@
  * @brief The plugin's temporary directories, named after the process.
  *
  * A session without a save path writes into a directory
- * "logsquirl-nats-<pid>-XXXXXX" in the temporary root.  The process ID in the name lets a plugin
- * instance find the directories of earlier instances in the same LogSquirl process (after the
- * plugin was disabled, updated and enabled again), and those of LogSquirl processes that ended
- * without removing theirs.
+ * "logsquirl-nats-<pid>-XXXXXX" in the temporary root, which the plugin chooses (tempRoot(),
+ * plugin.h) and hands to its sessions.  The process ID in the name lets a plugin instance find
+ * the directories of earlier instances in the same LogSquirl process (after the plugin was
+ * disabled, updated and enabled again), and those of LogSquirl processes that ended without
+ * removing theirs.
  */
 
 #pragma once
@@ -33,9 +34,6 @@
 #include <QString>
 
 namespace nats_monitor {
-
-/// The directory the temporary directories are created in.
-QString tempRoot();
 
 /// The QTemporaryDir template for a new temporary directory of this process.
 QString tempDirTemplate( const QString& root );

@@ -30,8 +30,13 @@ find_package(Qt6 REQUIRED COMPONENTS Network)
 add_executable(logsquirl_nats_tests
     tests_main.cpp
     natsserver.cpp
+    logformat.cpp
+    capture.cpp
+    capture_test.cpp
+    capturesink_test.cpp
     plugininfo_test.cpp
     plugin_test.cpp
+    profiles_test.cpp
     library_test.cpp
     natsserver_test.cpp
     lineformat_test.cpp
@@ -39,6 +44,10 @@ add_executable(logsquirl_nats_tests
     logformat_test.cpp
     natssession_test.cpp
     replay_test.cpp
+    replayplan_test.cpp
+    sessions_test.cpp
+    sessionstatus_test.cpp
+    sidebar_test.cpp
     permissions_test.cpp
     auth_test.cpp
 )

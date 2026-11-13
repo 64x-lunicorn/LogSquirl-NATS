@@ -46,15 +46,20 @@ qt_standard_project_setup()
 # ── Plugin shared library ─────────────────────────────────────────────────
 set(LOGSQUIRL_NATS_SOURCES
     src/plugin.cpp
+    src/capturesink.cpp
     src/connectiondialog.cpp
     src/connectiontile.cpp
+    src/hostadapter.cpp
     src/lineformat.cpp
     src/natsoptions.cpp
     src/natssession.cpp
     src/nkey.cpp
     src/profiles.cpp
     src/replay.cpp
+    src/sessionconfig.cpp
     src/sessions.cpp
+    src/sessionstatus.cpp
+    src/streams.cpp
     src/sidebarwidget.cpp
     src/subjects.cpp
     src/tempdirs.cpp

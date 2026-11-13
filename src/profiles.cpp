@@ -19,7 +19,7 @@
 
 /**
  * @file profiles.cpp
- * @brief Implementation of the connection profiles.
+ * @brief Implementation of the connection profiles and their store.
  */
 
 #include "profiles.h"
@@ -30,7 +30,9 @@
 #include "subjects.h"
 
 #include <QSettings>
+#include <QUrl>
 
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <utility>
@@ -40,6 +42,10 @@ namespace nats_monitor {
 namespace {
 
 constexpr const char* kProfiles = "profiles";
+
+/// Where the size limit saved last is remembered, outside the profiles:
+/// 0.1.0 had it there already.
+constexpr const char* kMaxFileMiBKey = "capture/maxFileMiB";
 
 /// The text settings of TLS, by their keys in the group "tls".
 const std::array<std::pair<const char*, QString TlsConfig::*>, 4> kTlsTexts{ {
@@ -196,57 +202,73 @@ bool ConnectionProfile::usesTls() const
     return nats_monitor::usesTls( url, tls.enabled );
 }
 
-std::optional<ConnectionProfile> findProfile( const QString& settingsFile, const QString& name )
-{
-    for ( const auto& profile : loadProfiles( settingsFile ) ) {
-        if ( profile.name == name ) {
-            return profile;
-        }
-    }
-    return std::nullopt;
-}
+namespace {
 
-QString startProblem( const ConnectionProfile& profile )
+/// The rules of startProblem() on @p config, whose subscriptions were made
+/// of a text with the error @p subjectsError (empty if none, or no text).
+QString firstStartProblem( const SessionConfig& config, const QString& subjectsError )
 {
-    if ( profile.url.isEmpty() ) {
+    if ( config.url.isEmpty() ) {
         return QStringLiteral( "Enter the server URL." );
     }
-    if ( profile.replay.enabled() ) {
-        if ( const auto problem = replayProblem( profile.replay ); !problem.isEmpty() ) {
+    if ( config.replay.enabled() ) {
+        if ( const auto problem = replayProblem( config.replay ); !problem.isEmpty() ) {
             return problem;
-        }
-        const auto filter = profile.replay.filterSubject;
-        if ( !filter.isEmpty() ) {
-            const auto parsed = parseSubscriptions( filter );
-            if ( !parsed.error.isEmpty() ) {
-                return parsed.error;
-            }
-            if ( parsed.subscriptions.size() != 1
-                 || !parsed.subscriptions.front().queueGroup.isEmpty() ) {
-                return QStringLiteral( "Enter one subject to replay, or none for all." );
-            }
         }
     }
     else {
-        const auto subjects = parseSubscriptions( profile.subjects );
-        if ( !subjects.error.isEmpty() ) {
-            return subjects.error;
+        if ( !subjectsError.isEmpty() ) {
+            return subjectsError;
         }
-        if ( subjects.subscriptions.isEmpty() ) {
+        const auto blank = []( const Subscription& s ) { return s.subject.trimmed().isEmpty(); };
+        if ( config.subscriptions.isEmpty()
+             || std::any_of( config.subscriptions.begin(), config.subscriptions.end(), blank ) ) {
             return QStringLiteral( "Enter the subject to capture." );
         }
     }
-    const auto& method = authMethodInfo( profile.auth.method );
-    if ( method.takesUser && profile.auth.user.isEmpty() ) {
+    const auto& method = authMethodInfo( config.auth.method );
+    if ( method.takesUser && config.auth.user.isEmpty() ) {
         return QStringLiteral( "Enter the user name." );
     }
-    if ( method.file && profile.auth.file.isEmpty() ) {
+    if ( method.file && config.auth.file.isEmpty() ) {
         return QStringLiteral( "Choose the %1." ).arg( QLatin1String( method.file ) );
     }
-    if ( profile.usesTls() && profile.tls.certFile.isEmpty() != profile.tls.keyFile.isEmpty() ) {
+    if ( usesTls( config.url, config.tls.enabled )
+         && config.tls.certFile.isEmpty() != config.tls.keyFile.isEmpty() ) {
         return QStringLiteral( "Choose both the client certificate and its key, or neither." );
     }
     return {};
+}
+
+} // namespace
+
+QString startProblem( const ConnectionProfile& profile )
+{
+    return firstStartProblem( sessionConfig( profile ),
+                              parseSubscriptions( profile.subjects ).error );
+}
+
+QString startProblem( const SessionConfig& config )
+{
+    return firstStartProblem( config, QString() );
+}
+
+QString saveProblem( const ConnectionProfile& profile )
+{
+    if ( profile.name.isEmpty() ) {
+        return QStringLiteral( "Enter a name for the connection to save." );
+    }
+    if ( const auto problem = replaySaveProblem( profile.replayChosen, profile.replay );
+         !problem.isEmpty() ) {
+        return problem;
+    }
+    for ( const auto& url : profile.url.split( ',' ) ) {
+        if ( !QUrl( url.trimmed() ).userInfo().isEmpty() ) {
+            return QStringLiteral( "The URL holds credentials, which a connection never saves: "
+                                   "enter them under Authentication instead." );
+        }
+    }
+    return startProblem( profile );
 }
 
 SessionConfig sessionConfig( const ConnectionProfile& profile )
@@ -265,13 +287,25 @@ SessionConfig sessionConfig( const ConnectionProfile& profile )
     return config;
 }
 
-QList<ConnectionProfile> loadProfiles( const QString& settingsFile )
+ProfileStore::ProfileStore( const QString& settingsFile, IsRunning isRunning, QObject* parent )
+    : QObject( parent )
+    , settingsFile_( settingsFile )
+    , isRunning_( std::move( isRunning ) )
+{
+}
+
+QString ProfileStore::settingsFile() const
+{
+    return settingsFile_;
+}
+
+QList<ConnectionProfile> ProfileStore::list() const
 {
     QList<ConnectionProfile> profiles;
-    if ( settingsFile.isEmpty() ) {
+    if ( settingsFile_.isEmpty() ) {
         return profiles;
     }
-    QSettings settings( settingsFile, QSettings::IniFormat );
+    QSettings settings( settingsFile_, QSettings::IniFormat );
     const int count = settings.beginReadArray( kProfiles );
     for ( int i = 0; i < count; ++i ) {
         settings.setArrayIndex( i );
@@ -285,18 +319,84 @@ QList<ConnectionProfile> loadProfiles( const QString& settingsFile )
         profile.tls = readTls( settings );
         readCapture( settings, profile );
         profile.replay = readReplay( settings );
+        profile.replayChosen = profile.replay.enabled();
         profiles << profile;
     }
     settings.endArray();
     return profiles;
 }
 
-bool saveProfiles( const QString& settingsFile, const QList<ConnectionProfile>& profiles )
+std::optional<ConnectionProfile> ProfileStore::find( const QString& name ) const
 {
-    if ( settingsFile.isEmpty() ) {
+    for ( const auto& profile : list() ) {
+        if ( profile.name == name ) {
+            return profile;
+        }
+    }
+    return std::nullopt;
+}
+
+ConnectionProfile ProfileStore::newProfile() const
+{
+    ConnectionProfile profile;
+    profile.url = QString::fromLatin1( kDefaultUrl );
+    if ( !settingsFile_.isEmpty() ) {
+        const QSettings settings( settingsFile_, QSettings::IniFormat );
+        profile.maxFileMiB
+            = readInt( settings, kMaxFileMiBKey, 0, kMaxFileMiBLimit, kDefaultMaxFileMiB );
+    }
+    return profile;
+}
+
+QString ProfileStore::upsert( const ConnectionProfile& profile )
+{
+    if ( const auto problem = saveProblem( profile ); !problem.isEmpty() ) {
+        return problem;
+    }
+    auto profiles = list();
+    const auto existing = std::find_if( profiles.begin(), profiles.end(),
+                                        [ & ]( const auto& p ) { return p.name == profile.name; } );
+    if ( existing != profiles.end() ) {
+        *existing = profile;
+    }
+    else {
+        profiles << profile;
+    }
+    if ( !write( profiles, profile.maxFileMiB ) ) {
+        return QStringLiteral( "The connection %1 could not be saved to %2." )
+            .arg( profile.name, settingsFile_ );
+    }
+    Q_EMIT changed();
+    return {};
+}
+
+QString ProfileStore::remove( const QString& name )
+{
+    if ( isRunning_ && isRunning_( name ) ) {
+        return QStringLiteral( "The connection %1 is capturing: stop it to delete it." )
+            .arg( name );
+    }
+    auto profiles = list();
+    if ( profiles.removeIf( [ & ]( const auto& p ) { return p.name == name; } ) == 0 ) {
+        return QStringLiteral( "There is no saved connection %1." ).arg( name );
+    }
+    if ( !write( profiles, std::nullopt ) ) {
+        return QStringLiteral( "The connection %1 could not be deleted from %2." )
+            .arg( name, settingsFile_ );
+    }
+    Q_EMIT changed();
+    return {};
+}
+
+bool ProfileStore::write( const QList<ConnectionProfile>& profiles, std::optional<int> maxFileMiB )
+{
+    if ( settingsFile_.isEmpty() ) {
         return false;
     }
-    QSettings settings( settingsFile, QSettings::IniFormat );
+    QSettings settings( settingsFile_, QSettings::IniFormat );
+    if ( maxFileMiB ) {
+        settings.setValue( kMaxFileMiBKey, *maxFileMiB );
+    }
     settings.remove( kProfiles );
     settings.beginWriteArray( kProfiles, static_cast<int>( profiles.size() ) );
     for ( int i = 0; i < profiles.size(); ++i ) {

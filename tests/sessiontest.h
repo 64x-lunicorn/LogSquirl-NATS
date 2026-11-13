@@ -19,8 +19,11 @@
 
 /**
  * @file sessiontest.h
- * @brief What tests of a capture session use: waiting, reading the
- *        session's file, and publishing with nats.c.
+ * @brief What tests of a capture session use: its configuration, its
+ *        transitions, waiting, reading the session's file, and publishing
+ *        with nats.c.
+ *
+ * The lines read here are read into fields by the line reader, capture.h.
  */
 
 #pragma once
@@ -31,18 +34,54 @@
 
 #include <catch2/catch.hpp>
 
+#include "natssession.h"
+#include "sessionconfig.h"
+
 #include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QString>
 #include <QStringList>
 #include <QThread>
 
 #include <functional>
+#include <memory>
 #include <utility>
 #include <vector>
 
 namespace nats_test {
+
+/// The temporary root a test's NatsSession is given to write below: the
+/// system's, as the plugin's default.
+inline QString sessionTempRoot()
+{
+    return QDir::tempPath();
+}
+
+/// The configuration of a session on @p url that subscribes to each of
+/// @p subjects, in no queue group, the other settings the defaults; with no
+/// subject, it is to be given its subscriptions or a replay.
+inline nats_monitor::SessionConfig sessionConfig( const QString& url,
+                                                  const QStringList& subjects = {} )
+{
+    nats_monitor::SessionConfig config;
+    config.url = url;
+    for ( const auto& subject : subjects ) {
+        config.subscriptions << nats_monitor::Subscription{ subject, {} };
+    }
+    return config;
+}
+
+/// The configuration of a session on @p url that replays @p stream from its
+/// start (ReplayConfig's defaults).
+inline nats_monitor::SessionConfig replayConfig( const QString& url, const QString& stream )
+{
+    auto config = sessionConfig( url );
+    config.replay.stream = stream;
+    return config;
+}
 
 /// Run the event loop until @p condition holds or @p timeoutMs passed;
 /// whether it holds.
@@ -60,6 +99,56 @@ bool waitFor( Condition condition, int timeoutMs = 3000 )
     }
     return true;
 }
+
+/// The transitions a session reports, in order, from when it is made.
+class Transitions {
+public:
+    using Kind = nats_monitor::Transition::Kind;
+
+    explicit Transitions( nats_monitor::NatsSession& session )
+    {
+        QObject::connect( &session, &nats_monitor::NatsSession::transitioned,
+                          [ list = list_ ]( const nats_monitor::Transition& transition ) {
+                              list->append( transition );
+                          } );
+    }
+
+    const QList<nats_monitor::Transition>& all() const
+    {
+        return *list_;
+    }
+
+    /// Their kinds, in order.
+    QList<Kind> kinds() const
+    {
+        QList<Kind> kinds;
+        for ( const auto& transition : *list_ ) {
+            kinds << transition.kind;
+        }
+        return kinds;
+    }
+
+    /// How many of @p kind.
+    int count( Kind kind ) const
+    {
+        return static_cast<int>( kinds().count( kind ) );
+    }
+
+    /// The last of @p kind; a default one if none.
+    nats_monitor::Transition last( Kind kind ) const
+    {
+        for ( auto it = list_->crbegin(); it != list_->crend(); ++it ) {
+            if ( it->kind == kind ) {
+                return *it;
+            }
+        }
+        return {};
+    }
+
+private:
+    std::shared_ptr<QList<nats_monitor::Transition>> list_
+        = std::make_shared<QList<nats_monitor::Transition>>();
+};
 
 /// Run the event loop for @p ms milliseconds.
 inline void settle( int ms )
@@ -85,6 +174,43 @@ inline QStringList readLines( const QString& path )
         lines << QString::fromUtf8( line );
     }
     return lines;
+}
+
+/// The files of the capture whose first file is @p first, in order:
+/// nats_<name>.log, nats_<name>.2.log, nats_<name>.3.log, …
+inline QStringList captureFiles( const QString& first )
+{
+    QStringList files;
+    if ( !QFileInfo( first ).isFile() ) {
+        return files;
+    }
+    files << first;
+    auto stem = first;
+    stem.chop( 4 ); // ".log"
+    for ( int n = 2;; ++n ) {
+        const auto next = QStringLiteral( "%1.%2.log" ).arg( stem ).arg( n );
+        if ( !QFileInfo( next ).isFile() ) {
+            return files;
+        }
+        files << next;
+    }
+}
+
+/// The size of the file at @p path in bytes; 0 if there is none.
+inline qint64 sizeOf( const QString& path )
+{
+    return QFileInfo( path ).size();
+}
+
+/// Whether the file at @p path is empty or ends with a line terminator.
+inline bool endsWithNewline( const QString& path )
+{
+    QFile file( path );
+    if ( !file.open( QIODevice::ReadOnly ) ) {
+        return false;
+    }
+    const auto content = file.readAll();
+    return content.isEmpty() || content.endsWith( '\n' );
 }
 
 /// A nats.c connection that publishes test messages.
@@ -299,3 +425,14 @@ private:
 };
 
 } // namespace nats_test
+
+/// A transition as a failed assertion shows it: {kind, "detail", "server"}.
+template <>
+struct Catch::StringMaker<nats_monitor::Transition> {
+    static std::string convert( const nats_monitor::Transition& transition )
+    {
+        return "{" + std::to_string( static_cast<int>( transition.kind ) ) + ", \""
+               + transition.detail.toStdString() + "\", \"" + transition.server.toStdString()
+               + "\"}";
+    }
+};

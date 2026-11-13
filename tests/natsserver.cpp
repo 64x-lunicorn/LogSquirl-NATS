@@ -152,8 +152,21 @@ NatsServer::NatsServer( const NatsServerOptions& options )
     // The configuration file first: the command line overrides what it says
     // about the address and port.
     QStringList arguments;
+    if ( !options.configFile.isEmpty() && !options.configText.isEmpty() ) {
+        throw std::runtime_error( "nats-server: a configuration file or a text, not both" );
+    }
     if ( !options.configFile.isEmpty() ) {
         arguments << "-c" << options.configFile;
+    }
+    if ( !options.configText.isEmpty() ) {
+        const auto path = d->dir.filePath( "server.conf" );
+        QFile file( path );
+        if ( !file.open( QIODevice::WriteOnly | QIODevice::Text )
+             || file.write( options.configText.toUtf8() ) < 0 ) {
+            throw std::runtime_error( "cannot write the nats-server configuration "
+                                      + path.toStdString() );
+        }
+        arguments << "-c" << path;
     }
     arguments << "-a" << kHost << "-p"
               << ( options.port > 0 ? QString::number( options.port ) : QStringLiteral( "-1" ) )

@@ -29,16 +29,18 @@
 
 #pragma once
 
+#include "hostadapter.h"
 #include "logsquirl_plugin_api.h"
 
 #include <QPointer>
 #include <QString>
 
-#include <exception>
+#include <utility>
 
 namespace nats_monitor {
 
 class ConnectionDialog;
+class ProfileStore;
 class Sessions;
 class SidebarWidget;
 
@@ -52,6 +54,7 @@ struct PluginState {
     const LogSquirlHostApi* api = nullptr; ///< Host API function table.
     void* handle = nullptr;                ///< Opaque plugin instance handle.
     Sessions* sessions = nullptr;          ///< The captures, created by init.
+    ProfileStore* profiles = nullptr;      ///< The saved connections (nats.ini), created by init.
     ConnectionDialog* dialog = nullptr;    ///< The connection dialog, created by init.
     /// The sidebar tab, created by init.  Weak: the host parents it, and a
     /// host window that goes first takes it along.
@@ -69,32 +72,33 @@ extern PluginState g_state;
 void hostLog( int level, const QString& message );
 
 /// The plugin's settings file, nats.ini in its configuration directory;
-/// empty without a host to say where that is.
+/// empty without a host to say where that is.  Read by init, which opens
+/// the profile store (profiles.h) on it: only the store reads and writes it.
 QString settingsFile();
+
+/// The directory the plugin's temporary directories go in (tempdirs.h):
+/// PluginState::tempRoot, or the system's.  Read by init, which hands it to
+/// Sessions, and by shutdown, which removes them.
+QString tempRoot();
 
 /// Show a host notification (no-op if not initialised).
 /// The host decodes the message as UTF-8.
 void hostNotify( const QString& message );
 
+/// The plugin's host adapter (hostadapter.h), which init gives Sessions: it
+/// calls the host API through PluginState, as hostLog() and hostNotify() do,
+/// and does nothing before init or after shutdown.
+HostAdapter& pluginHost();
+
 /// Log that work for the host failed: @p what, because of @p reason.
 void logFailure( const char* what, const char* reason ) noexcept;
 
-/// Run @p work for the host, logging instead of throwing: the host is C, and
-/// an exception escaping into it (from an entry point, a host callback or a
-/// slot its event loop calls) would terminate LogSquirl.  Returns false if
-/// it threw.
+/// Run @p work for the host, logging to the plugin's host instead of
+/// throwing (guarded(), hostadapter.h).  Returns false if it threw.
 template <typename Work>
 bool guarded( const char* what, Work&& work ) noexcept
 {
-    try {
-        work();
-        return true;
-    } catch ( const std::exception& e ) {
-        logFailure( what, e.what() );
-    } catch ( ... ) {
-        logFailure( what, "unknown exception" );
-    }
-    return false;
+    return guarded( pluginHost(), what, std::forward<Work>( work ) );
 }
 
 } // namespace nats_monitor

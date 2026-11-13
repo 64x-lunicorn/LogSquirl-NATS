@@ -33,25 +33,30 @@
 
 #include <catch2/catch.hpp>
 
+#include "capture.h"
 #include "natsserver.h"
 #include "natssession.h"
-#include "replay.h"
 #include "sessiontest.h"
+#include "streams.h"
 
-#include <QFile>
-#include <QTemporaryDir>
-
-#include <memory>
+#include <algorithm>
 
 using nats_monitor::AuthMethod;
 using nats_monitor::NatsSession;
 using nats_monitor::SessionConfig;
+using nats_test::Capture;
+using nats_test::ConfiguredServer;
 using nats_test::JetStream;
-using nats_test::NatsServer;
-using nats_test::NatsServerOptions;
+using nats_test::LineFields;
+using nats_test::liveFields;
 using nats_test::Publisher;
-using nats_test::readLines;
+using nats_test::replayConfig;
+using nats_test::sessionConfig;
+using nats_test::sessionTempRoot;
+using nats_test::Transitions;
 using nats_test::waitFor;
+using nats_test::withJetStream;
+using Kind = nats_monitor::Transition::Kind;
 
 namespace {
 
@@ -80,32 +85,6 @@ authorization {
 }
 )";
 
-/// A server with JetStream and the users of kConfig.
-class PermissionsServer {
-public:
-    PermissionsServer()
-    {
-        REQUIRE( dir_.isValid() );
-        NatsServerOptions options;
-        options.jetStream = true;
-        options.configFile = dir_.filePath( "server.conf" );
-        QFile file( options.configFile );
-        REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::Text ) );
-        file.write( kConfig );
-        file.close();
-        server_ = std::make_unique<NatsServer>( options );
-    }
-
-    QString url() const
-    {
-        return server_->url();
-    }
-
-private:
-    QTemporaryDir dir_;
-    std::unique_ptr<NatsServer> server_;
-};
-
 /// Log in as @p user, whose password is the same.
 void logInAs( SessionConfig& config, const char* user )
 {
@@ -114,23 +93,13 @@ void logInAs( SessionConfig& config, const char* user )
     config.auth.secret = QString::fromLatin1( user );
 }
 
-/// The lines of @p lines that are not markers.
-QStringList messageLines( const QStringList& lines )
+/// Whether a marker of @p capture mentions a permissions violation (nats.c
+/// reports one as an asynchronous error, written as an error: marker).
+bool hasViolation( const Capture& capture )
 {
-    QStringList messages;
-    for ( const auto& line : lines ) {
-        if ( !line.contains( QLatin1String( " $NATS-MONITOR " ) ) ) {
-            messages << line;
-        }
-    }
-    return messages;
-}
-
-/// Whether some line of @p lines contains @p text, case-insensitively.
-bool anyOf( const QStringList& lines, const QString& text )
-{
-    return std::any_of( lines.begin(), lines.end(), [ &text ]( const QString& line ) {
-        return line.contains( text, Qt::CaseInsensitive );
+    const auto markers = capture.markers();
+    return std::any_of( markers.begin(), markers.end(), []( const QString& text ) {
+        return text.contains( QLatin1String( "violation" ), Qt::CaseInsensitive );
     } );
 }
 
@@ -143,7 +112,7 @@ SCENARIO( "the permissions the README lists are enough to capture and to replay"
 
     GIVEN( "a server whose users capture and replay have only the README's permissions" )
     {
-        PermissionsServer server;
+        ConfiguredServer server( kConfig, withJetStream() );
         Publisher admin( server.url(), []( natsOptions* options ) {
             natsOptions_SetUserInfo( options, "admin", "admin" );
         } );
@@ -153,56 +122,62 @@ SCENARIO( "the permissions the README lists are enough to capture and to replay"
 
         WHEN( "capture captures orders.>" )
         {
-            SessionConfig config;
-            config.url = server.url();
-            config.subscriptions = { { QStringLiteral( "orders.>" ), {} } };
+            auto config = sessionConfig( server.url(), { "orders.>" } );
             logInAs( config, "capture" );
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             QStringList errors;
             QObject::connect( &session, &NatsSession::errorOccurred,
                               [ &errors ]( const QString& message ) { errors << message; } );
-            int connected = 0;
-            QObject::connect( &session, &NatsSession::connected, [ &connected ] { ++connected; } );
+            Transitions transitions( session );
             REQUIRE( session.start() );
-            REQUIRE( waitFor( [ & ] { return connected == 1; }, 10000 ) );
+            REQUIRE( waitFor( [ & ] { return transitions.count( Kind::Running ) == 1; }, 10000 ) );
             admin.publish( "orders.us", "live" );
 
             THEN( "the message is written, without any error" )
             {
                 REQUIRE( waitFor( [ & ] {
-                    return messageLines( readLines( session.filePath() ) ).size() == 1;
+                    return Capture::read( session.filePath() ).messages().size() == 1;
                 } ) );
                 session.stop();
                 REQUIRE( errors.isEmpty() );
-                REQUIRE_FALSE( anyOf( readLines( session.filePath() ), "violation" ) );
+                const auto capture = Capture::read( session.filePath() );
+                REQUIRE( capture.messageFields()
+                         == QList<LineFields>{ liveFields( "orders.us", "live" ) } );
+                REQUIRE( capture.unreadable().isEmpty() );
+                REQUIRE_FALSE( capture.hasMarkerStartingWith( "error: " ) );
+                REQUIRE_FALSE( hasViolation( capture ) );
             }
         }
 
         WHEN( "replay lists the streams and replays ORDERS" )
         {
-            SessionConfig config;
-            config.url = server.url();
-            config.replay.stream = QStringLiteral( "ORDERS" );
+            auto config = replayConfig( server.url(), "ORDERS" );
             logInAs( config, "replay" );
             QString error;
             const auto streams = nats_monitor::listStreams( config, &error );
-            NatsSession session( config );
+            NatsSession session( config, sessionTempRoot() );
             QStringList errors;
             QObject::connect( &session, &NatsSession::errorOccurred,
                               [ &errors ]( const QString& message ) { errors << message; } );
-            int completed = 0;
-            QObject::connect( &session, &NatsSession::completed, [ &completed ] { ++completed; } );
+            Transitions transitions( session );
             REQUIRE( session.start() );
-            REQUIRE( waitFor( [ & ] { return completed == 1; }, 20000 ) );
+            REQUIRE(
+                waitFor( [ & ] { return transitions.count( Kind::Completed ) == 1; }, 20000 ) );
 
             THEN( "ORDERS is listed, its messages are all written, and its consumer is gone" )
             {
                 INFO( error.toStdString() );
                 REQUIRE( streams == QStringList{ "ORDERS" } );
-                const auto lines = readLines( session.filePath() );
-                REQUIRE( messageLines( lines ).size() == 20000 );
+                const auto capture = Capture::read( session.filePath() );
+                QList<quint64> all;
+                for ( quint64 s = 1; s <= 20000; ++s ) {
+                    all << s;
+                }
+                REQUIRE( capture.sequences() == all );
+                REQUIRE( capture.unreadable().isEmpty() );
                 REQUIRE( errors.isEmpty() );
-                REQUIRE_FALSE( anyOf( lines, "violation" ) );
+                REQUIRE_FALSE( capture.hasMarkerStartingWith( "error: " ) );
+                REQUIRE_FALSE( hasViolation( capture ) );
                 REQUIRE( js.consumers( "ORDERS" ).isEmpty() );
             }
         }

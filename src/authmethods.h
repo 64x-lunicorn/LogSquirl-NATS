@@ -30,7 +30,7 @@
 
 #pragma once
 
-#include "natssession.h"
+#include "sessionconfig.h"
 
 #include <array>
 

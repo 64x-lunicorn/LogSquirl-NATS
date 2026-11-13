@@ -24,8 +24,6 @@
 
 #include "tempdirs.h"
 
-#include "plugin.h"
-
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
@@ -77,11 +75,6 @@ void removeTempDirs( const QString& root, const std::function<bool( qint64 )>& s
 }
 
 } // namespace
-
-QString tempRoot()
-{
-    return g_state.tempRoot.isEmpty() ? QDir::tempPath() : g_state.tempRoot;
-}
 
 QString tempDirTemplate( const QString& root )
 {

@@ -22,10 +22,30 @@
  * @brief A capture session: one NATS connection, its subscriptions, one file.
  *
  * The session writes every message it receives as one line (lineformat.h)
- * to a file in a temporary directory "logsquirl-nats-<pid>-XXXXXX"
- * (tempdirs.h), which LogSquirl opens with follow.  Connection events
- * (connected, disconnected, reconnected, errors, stopped) are written into
- * the file as marker lines too, and reported through the signals.
+ * to a file, which LogSquirl opens with follow, in a temporary directory
+ * "logsquirl-nats-<pid>-XXXXXX" (tempdirs.h) below the root its creator
+ * gives it.  Connection events (connected, disconnected, reconnected,
+ * errors, stopped) are written into the file as marker lines too, and
+ * reported through the signals.  What a session is set up with, its
+ * SessionConfig, is in sessionconfig.h.
+ *
+ * TRANSITIONS
+ * ───────────
+ * Each step of the session's life is one typed Transition (sessionstatus.h),
+ * emitted once, in the order of the file's markers:
+ *
+ *     start() ──► Connecting ──► Running(server) ◄──► Reconnecting
+ *                     │               │                   │
+ *                     └───────────────┴─────► Failed(why), Completed, Stopped
+ *
+ * Connecting when start() has opened the file; Running once connected and
+ * subscribed (its "connected" marker written), again after a reconnect;
+ * Reconnecting when the connection breaks.  The end comes from the
+ * connection thread's decision: Failed with the reason it could not start,
+ * connect or subscribe, or "connection closed"; Completed for a replay that
+ * caught up; Stopped from stop().  A Failed start() emits Failed alone.  An
+ * error that does not end the session (nats.c's, a file's) is
+ * errorOccurred() instead.  Nobody reads a state out of the texts.
  *
  * SUBSCRIPTIONS
  * ─────────────
@@ -41,19 +61,23 @@
  *
  * THREAD MODEL
  * ────────────
- * The session object lives on the GUI thread.  A writer thread of its own
- * connects (so start() never waits for the network), owns the file and
- * drains the queue of lines in batches, flushing after each.  nats.c calls
- * the message and connection callbacks on its own threads; they only
- * format a line and enqueue it.  Status reaches the session's signals
- * through queued calls, so they are always emitted on the GUI thread.
+ * The session object lives on the GUI thread.  A connection thread of its
+ * own connects and subscribes (so start() never waits for the network),
+ * waits for the end, and drains and closes.  Everything between a message
+ * and the file is the session's capture sink (capturesink.h), whose writer
+ * thread owns the file and writes the queued lines in batches, flushing
+ * after each, and rotates.  nats.c calls the message and connection
+ * callbacks on its own threads; they only format a line and hand it to the
+ * sink, never touching the file nor, in a live capture, waiting for the
+ * writer.  What the sink reports reaches the session's signals through
+ * queued calls, so they are always emitted on the GUI thread.
  *
  * DROPPED MESSAGES
  * ────────────────
  * No message is lost silently.  nats.c drops messages for a slow consumer
- * once a subscription's pending limits are reached; the session's own
- * queue drops new messages once it holds SessionConfig::queueLimit.  Each
- * drop is counted in exactly one marker line,
+ * once a subscription's pending limits are reached; the sink's queue drops
+ * new messages once it holds SessionConfig::queueLimit.  Each drop is
+ * counted in exactly one marker line,
  *
  *     <time> $NATS-MONITOR - <n> dropped=1234 (slow consumer)
  *     <time> $NATS-MONITOR - <n> dropped=87 (queue full)
@@ -76,13 +100,13 @@
  * ROTATION
  * ────────
  * A file grows to SessionConfig::maxFileBytes at most.  When the next line
- * would not fit, the writer closes the file there, at a line boundary, and
- * goes on in the next one: nats_<name>.log, nats_<name>.2.log,
- * nats_<name>.3.log, …, all in the session's temporary directory, and
- * reports it with fileRotated().  A line longer than the limit is written
- * whole, alone in its file.  Should the next file not open, the writer
- * keeps writing the current one, reports the error once and tries again
- * once that file has grown by the limit once more.  0 means no limit.
+ * would not fit, the sink's writer closes the file there, at a line
+ * boundary, and goes on in the next one: nats_<name>.log, nats_<name>.2.log,
+ * nats_<name>.3.log, …, all in the session's temporary directory, and the
+ * session reports it with fileRotated().  A line longer than the limit is
+ * written whole, alone in its file.  Should the next file not open, the
+ * writer keeps writing the current one, reports the error once and tries
+ * again once that file has grown by the limit once more.  0 means no limit.
  *
  * REPLAY
  * ──────
@@ -96,12 +120,13 @@
  * and the reply field "-" (the stream keeps no reply subject).
  *
  * Once the replay has caught up (the consumer has nothing more pending), it
- * either ends, with a "replay complete" marker and completed(), or, with
+ * either ends, with a "replay complete" marker and Completed, or, with
  * ReplayConfig::followLive, writes "caught up, following live" and goes on
  * with what the stream stores from then on, until stop().
  *
  * The writer, rotation and drop accounting are those of a live capture,
- * except that a full queue makes the delivery wait instead of dropping: the
+ * except that a full queue makes the delivery wait instead of dropping
+ * (the sink's CaptureSink::Mode::WaitForRoom): the
  * stream holds the messages, and JetStream's flow control holds the server
  * back meanwhile, so a replay of any size is written whole at the speed of
  * the writer.  stop() ends a replay at any point: what was queued is
@@ -110,13 +135,15 @@
  *
  * "The last N messages" with a filter subject reads the stream from its
  * start and writes the last N that match; without a filter it starts at
- * the stream sequence N before the end.
+ * the stream sequence N before the end.  Where a replay starts, what it
+ * skips and when it has caught up are planned from the stream's state
+ * before it subscribes (replay.h, planReplay() and ReplayStep).
  *
  * USAGE
  * ─────
  *   SessionConfig config;
  *   config.subscriptions = { { "orders.>", {} }, { "jobs.*", "workers" } };
- *   NatsSession session( config );
+ *   NatsSession session( config, root ); // its directory goes below root
  *   if ( session.start() )               // creates the file, connects in the background
  *       open( session.filePath() );      // LogSquirl follows this file
  *   session.stop();                      // closes the connection, keeps writing nothing more
@@ -125,9 +152,9 @@
 
 #pragma once
 
-#include "lineformat.h"
+#include "sessionconfig.h"
+#include "sessionstatus.h"
 
-#include <QList>
 #include <QObject>
 #include <QString>
 #include <QTemporaryDir>
@@ -136,133 +163,14 @@
 
 namespace nats_monitor {
 
-/// The server URL the dialog proposes.
-inline constexpr const char* kDefaultUrl = "nats://localhost:4222";
-
-/// A subscription's pending limits (natsSubscription_SetPendingLimits): how
-/// many messages, and how many bytes, nats.c holds for the session before
-/// it drops as a slow consumer.
-struct PendingLimits {
-    int messages = 0;
-    int bytes = 0;
-};
-
-/// Default for SessionConfig::pendingLimits: nats.c's own (65,536
-/// messages, 64 MiB) drop too early for a capture.
-inline constexpr PendingLimits kDefaultPendingLimits{ 1000000, 512 * 1024 * 1024 };
-
-/// Default for SessionConfig::queueLimit: two seconds at 50k msgs/s.
-inline constexpr int kDefaultQueueLimit = 100000;
-
-/// Bytes in a MiB, the unit the size limit is set in.
-inline constexpr qint64 kBytesPerMiB = 1024 * 1024;
-
-/// The size limit in MiB the dialog proposes, unless the user chose another.
-inline constexpr int kDefaultMaxFileMiB = 256;
-
-/// The default inactive threshold of a replay's consumer, in milliseconds:
-/// the server deletes it this long after its reader went away.
-inline constexpr int kDefaultInactiveThresholdMs = 5000;
-
-/// How a session proves who it is to the server.
-enum class AuthMethod {
-    None,         ///< No credentials.
-    UserPassword, ///< AuthConfig::user and the password in AuthConfig::secret.
-    Token,        ///< The token in AuthConfig::secret.
-    Credentials,  ///< A .creds file (user JWT and NKey seed) in AuthConfig::file.
-    NKey,         ///< A file with an NKey seed (SU…) in AuthConfig::file.
-};
-
-struct AuthConfig {
-    AuthMethod method = AuthMethod::None;
-    QString user;
-    QString secret; ///< The password or token: asked for at Start, never saved.
-    QString file;   ///< The .creds or NKey seed file.
-};
-
-struct TlsConfig {
-    /// Connect with TLS; a tls:// URL does so too.
-    bool enabled = false;
-    QString caFile;     ///< The CA(s) the server's certificate must be signed by (PEM).
-    QString certFile;   ///< A client certificate (PEM); with keyFile.
-    QString keyFile;    ///< Its private key (PEM).
-    QString serverName; ///< The name the server's certificate must be for; empty: the URL's host.
-    bool skipVerify = false; ///< Accept any server certificate: insecure.
-};
-
-/// A subject the session subscribes to.
-struct Subscription {
-    QString subject; ///< May contain the wildcards * and >.
-    /// The queue group to subscribe in; empty for none, the default.  The
-    /// server gives each message of a queue group to one member only, so a
-    /// session in a group takes messages away from the other members.
-    QString queueGroup;
-};
-
-/// @p subscriptions as the marker lines and the dialog name them:
-/// "orders.>, jobs.* (queue workers)".
-QString describeSubscriptions( const QList<Subscription>& subscriptions );
-
-/// Where a replay starts in its stream (REPLAY).
-enum class ReplayStart {
-    All,      ///< At the stream's first message.
-    Last,     ///< At the last ReplayConfig::lastMessages messages (that match the filter).
-    Sequence, ///< At the stream sequence ReplayConfig::sequence.
-    Time,     ///< At the first message stored at or after ReplayConfig::timeUs.
-};
-
-/// What a session replays from a JetStream stream (REPLAY).
-struct ReplayConfig {
-    /// The stream to replay; empty: no replay, the session subscribes.
-    QString stream;
-    /// Replay only the messages on this subject (wildcards allowed); empty
-    /// for all the stream's messages.
-    QString filterSubject;
-    ReplayStart start = ReplayStart::All;
-    quint64 lastMessages = 100; ///< For ReplayStart::Last; at least 1.
-    quint64 sequence = 1;       ///< For ReplayStart::Sequence; at least 1.
-    qint64 timeUs = 0;          ///< For ReplayStart::Time: microseconds since the epoch (UTC).
-    /// Once caught up, go on with the messages the stream stores from then
-    /// on, instead of ending.
-    bool followLive = false;
-    /// How long the server keeps the replay's consumer once nobody reads
-    /// it: after a crash, or a connection lost for good.  0 leaves it to
-    /// the server.
-    int inactiveThresholdMs = kDefaultInactiveThresholdMs;
-
-    bool enabled() const
-    {
-        return !stream.isEmpty();
-    }
-};
-
-struct SessionConfig {
-    /// One or more URLs, comma-separated: the seeds of a cluster.
-    QString url = QString::fromLatin1( kDefaultUrl );
-    /// What the session subscribes to: at least one subject, unless it
-    /// replays.
-    QList<Subscription> subscriptions;
-    /// The stream the session replays instead, if enabled(); the
-    /// subscriptions are not used then.
-    ReplayConfig replay;
-    AuthConfig auth;
-    TlsConfig tls;
-    FormatOptions format;
-    /// The subscription's pending limits; both must be > 0.
-    PendingLimits pendingLimits = kDefaultPendingLimits;
-    /// How many messages the session's own queue to the writer holds before
-    /// it drops new ones (queue full).  Must be > 0.
-    int queueLimit = kDefaultQueueLimit;
-    /// The size at which the capture goes on in a new file (ROTATION); 0
-    /// for no limit.
-    qint64 maxFileBytes = kDefaultMaxFileMiB * kBytesPerMiB;
-};
-
 class NatsSession : public QObject {
     Q_OBJECT
 
 public:
-    explicit NatsSession( const SessionConfig& config, QObject* parent = nullptr );
+    /// A session of @p config that writes into a new temporary directory
+    /// "logsquirl-nats-<pid>-XXXXXX" below @p tempRoot (tempdirs.h).  Its
+    /// creator says where: the plugin's root (Sessions), a test's own.
+    NatsSession( const SessionConfig& config, const QString& tempRoot, QObject* parent = nullptr );
 
     /// Stops the session without emitting any signal; removes the
     /// temporary directory unless preserveFile() was called.
@@ -273,26 +181,30 @@ public:
 
     /**
      * Create the file and start connecting and subscribing in the
-     * background.  No-op (true) if already running.
+     * background, a Connecting transition.  No-op (true) if already
+     * running.
      *
-     * Whether the connection succeeds is reported later: connected(), or
-     * errorOccurred() and finished().
+     * Whether the connection succeeds is reported later: Running, or
+     * Failed.
      *
-     * @return false, after errorOccurred(), if the session could not start
-     *         (no subject or a blank one, the file cannot be created).
+     * @return false, after a Failed transition, if the session could not
+     *         start (its config has a startProblem(), profiles.h, such as no
+     *         subject or a blank one; the file cannot be created).
      */
     bool start();
 
     /**
      * Drain the subscription and close the connection, write what was
-     * received before and a "stopped" marker, and close the file.  Waits
-     * for the writer thread: a round trip to the server and the writing of
+     * received before and a "stopped" marker, and close the file: a Stopped
+     * transition.  Waits for the connection thread and the sink's writer: a
+     * round trip to the server and the writing of
      * what nats.c held, at most about 15 s should the connection break
      * while draining.  No-op if not running.
      */
     void stop();
 
-    /// Whether the session runs: between start() and stop() or finished().
+    /// Whether the session runs: between start() and the transition that
+    /// ends it (Failed, Completed, Stopped).
     bool isRunning() const;
 
     /// The file the session writes; valid after start().  After a rotation
@@ -309,7 +221,7 @@ public:
     }
 
     /// How many messages nats.c has handed to the session since start(),
-    /// written or dropped from the session's queue: what a msgs/s is
+    /// written or dropped from its sink's queue: what a msgs/s is
     /// computed from.  Kept after stop().  Any thread may call it, though
     /// it is meant for the GUI thread.
     ///
@@ -336,43 +248,33 @@ public:
     };
 
 Q_SIGNALS:
-    /// Connected to @p url and subscribed: after start(), and again after
-    /// each reconnect.
-    void connected( const QString& url );
+    /// The session went a step on (TRANSITIONS): once for each step.
+    void transitioned( const Transition& transition );
 
-    /// A connection event, as written to the file (without the marker
-    /// line's fixed fields).
-    void statusChanged( const QString& text );
-
-    /// The session could not start, connect or subscribe, or nats.c
-    /// reported an error.
+    /// nats.c reported an error, or a file could not be written or
+    /// started, and the session runs on.  What ends it is a Failed
+    /// transition instead.
     void errorOccurred( const QString& message );
 
     /// The file reached the size limit: the capture goes on in @p path,
     /// the next file of the session (ROTATION).
     void fileRotated( const QString& path );
 
-    /// The session ended on its own (it could not connect, or the
-    /// connection was closed for good); not emitted by stop().
-    void finished();
-
-    /// A replay that does not follow live has caught up with its stream
-    /// and ended: the session no longer runs.  Not emitted by stop().
-    void completed();
-
 private:
     struct Worker;
 
-    /// The writer thread of start number @p generation has ended on its own.
-    void onWorkerFinished( int generation );
+    /// The sink of start number @p generation wrote the marker of
+    /// @p transition: emit it, unless the session ended meanwhile.
+    void onWorkerTransition( int generation, const Transition& transition );
 
-    /// The replay of start number @p generation is complete: its writer has ended.
-    void onWorkerCompleted( int generation );
+    /// The connection thread of start number @p generation has ended on its
+    /// own, as @p end says (Failed or Completed): its threads have ended.
+    void onWorkerEnded( int generation, const Transition& end );
 
-    /// The writer of start number @p generation goes on in @p path.
+    /// The sink of start number @p generation goes on in @p path.
     void onWorkerRotated( int generation, const QString& path );
 
-    /// Stop the writer, wait for it and keep its counts.
+    /// Stop the worker, wait for its threads and keep its counts.
     void releaseWorker();
 
     /// The running worker's counts, or those the last one left.

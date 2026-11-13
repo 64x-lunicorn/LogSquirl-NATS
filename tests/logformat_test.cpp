@@ -21,7 +21,8 @@
  * @file logformat_test.cpp
  * @brief BDD tests of the Log Format definition, formats/nats_log.json.
  *
- * The file is read as LogSquirl reads a Log Format: its regexes compiled
+ * The file is read as LogSquirl reads a Log Format (logformat.h, which the
+ * line reader of the other tests, capture.h, reads with too): its regexes compiled
  * with QRegularExpression and no options, its columns the named groups in
  * pattern order, its timestamp read with its timestamp formats by the rules
  * of LogSquirl's TimestampReader (src/logformat/src/timestampreader.cpp),
@@ -33,12 +34,10 @@
 #include <catch2/catch.hpp>
 
 #include "lineformat.h"
-#include "testconfig.h"
+#include "logformat.h"
 
 #include <QDateTime>
-#include <QFile>
 #include <QJsonArray>
-#include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
 #include <QTimeZone>
@@ -49,87 +48,11 @@
 using nats_monitor::formatLine;
 using nats_monitor::formatMarker;
 using nats_monitor::Message;
+using nats_test::LogFormat;
+using nats_test::matchLine;
+using nats_test::namedGroups;
 
 namespace {
-
-/// The one format the file defines, as LogSquirl reads it.
-struct LogFormat {
-    QString name;
-    QJsonObject definition;
-    QStringList patterns;
-    QString timestampField = "timestamp"; // lnav's defaults, as LogSquirl's
-    QString bodyField = "body";
-    QStringList timestampFormats;
-};
-
-LogFormat loadFormat()
-{
-    QFile file( QStringLiteral( LOGSQUIRL_NATS_TEST_SOURCE_DIR "/formats/nats_log.json" ) );
-    REQUIRE( file.open( QIODevice::ReadOnly ) );
-    QJsonParseError error;
-    const auto document = QJsonDocument::fromJson( file.readAll(), &error );
-    INFO( error.errorString().toStdString() );
-    REQUIRE( document.isObject() );
-
-    LogFormat format;
-    const auto root = document.object();
-    for ( auto it = root.begin(); it != root.end(); ++it ) {
-        if ( !it.key().startsWith( '$' ) ) {
-            REQUIRE( format.name.isEmpty() ); // one format in the file
-            format.name = it.key();
-            format.definition = it.value().toObject();
-        }
-    }
-    REQUIRE_FALSE( format.name.isEmpty() );
-
-    const auto& def = format.definition;
-    const auto regex = def.value( "regex" ).toObject();
-    for ( auto it = regex.begin(); it != regex.end(); ++it ) {
-        format.patterns << it.value().toObject().value( "pattern" ).toString();
-    }
-    if ( def.contains( "timestamp-field" ) ) {
-        format.timestampField = def.value( "timestamp-field" ).toString();
-    }
-    if ( def.contains( "body-field" ) ) {
-        format.bodyField = def.value( "body-field" ).toString();
-    }
-    const auto tsFormat = def.value( "timestamp-format" );
-    if ( tsFormat.isArray() ) {
-        for ( const auto& f : tsFormat.toArray() ) {
-            format.timestampFormats << f.toString();
-        }
-    }
-    else if ( tsFormat.isString() ) {
-        format.timestampFormats << tsFormat.toString();
-    }
-    return format;
-}
-
-/// The format's match of @p line, the first of its patterns that matches.
-QRegularExpressionMatch matchLine( const LogFormat& format, const QString& line )
-{
-    for ( const auto& pattern : format.patterns ) {
-        const QRegularExpression re( pattern ); // no options, as LogSquirl's
-        auto match = re.match( line );
-        if ( match.hasMatch() ) {
-            return match;
-        }
-    }
-    return {};
-}
-
-/// The named groups of @p pattern, by the rule LogSquirl derives the
-/// column order with.
-QStringList namedGroups( const QString& pattern )
-{
-    static const QRegularExpression namedGroupRe( R"(\(\?<([a-zA-Z_]\w*)>)" );
-    QStringList names;
-    auto it = namedGroupRe.globalMatch( pattern );
-    while ( it.hasNext() ) {
-        names << it.next().captured( 1 );
-    }
-    return names;
-}
 
 // ── LogSquirl's TimestampReader, ported ────────────────────────────────────
 //
@@ -394,7 +317,7 @@ void requireFields( const LogFormat& format, const QByteArray& line, const Field
 
 SCENARIO( "the Log Format defines the columns of a NATS line", "[logformat]" )
 {
-    const auto format = loadFormat();
+    const auto format = nats_test::loadLogFormat();
 
     THEN( "its patterns compile as LogSquirl compiles them" )
     {
@@ -446,7 +369,7 @@ SCENARIO( "the Log Format defines the columns of a NATS line", "[logformat]" )
 
 SCENARIO( "the Log Format reads every line the formatter writes", "[logformat]" )
 {
-    const auto format = loadFormat();
+    const auto format = nats_test::loadLogFormat();
     const QString ts = "2026-11-11 10:00:00.123456Z";
 
     GIVEN( "a JSON message with a reply subject" )
@@ -637,7 +560,7 @@ SCENARIO( "the Log Format reads every line the formatter writes", "[logformat]" 
 
 SCENARIO( "the Log Format reads the receive time", "[logformat]" )
 {
-    const auto format = loadFormat();
+    const auto format = nats_test::loadLogFormat();
 
     GIVEN( "lines received at different times" )
     {
@@ -669,7 +592,7 @@ SCENARIO( "the Log Format reads the receive time", "[logformat]" )
 
 SCENARIO( "the Log Format reads no line of another log", "[logformat]" )
 {
-    const auto format = loadFormat();
+    const auto format = nats_test::loadLogFormat();
 
     GIVEN( "lines of other formats with a similar start" )
     {

@@ -34,23 +34,27 @@
 
 #include <catch2/catch.hpp>
 
+#include "capture.h"
 #include "natsserver.h"
 #include "natssession.h"
 #include "sessiontest.h"
 #include "testconfig.h"
 
 #include <QFile>
-#include <QRegularExpression>
-#include <QTemporaryDir>
 
 using nats_monitor::AuthMethod;
 using nats_monitor::NatsSession;
 using nats_monitor::SessionConfig;
+using nats_test::Capture;
+using nats_test::ConfiguredServer;
+using nats_test::liveFields;
 using nats_test::NatsServer;
-using nats_test::NatsServerOptions;
 using nats_test::Publisher;
 using nats_test::readLines;
+using nats_test::sessionConfig;
+using nats_test::Transitions;
 using nats_test::waitFor;
+using Kind = nats_monitor::Transition::Kind;
 
 namespace {
 
@@ -64,49 +68,6 @@ QString fixture( const QString& path )
     REQUIRE( file.open( QIODevice::ReadOnly | QIODevice::Text ) );
     return QString::fromUtf8( file.readAll() ).trimmed();
 }
-
-/// A nats-server started with the configuration @p text, written to a
-/// temporary file; or with the fixture configuration file @p path.
-class ConfiguredServer {
-public:
-    static ConfiguredServer withText( const QString& text )
-    {
-        return ConfiguredServer( text, {} );
-    }
-
-    static ConfiguredServer withFile( const QString& path )
-    {
-        return ConfiguredServer( {}, path );
-    }
-
-    QString url() const
-    {
-        return server_->url();
-    }
-
-    int port() const
-    {
-        return server_->port();
-    }
-
-private:
-    ConfiguredServer( const QString& text, const QString& path )
-    {
-        REQUIRE( dir_.isValid() );
-        NatsServerOptions options;
-        options.configFile = path;
-        if ( path.isEmpty() ) {
-            options.configFile = dir_.filePath( "server.conf" );
-            QFile file( options.configFile );
-            REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::Text ) );
-            file.write( text.toUtf8() );
-        }
-        server_ = std::make_unique<NatsServer>( options );
-    }
-
-    QTemporaryDir dir_;
-    std::unique_ptr<NatsServer> server_;
-};
 
 /// The server's TLS block; with @p verifyClients it requires a client
 /// certificate signed by the test CA.
@@ -124,41 +85,50 @@ QString tlsBlock( bool verifyClients )
                                     : QString() );
 }
 
-SessionConfig configFor( const QString& url, const QString& subject )
-{
-    SessionConfig config;
-    config.url = url;
-    config.subscriptions = { { subject, {} } };
-    return config;
-}
-
 /// A session's run: started, and either subscribed or failed.
 struct Run {
     explicit Run( const SessionConfig& config )
-        : session( config )
+        : session( config, nats_test::sessionTempRoot() )
+        , transitions( session )
     {
         QObject::connect( &session, &NatsSession::errorOccurred,
                           [ this ]( const QString& message ) { errors << message; } );
-        QObject::connect( &session, &NatsSession::finished, [ this ] { finished = true; } );
         REQUIRE( session.start() );
-        REQUIRE( waitFor(
-            [ this ] {
-                return finished
-                       || readLines( session.filePath() ).join( '\n' ).contains( " connected to " );
-            },
-            15000 ) );
+        REQUIRE( waitFor( [ this ] { return finished() || connected(); }, 15000 ) );
+    }
+
+    /// Whether the session failed: it reported why.
+    bool finished() const
+    {
+        return transitions.count( Kind::Failed ) > 0;
+    }
+
+    /// Whether the file has the connected marker.
+    bool connected() const
+    {
+        return Capture::read( session.filePath() ).hasMarkerStartingWith( "connected to " );
     }
 
     bool subscribed() const
     {
-        return !finished
-               && readLines( session.filePath() ).join( '\n' ).contains( " connected to " );
+        return !finished() && connected();
     }
 
-    /// The error reported, which the dialog shows; empty if none.
+    /// The file, read with the line reader.
+    Capture capture() const
+    {
+        return Capture::read( session.filePath() );
+    }
+
+    /// The errors reported and why it failed, as the tile shows them; empty
+    /// if none.
     QString error() const
     {
-        return errors.join( '\n' );
+        auto all = errors;
+        if ( finished() ) {
+            all << transitions.last( Kind::Failed ).detail;
+        }
+        return all.join( '\n' );
     }
 
     /// Whether a message published on @p subject with @p configure reaches the file.
@@ -169,14 +139,15 @@ struct Run {
             publisher.publish( "auth.test", "hello" );
         }
         return waitFor( [ this ] {
-            const auto lines = readLines( session.filePath() );
-            return !lines.isEmpty() && lines.last().endsWith( " auth.test - 5 hello" );
+            const auto capture = Capture::read( session.filePath() );
+            return !capture.isEmpty()
+                   && capture.last().fields() == liveFields( "auth.test", "hello" );
         } );
     }
 
     NatsSession session;
+    Transitions transitions;
     QStringList errors;
-    bool finished = false;
 };
 
 /// That the session of @p run is subscribed.
@@ -190,7 +161,7 @@ void requireSubscribed( const Run& run )
 void requireError( const Run& run, const QString& text )
 {
     INFO( "error: " << run.error().toStdString() );
-    REQUIRE( run.finished );
+    REQUIRE( run.finished() );
     REQUIRE( run.error().contains( text ) );
 }
 
@@ -220,9 +191,8 @@ SCENARIO( "a session authenticates with a user and password", "[server][auth]" )
 
     GIVEN( "a server that requires the user alice with the password s3cret" )
     {
-        auto server
-            = ConfiguredServer::withText( "authorization { user: alice, password: s3cret }\n" );
-        auto config = configFor( server.url(), "auth.>" );
+        ConfiguredServer server( "authorization { user: alice, password: s3cret }\n" );
+        auto config = sessionConfig( server.url(), { "auth.>" } );
         config.auth.method = AuthMethod::UserPassword;
         config.auth.user = "alice";
 
@@ -247,9 +217,9 @@ SCENARIO( "a session authenticates with a user and password", "[server][auth]" )
             {
                 requireError( run, "the server refused the user name or password" );
                 requireError( run, "Authorization Violation" );
-                REQUIRE( readLines( run.session.filePath() )
-                             .join( '\n' )
-                             .contains( "the server refused the user name or password" ) );
+                REQUIRE( run.capture().hasMarkerStartingWith(
+                    "connection to " + server.url()
+                    + " failed: the server refused the user name or password" ) );
             }
         }
 
@@ -272,8 +242,8 @@ SCENARIO( "a session authenticates with a token", "[server][auth]" )
 
     GIVEN( "a server that requires the token t0ken" )
     {
-        auto server = ConfiguredServer::withText( "authorization { token: t0ken }\n" );
-        auto config = configFor( server.url(), "auth.>" );
+        ConfiguredServer server( "authorization { token: t0ken }\n" );
+        auto config = sessionConfig( server.url(), { "auth.>" } );
         config.auth.method = AuthMethod::Token;
 
         WHEN( "a session starts with it" )
@@ -310,9 +280,9 @@ SCENARIO( "a session authenticates with an NKey seed file", "[server][auth]" )
     GIVEN( "a server that knows the fixture NKey user" )
     {
         const auto publicKey = fixture( kAuth + "/nkey.pub" );
-        auto server = ConfiguredServer::withText(
+        ConfiguredServer server(
             QStringLiteral( "authorization { users: [ { nkey: %1 } ] }\n" ).arg( publicKey ) );
-        auto config = configFor( server.url(), "auth.>" );
+        auto config = sessionConfig( server.url(), { "auth.>" } );
         config.auth.method = AuthMethod::NKey;
 
         WHEN( "a session starts with its seed file" )
@@ -360,8 +330,8 @@ SCENARIO( "a session authenticates with a .creds file", "[server][auth]" )
 
     GIVEN( "a server in operator mode with the fixture operator and account" )
     {
-        auto server = ConfiguredServer::withFile( kAuth + "/operator.conf" );
-        auto config = configFor( server.url(), "auth.>" );
+        ConfiguredServer server( fixture( kAuth + "/operator.conf" ) );
+        auto config = sessionConfig( server.url(), { "auth.>" } );
         config.auth.method = AuthMethod::Credentials;
 
         WHEN( "a session starts with the user's .creds file" )
@@ -409,8 +379,8 @@ SCENARIO( "a session connects over TLS", "[server][auth][tls]" )
 
     GIVEN( "a server that requires TLS, without client certificates" )
     {
-        auto server = ConfiguredServer::withText( tlsBlock( false ) );
-        auto config = configFor( server.url(), "auth.>" );
+        ConfiguredServer server( tlsBlock( false ) );
+        auto config = sessionConfig( server.url(), { "auth.>" } );
         config.tls.enabled = true;
 
         WHEN( "a session trusts the test CA" )
@@ -487,8 +457,8 @@ SCENARIO( "a session connects over TLS", "[server][auth][tls]" )
 
     GIVEN( "a server that requires a client certificate signed by the test CA" )
     {
-        auto server = ConfiguredServer::withText( tlsBlock( true ) );
-        auto config = configFor( server.url(), "auth.>" );
+        ConfiguredServer server( tlsBlock( true ) );
+        auto config = sessionConfig( server.url(), { "auth.>" } );
         config.tls.enabled = true;
         config.tls.caFile = kCerts + "/ca-cert.pem";
 
@@ -559,14 +529,13 @@ SCENARIO( "a session connects to one of several server URLs", "[server][auth]" )
 
         WHEN( "a session starts with both, comma-separated" )
         {
-            Run run( configFor( urls, "auth.>" ) );
+            Run run( sessionConfig( urls, { "auth.>" } ) );
 
             THEN( "it connects to the running one and captures what is published" )
             {
                 requireSubscribed( run );
-                REQUIRE( readLines( run.session.filePath() )
-                             .first()
-                             .contains( " connected to " + server.url() ) );
+                REQUIRE( run.capture().first().markerText()
+                         == "connected to " + server.url() + ", subscribed to auth.>" );
                 REQUIRE( run.captures( server.url(), {} ) );
             }
         }
@@ -580,37 +549,42 @@ SCENARIO( "a password in a session's URL is never written to its file or its err
 
     GIVEN( "a server that requires the user alice with the password s3cret" )
     {
-        auto server
-            = ConfiguredServer::withText( "authorization { user: alice, password: s3cret }\n" );
+        ConfiguredServer server( "authorization { user: alice, password: s3cret }\n" );
+        const auto redacted = QString( server.url() ).replace( "nats://", "nats://alice:***@" );
 
         WHEN( "a session starts on a URL with a wrong password in it" )
         {
-            Run run(
-                configFor( QString( server.url() ).replace( "nats://", "nats://alice:wr0ng-pw@" ),
-                           "auth.>" ) );
+            Run run( sessionConfig(
+                QString( server.url() ).replace( "nats://", "nats://alice:wr0ng-pw@" ),
+                { "auth.>" } ) );
 
             THEN( "it fails, and neither its error nor its file shows the password" )
             {
-                REQUIRE( run.finished );
+                REQUIRE( run.finished() );
+                // The secret is nowhere: not in any field, so not in the text.
                 const auto everything
                     = run.error() + '\n' + readLines( run.session.filePath() ).join( '\n' );
                 INFO( everything.toStdString() );
-                REQUIRE( everything.contains( "connection to nats://alice:***@" ) );
+                REQUIRE( run.capture().hasMarkerStartingWith( "connection to " + redacted
+                                                              + " failed: " ) );
+                REQUIRE( run.error().contains( "connection to " + redacted ) );
                 REQUIRE_FALSE( everything.contains( "wr0ng-pw" ) );
             }
         }
 
         WHEN( "a session starts on a URL with the right password in it" )
         {
-            Run run( configFor(
-                QString( server.url() ).replace( "nats://", "nats://alice:s3cret@" ), "auth.>" ) );
+            Run run(
+                sessionConfig( QString( server.url() ).replace( "nats://", "nats://alice:s3cret@" ),
+                               { "auth.>" } ) );
 
             THEN( "it runs, and its connected marker does not show the password" )
             {
                 requireSubscribed( run );
                 const auto lines = readLines( run.session.filePath() ).join( '\n' );
                 INFO( lines.toStdString() );
-                REQUIRE( lines.contains( "connected to nats://alice:***@" ) );
+                REQUIRE( run.capture().first().markerText()
+                         == "connected to " + redacted + ", subscribed to auth.>" );
                 REQUIRE_FALSE( lines.contains( "s3cret" ) );
             }
         }
